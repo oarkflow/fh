@@ -384,7 +384,7 @@ func HasHeaderToken(value []byte, token string) bool {
 
 func hasHeaderToken(value []byte, token string) bool {
 	for len(value) > 0 {
-		end := indexByte(value, ',')
+		end := bytes.IndexByte(value, ',')
 		var part []byte
 		if end < 0 {
 			part, value = value, nil

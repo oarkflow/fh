@@ -616,27 +616,65 @@ func parseFormBytes(data []byte) (Form, error) {
 		return Form{Values: vals, Tree: tree}, nil
 	}
 	pairs := 0
-	start := 0
-	for start <= len(data) {
-		end := bytes.IndexByte(data[start:], '&')
-		if end < 0 {
-			end = len(data)
-		} else {
-			end += start
+	n := len(data)
+	i := 0
+	for i < n {
+		if data[i] == '&' {
+			i++
+			continue
 		}
+		start := i
+		for i < n && data[i] != '&' {
+			i++
+		}
+		end := i
 		if end > start {
 			pairs++
 			if pairs > opt.MaxFormPairs {
 				return Form{}, fmt.Errorf("form: too many pairs > %d", opt.MaxFormPairs)
 			}
-			if err := parseFormPair(data[start:end], vals, tree, opt); err != nil {
-				return Form{}, err
+
+			eq := -1
+			for j := start; j < end; j++ {
+				if data[j] == '=' {
+					eq = j
+					break
+				}
+			}
+			var rawK, rawV []byte
+			if eq >= 0 {
+				rawK, rawV = data[start:eq], data[eq+1:end]
+			} else {
+				rawK, rawV = data[start:end], nil
+			}
+			if len(rawK) > opt.MaxFormKeyBytes {
+				return Form{}, fmt.Errorf("form: key too large > %d bytes", opt.MaxFormKeyBytes)
+			}
+			if len(rawV) > opt.MaxFormValueBytes {
+				return Form{}, fmt.Errorf("form: value too large > %d bytes", opt.MaxFormValueBytes)
+			}
+			key := urlDecode(rawK)
+			val := urlDecode(rawV)
+			if key == "" {
+				continue
+			}
+			vals.Add(key, val)
+			hasBracket := bytes.IndexByte(s2b(key), '[') >= 0 || bytes.IndexByte(s2b(key), ']') >= 0
+			if hasBracket {
+				path := parseBracketPath(key)
+				if len(path) > opt.MaxFormDepth {
+					return Form{}, fmt.Errorf("form: nesting too deep > %d", opt.MaxFormDepth)
+				}
+				insertNested(tree, path, val)
+			} else {
+				insertFlat(tree, key, val)
 			}
 		}
-		if end == len(data) {
+
+		if i >= n {
 			break
 		}
-		start = end + 1
+		i++
 	}
 	return Form{Values: vals, Tree: collapseArrays(tree).(map[string]any)}, nil
 }
@@ -655,19 +693,14 @@ func parseFormPair(pair []byte, vals url.Values, tree map[string]any, opt CodecO
 	if len(rawV) > opt.MaxFormValueBytes {
 		return fmt.Errorf("form: value too large > %d bytes", opt.MaxFormValueBytes)
 	}
-	key, err := url.QueryUnescape(string(rawK))
-	if err != nil {
-		return fmt.Errorf("form: bad key escape: %w", err)
-	}
-	val, err := url.QueryUnescape(string(rawV))
-	if err != nil {
-		return fmt.Errorf("form: bad value escape for %q: %w", key, err)
-	}
+	key := urlDecode(rawK)
+	val := urlDecode(rawV)
 	if key == "" {
 		return nil
 	}
 	vals.Add(key, val)
-	if strings.ContainsAny(key, "[]") {
+	hasBracket := bytes.IndexByte(s2b(key), '[') >= 0 || bytes.IndexByte(s2b(key), ']') >= 0
+	if hasBracket {
 		path := parseBracketPath(key)
 		if len(path) > opt.MaxFormDepth {
 			return fmt.Errorf("form: nesting too deep > %d", opt.MaxFormDepth)

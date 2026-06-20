@@ -207,29 +207,64 @@ func (c *Ctx) Query(name string) string {
 func (c *Ctx) parseQuery() {
 	c.queryParsed = true
 	uri := c.Header.URI
-	qi := indexByte(uri, '?')
+	n := len(uri)
+	if n == 0 {
+		return
+	}
+	// Find '?' in a single pass along with parsing
+	qi := -1
+	for i := 0; i < n; i++ {
+		if uri[i] == '?' {
+			qi = i
+			break
+		}
+	}
 	if qi < 0 {
 		return
 	}
 	qs := uri[qi+1:]
-	for len(qs) > 0 {
-		var pair []byte
-		if i := indexByte(qs, '&'); i >= 0 {
-			pair, qs = qs[:i], qs[i+1:]
-		} else {
-			pair, qs = qs, nil
+	nq := len(qs)
+	if nq == 0 {
+		return
+	}
+	i := 0
+	for i < nq {
+		if qs[i] == '&' {
+			i++
+			continue
 		}
-		key, value := pair, []byte(nil)
-		if i := indexByte(pair, '='); i >= 0 {
-			key, value = pair[:i], pair[i+1:]
+		start := i
+		for i < nq && qs[i] != '&' {
+			i++
 		}
-		k, v := urlDecode(key), urlDecode(value)
-		if c.qcount < len(c.queryParams) {
-			c.queryParams[c.qcount] = Param{Key: k, Value: v}
-		} else {
-			c.queryParams = append(c.queryParams, Param{Key: k, Value: v})
+		pair := qs[start:i]
+		if len(pair) > 0 {
+			eq := -1
+			for j := 0; j < len(pair); j++ {
+				if pair[j] == '=' {
+					eq = j
+					break
+				}
+			}
+			var key, value []byte
+			if eq >= 0 {
+				key, value = pair[:eq], pair[eq+1:]
+			} else {
+				key, value = pair, nil
+			}
+			k := urlDecode(key)
+			v := urlDecode(value)
+			if c.qcount < len(c.queryParams) {
+				c.queryParams[c.qcount] = Param{Key: k, Value: v}
+			} else {
+				c.queryParams = append(c.queryParams, Param{Key: k, Value: v})
+			}
+			c.qcount++
 		}
-		c.qcount++
+		if i >= nq {
+			break
+		}
+		i++ // skip '&'
 	}
 }
 
@@ -242,7 +277,7 @@ func (c *Ctx) Body() []byte { return c.body }
 // Target should be *map[string]any or *any.
 func (c *Ctx) QueryParser(v any) error {
 	uri := c.Header.URI
-	qi := indexByte(uri, '?')
+	qi := bytes.IndexByte(uri, '?')
 	if qi < 0 {
 		return nil
 	}
@@ -688,19 +723,28 @@ func indexByte(b []byte, c byte) int {
 }
 
 func urlDecode(b []byte) string {
-	if indexByte(b, '%') < 0 && indexByte(b, '+') < 0 {
+	n := len(b)
+	hasSpecial := false
+	for i := 0; i < n; i++ {
+		c := b[i]
+		if c == '%' || c == '+' {
+			hasSpecial = true
+			break
+		}
+	}
+	if !hasSpecial {
 		return b2s(b)
 	}
-	out := make([]byte, 0, len(b))
-	for i := 0; i < len(b); {
+	out := make([]byte, 0, n)
+	for i := 0; i < n; {
 		switch b[i] {
 		case '+':
 			out = append(out, ' ')
 			i++
 		case '%':
-			if i+2 < len(b) {
-				h := unhex(b[i+1])
-				l := unhex(b[i+2])
+			if i+2 < n {
+				h := unhexTable[b[i+1]]
+				l := unhexTable[b[i+2]]
 				if h >= 0 && l >= 0 {
 					out = append(out, byte(h<<4|l))
 					i += 3
@@ -717,18 +761,21 @@ func urlDecode(b []byte) string {
 	return string(out)
 }
 
-func unhex(c byte) int {
-	switch {
-	case c >= '0' && c <= '9':
-		return int(c - '0')
-	case c >= 'a' && c <= 'f':
-		return int(c-'a') + 10
-	case c >= 'A' && c <= 'F':
-		return int(c-'A') + 10
+var unhexTable [256]int8
+
+func init() {
+	for i := 0; i < 256; i++ {
+		unhexTable[i] = -1
 	}
-	return -1
+	for i := '0'; i <= '9'; i++ {
+		unhexTable[i] = int8(i - '0')
+	}
+	for i := 'a'; i <= 'f'; i++ {
+		unhexTable[i] = int8(i - 'a' + 10)
+	}
+	for i := 'A'; i <= 'F'; i++ {
+		unhexTable[i] = int8(i - 'A' + 10)
+	}
 }
-
-
 
 var jsonCT = []byte("application/json")
