@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Event WebSocket Chat</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 16px; }
+    #log { border: 1px solid #ddd; min-height: 280px; padding: 12px; overflow: auto; white-space: pre-wrap; }
+    form { display: flex; gap: 8px; margin-top: 12px; }
+    input { flex: 1; padding: 10px; }
+    button { padding: 10px 14px; }
+    .status { margin-bottom: 10px; color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Event WebSocket Chat</h1>
+  <div class="status" id="status">Disconnected</div>
+  <div id="log"></div>
+  <form id="form">
+    <input id="message" placeholder="Type message" autocomplete="off" />
+    <button>Send</button>
+  </form>
+  <script type="module">
+    import { EventSocket } from './eventws_full.js';
+    const status = document.querySelector('#status');
+    const log = document.querySelector('#log');
+    const form = document.querySelector('#form');
+    const input = document.querySelector('#message');
+    function append(...args) { log.textContent += args.map((v) => typeof v === 'string' ? v : JSON.stringify(v)).join(' ') + '\n'; log.scrollTop = log.scrollHeight; }
+    const ws = new EventSocket({ url: 'ws://localhost:3000/ws', protocols: 'eventws.v1', reconnect: true, debug: true });
+    ws.onOpen(async () => { status.textContent = 'Connected'; append('connected'); try { await ws.subscribeAck('tenant:acme', 'chat'); append('subscribed tenant:acme / chat'); } catch (err) { append('subscribe failed', String(err)); } });
+    ws.onClose((ev) => { status.textContent = `Disconnected (${ev.code})`; append('closed', ev.code, ev.reason); });
+    ws.onError((err) => append('error', String(err)));
+    ws.on('hello', (payload) => append('hello', payload));
+    ws.on('presence', (payload) => append('presence', payload));
+    ws.on('chat.message', (payload) => append('chat.message', payload));
+    form.addEventListener('submit', async (ev) => { ev.preventDefault(); const text = input.value.trim(); if (!text) return; input.value = ''; try { const ack = await ws.request('chat.message', { text }, { topic: 'tenant:acme', channel: 'chat' }); append('ack', ack.payload); } catch (err) { append('send failed', String(err)); } });
+    ws.connect().catch((err) => append('connect failed', String(err)));
+  </script>
+</body>
+</html>
