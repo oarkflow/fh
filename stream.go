@@ -2,6 +2,7 @@ package fasthttp
 
 import (
 	"io"
+	"net"
 	"time"
 )
 
@@ -96,6 +97,16 @@ func (c *Ctx) beginStream() (*StreamWriter, error) {
 	if chunked {
 		buf = append(buf, "Transfer-Encoding: chunked\r\n"...)
 	}
+	if len(c.responseTrailers) > 0 {
+		buf = append(buf, "Trailer: "...)
+		for i, t := range c.responseTrailers {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, t.Key...)
+		}
+		buf = append(buf, '\r', '\n')
+	}
 	if c.forceClose {
 		buf = append(buf, "Connection: close\r\n"...)
 	} else {
@@ -153,7 +164,21 @@ func (w *StreamWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (w *StreamWriter) Flush() error { return nil }
+func (w *StreamWriter) Flush() error {
+	if w.closed || w.discard || w.buffered != nil {
+		return nil
+	}
+	if w.h2 {
+		return nil
+	}
+	if tc, ok := w.ctx.conn.(*net.TCPConn); ok {
+		if err := tc.SetNoDelay(false); err != nil {
+			return err
+		}
+		return tc.SetNoDelay(true)
+	}
+	return nil
+}
 
 func (w *StreamWriter) Close() error {
 	if w.closed {
@@ -170,7 +195,16 @@ func (w *StreamWriter) Close() error {
 		_ = w.ctx.conn.SetWriteDeadline(time.Now().Add(timeout))
 	}
 	if w.chunked {
-		return writeAll(w.ctx.conn, []byte("0\r\n\r\n"))
+		buf := make([]byte, 0, 256)
+		buf = append(buf, "0\r\n"...)
+		for _, t := range w.ctx.responseTrailers {
+			buf = append(buf, t.Key...)
+			buf = append(buf, ':', ' ')
+			buf = append(buf, t.Value...)
+			buf = append(buf, '\r', '\n')
+		}
+		buf = append(buf, '\r', '\n')
+		return writeAll(w.ctx.conn, buf)
 	}
 	return nil
 }

@@ -104,9 +104,10 @@ type h2Stream struct {
 }
 
 type h2Response struct {
-	conn   *h2Conn
-	stream *h2Stream
-	ended  atomic.Bool
+	conn     *h2Conn
+	stream   *h2Stream
+	ended    atomic.Bool
+	trailers []Header
 }
 
 func newH2Conn(app *App, conn net.Conn) *h2Conn {
@@ -647,9 +648,10 @@ func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
 		}
 	}
 	c.responded = true
+	r.trailers = append([]Header(nil), c.responseTrailers...)
 	bodyAllowed := responseBodyAllowed(c.status) && !bytesEqualFold(c.Header.Method, MethodHEAD)
 	length := len(body)
-	end := !bodyAllowed || length == 0
+	end := (!bodyAllowed || length == 0) && len(r.trailers) == 0
 	var contentLength *int
 	if responseBodyAllowed(c.status) {
 		contentLength = &length
@@ -662,14 +664,21 @@ func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
 		r.finish()
 		return nil
 	}
-	return r.writeData(body, true)
+	if len(r.trailers) == 0 {
+		return r.writeData(body, true)
+	}
+	if err := r.writeData(body, false); err != nil {
+		return err
+	}
+	return r.sendTrailers()
 }
 
 func (r *h2Response) beginStream(c *Ctx) error {
 	if r.ended.Load() {
 		return net.ErrClosed
 	}
-	end := !responseBodyAllowed(c.status) || bytesEqualFold(c.Header.Method, MethodHEAD)
+	r.trailers = c.responseTrailers
+	end := (!responseBodyAllowed(c.status) || bytesEqualFold(c.Header.Method, MethodHEAD)) && len(r.trailers) == 0
 	if err := r.conn.sendResponseHeaders(r.stream, c, nil, end); err != nil {
 		r.abort(h2InternalError)
 		return err
@@ -684,13 +693,30 @@ func (r *h2Response) writeData(data []byte, end bool) error {
 	if r.ended.Load() {
 		return nil
 	}
-	if err := r.conn.sendData(r.stream, data, end); err != nil {
+	hasTrailers := end && len(r.trailers) > 0
+	if err := r.conn.sendData(r.stream, data, end && !hasTrailers); err != nil {
 		r.abort(h2InternalError)
 		return err
+	}
+	if hasTrailers {
+		return r.sendTrailers()
 	}
 	if end {
 		r.finish()
 	}
+	return nil
+}
+
+func (r *h2Response) sendTrailers() error {
+	if len(r.trailers) == 0 {
+		r.finish()
+		return nil
+	}
+	if err := r.conn.sendTrailers(r.stream, r.trailers); err != nil {
+		r.abort(h2InternalError)
+		return err
+	}
+	r.finish()
 	return nil
 }
 
@@ -776,6 +802,23 @@ func (h *h2Conn) writeHeaderBlockLocked(streamID uint32, flags uint8, block []by
 		}
 	}
 	return nil
+}
+
+func (h *h2Conn) sendTrailers(s *h2Stream, trailers []Header) error {
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+	h.encBuf.Reset()
+	for _, t := range trailers {
+		name := strings.ToLower(string(t.Key))
+		if name == "trailer" || strings.HasPrefix(name, ":") {
+			continue
+		}
+		if err := h.enc.WriteField(hpack.HeaderField{Name: name, Value: string(t.Value)}); err != nil {
+			return err
+		}
+	}
+	block := h.encBuf.Bytes()
+	return h.writeHeaderBlockLocked(s.id, h2FlagEndStream|h2FlagEndHeaders, block)
 }
 
 func (h *h2Conn) sendData(s *h2Stream, data []byte, end bool) error {

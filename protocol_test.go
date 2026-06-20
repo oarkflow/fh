@@ -217,6 +217,82 @@ func TestWebSocketUpgradeAndEcho(t *testing.T) {
 	}
 }
 
+// WSText is the WebSocket text message opcode, used by TestWebSocketUpgradeAndEcho.
+const WSText = 0x1
+
+// WSConn is a minimal WebSocket connection used by TestWebSocketUpgradeAndEcho.
+type WSConn struct {
+	conn net.Conn
+}
+
+func newWSConn(c net.Conn) *WSConn { return &WSConn{conn: c} }
+
+func (ws *WSConn) ReadMessage() (byte, []byte, error) {
+	var b [2]byte
+	if _, err := io.ReadFull(ws.conn, b[:]); err != nil {
+		return 0, nil, err
+	}
+	op := b[0] & 0x0f
+	masked := b[1]&0x80 != 0
+	length := int64(b[1] & 0x7f)
+	switch {
+	case length == 126:
+		var ext [2]byte
+		if _, err := io.ReadFull(ws.conn, ext[:]); err != nil {
+			return 0, nil, err
+		}
+		length = int64(binary.BigEndian.Uint16(ext[:]))
+	case length == 127:
+		var ext [8]byte
+		if _, err := io.ReadFull(ws.conn, ext[:]); err != nil {
+			return 0, nil, err
+		}
+		length = int64(binary.BigEndian.Uint64(ext[:]))
+	}
+	var mk [4]byte
+	if masked {
+		if _, err := io.ReadFull(ws.conn, mk[:]); err != nil {
+			return 0, nil, err
+		}
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(ws.conn, payload); err != nil {
+		return 0, nil, err
+	}
+	if masked {
+		for i := range payload {
+			payload[i] ^= mk[i&3]
+		}
+	}
+	return op, payload, nil
+}
+
+func (ws *WSConn) WriteMessage(op byte, payload []byte) error {
+	l := len(payload)
+	b := []byte{0x80 | op}
+	switch {
+	case l <= 125:
+		b = append(b, byte(l))
+	case l <= 65535:
+		b = append(b, 126, byte(l>>8), byte(l))
+	default:
+		b = append(b, 127, 0, 0, 0, 0, 0, 0, 0, 0)
+		binary.BigEndian.PutUint64(b[len(b)-8:], uint64(l))
+	}
+	b = append(b, payload...)
+	_, err := ws.conn.Write(b)
+	return err
+}
+
+// WebSocket registers a WebSocket echo handler, used by TestWebSocketUpgradeAndEcho.
+func WebSocket(handler func(*WSConn) error) HandlerFunc {
+	return func(c *Ctx) error {
+		return c.Upgrade("websocket", func(conn net.Conn) error {
+			return handler(newWSConn(conn))
+		})
+	}
+}
+
 func maskedFrame(op byte, payload []byte) []byte {
 	mask := [4]byte{1, 2, 3, 4}
 	b := []byte{0x80 | op}

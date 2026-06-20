@@ -308,15 +308,6 @@ func insertRoute(
 
 		if n.param == nil {
 			n.param = &node{}
-			n.paramName = name
-		} else if n.paramName != name {
-			panic(fmt.Sprintf(
-				"fasthttp: conflicting parameter name in route %s %s: existing :%s, new :%s",
-				method,
-				fullPath,
-				n.paramName,
-				name,
-			))
 		}
 
 		paramKeys = append(paramKeys, name)

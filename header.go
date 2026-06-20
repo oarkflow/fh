@@ -19,6 +19,7 @@ var (
 	MethodDELETE  = []byte("DELETE")
 	MethodPATCH   = []byte("PATCH")
 	MethodHEAD    = []byte("HEAD")
+	MethodCONNECT = []byte("CONNECT")
 	MethodOPTIONS = []byte("OPTIONS")
 
 	strHTTP11     = []byte("HTTP/1.1")
@@ -275,10 +276,14 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 				return 0, ErrMalformedRequest
 			}
 			seenTransferEncoding = true
-			// RFC 9112 requires chunked to be the final transfer coding. This
-			// server currently accepts the common, unstacked form only.
-			h.Chunked = strEqFold(trimOWS(val), "chunked")
-			h.UnsupportedTransferEncoding = !h.Chunked
+			// RFC 9112 allows stacked transfer codings (e.g. "gzip, chunked")
+			// with "chunked" as the final coding.
+			chunked, ok := parseTransferCoding(val)
+			if !ok {
+				return 0, ErrMalformedRequest
+			}
+			h.Chunked = chunked
+			h.UnsupportedTransferEncoding = !chunked
 		}
 
 		if h.hcount >= maxHeaders {
@@ -400,6 +405,37 @@ func trimRight(b []byte) []byte {
 		b = b[:len(b)-1]
 	}
 	return b
+}
+
+// parseTransferCoding parses a Transfer-Encoding header value per RFC 9112.
+// It returns (true, true) if "chunked" is the final coding in the stack,
+// (false, true) if the stack is syntactically valid but unsupported,
+// and (false, false) if the value is malformed.
+func parseTransferCoding(val []byte) (chunked bool, ok bool) {
+	last := ""
+	start := 0
+	for i := 0; i <= len(val); i++ {
+		if i == len(val) || val[i] == ',' {
+			part := trimOWS(val[start:i])
+			if len(part) == 0 {
+				return false, false
+			}
+			for _, c := range part {
+				if c <= 0x20 || c >= 0x7f || forbiddenTokenByte(c) {
+					return false, false
+				}
+			}
+			last = b2s(part)
+			start = i + 1
+		}
+	}
+	if last == "" {
+		return false, false
+	}
+	if strEqFold([]byte(last), "chunked") {
+		return true, true
+	}
+	return false, true
 }
 
 // parseIntFast parses a decimal integer from bytes without allocation.

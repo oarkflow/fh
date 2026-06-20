@@ -31,6 +31,7 @@ type Ctx struct {
 	upgraded        bool
 	upgradeBuffered []byte
 	trailers        []Header
+	responseTrailers []Header
 	requestContext  context.Context
 	bodyTransform   func([]byte) ([]byte, error)
 	h2              *h2Response
@@ -106,6 +107,8 @@ func (c *Ctx) reset() {
 	c.upgradeBuffered = nil
 	clear(c.trailers)
 	c.trailers = c.trailers[:0]
+	clear(c.responseTrailers)
+	c.responseTrailers = c.responseTrailers[:0]
 	c.requestContext = context.Background()
 	c.bodyTransform = nil
 	c.h2 = nil
@@ -240,6 +243,25 @@ func (c *Ctx) Trailer(name string) string {
 		}
 	}
 	return ""
+}
+
+// SetTrailer sets a response trailer header. Trailers are sent after the
+// chunked body (HTTP/1.1) or as trailing HEADERS (HTTP/2). The trailer
+// name should also be announced via the Trailer response header.
+func (c *Ctx) SetTrailer(key, value string) {
+	if !validToken([]byte(key)) || strings.ContainsAny(value, "\x00\r\n") {
+		return
+	}
+	if c.responseTrailers == nil {
+		c.responseTrailers = make([]Header, 0, 4)
+	}
+	for i := range c.responseTrailers {
+		if bytesEqualFold(c.responseTrailers[i].Key, []byte(key)) {
+			c.responseTrailers[i].Value = []byte(value)
+			return
+		}
+	}
+	c.responseTrailers = append(c.responseTrailers, Header{Key: []byte(key), Value: []byte(value)})
 }
 
 func (c *Ctx) BodyParser(v any) error {

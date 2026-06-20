@@ -590,6 +590,24 @@ func (a *App) serveConn(conn net.Conn) {
 			_ = writeAll(conn, serverError501)
 			return
 		}
+
+		// h2c upgrade: HTTP/1.1 Upgrade: h2c, Connection: Upgrade, HTTP2-Settings
+		if !a.cfg.DisableHTTP2 && hasUpgradeH2C(ctx) {
+			upgrade := []byte("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n")
+			if err := writeAll(conn, upgrade); err != nil {
+				releaseCtx(ctx)
+				return
+			}
+			h2c := newH2Conn(a, conn)
+			defer func() {
+				_ = conn.SetReadDeadline(time.Time{})
+			}()
+			a.setH2Conn(conn, h2c)
+			releaseCtx(ctx)
+			h2c.serve(nil, false)
+			return
+		}
+
 		if ctx.Header.ContentLength > a.cfg.MaxRequestBodySize {
 			releaseCtx(ctx)
 			_ = writeAll(conn, serverError413)
@@ -790,6 +808,19 @@ func (a *App) emitError(err error) {
 	for _, fn := range a.hooks.onError {
 		fn(err)
 	}
+}
+
+func hasUpgradeH2C(ctx *Ctx) bool {
+	upgrade := trimOWS(ctx.Header.Peek([]byte("Upgrade")))
+	if !strEqFold(upgrade, "h2c") {
+		return false
+	}
+	conn := trimOWS(ctx.Header.Peek(HeaderConnection))
+	if !hasHeaderToken(conn, "upgrade") || !hasHeaderToken(conn, "http2-settings") {
+		return false
+	}
+	settings := trimOWS(ctx.Header.Peek([]byte("HTTP2-Settings")))
+	return len(settings) > 0
 }
 
 func isExpectedConnErr(err error) bool {

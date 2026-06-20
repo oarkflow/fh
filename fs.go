@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"mime"
@@ -253,6 +254,23 @@ func (s *staticFS) writeFile(c *Ctx, upath string, info fs.FileInfo) error {
 		c.Set("ETag", fi.etag)
 	}
 
+	c.Set("Accept-Ranges", "bytes")
+
+	fileSize := len(data)
+	if rangeHeader := c.Get("Range"); rangeHeader != "" && !s.cfg.Compress {
+		if start, end, ok := parseRange(rangeHeader, fileSize); ok {
+			ifRange := c.Get("If-Range")
+			if ifRange == "" || ifRange == fi.etag || ifRange == info.ModTime().UTC().Format(httpTimeFormat) {
+				data = data[start:end]
+				c.Status(206)
+				c.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end-1, fileSize))
+				return c.SendBytes(data)
+			}
+		} else if strings.HasPrefix(rangeHeader, "bytes=") {
+			return c.Status(416).SendStatus(416)
+		}
+	}
+
 	if s.cfg.Compress && isCompressible(mimeType) {
 		ae := c.Get("Accept-Encoding")
 		if acceptsGzip(ae) {
@@ -272,6 +290,54 @@ func (s *staticFS) writeFile(c *Ctx, upath string, info fs.FileInfo) error {
 	}
 
 	return c.SendBytes(data)
+}
+
+// parseRange parses a single Range header value in the form "bytes=start-end".
+// Returns (start, end, ok) where end is exclusive. If end is omitted, the
+// range extends to the end of the file. If start is omitted (e.g. "bytes=-500"),
+// it represents the last N bytes.
+func parseRange(header string, fileSize int) (start, end int, ok bool) {
+	if !strings.HasPrefix(header, "bytes=") {
+		return 0, 0, false
+	}
+	rangeVal := header[6:]
+	if rangeVal == "" {
+		return 0, 0, false
+	}
+	dash := strings.IndexByte(rangeVal, '-')
+	if dash < 0 {
+		return 0, 0, false
+	}
+	startStr := rangeVal[:dash]
+	endStr := rangeVal[dash+1:]
+	if startStr == "" && endStr == "" {
+		return 0, 0, false
+	}
+	if startStr == "" {
+		n, err := strconv.Atoi(endStr)
+		if err != nil || n <= 0 {
+			return 0, 0, false
+		}
+		if n > fileSize {
+			n = fileSize
+		}
+		return fileSize - n, fileSize, true
+	}
+	start, err := strconv.Atoi(startStr)
+	if err != nil || start < 0 || start >= fileSize {
+		return 0, 0, false
+	}
+	if endStr == "" {
+		return start, fileSize, true
+	}
+	end, err = strconv.Atoi(endStr)
+	if err != nil || end < start {
+		return 0, 0, false
+	}
+	if end >= fileSize {
+		end = fileSize
+	}
+	return start, end + 1, true
 }
 
 func isCompressible(mimeType string) bool {
