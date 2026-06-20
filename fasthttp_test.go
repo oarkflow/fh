@@ -17,7 +17,7 @@ import (
 	"github.com/oarkflow/fasthttp/middleware/recover"
 	"github.com/oarkflow/fasthttp/middleware/requestid"
 	"github.com/oarkflow/fasthttp/middleware/security"
-	sessionmw "github.com/oarkflow/fasthttp/middleware/session"
+	"github.com/oarkflow/fasthttp/middleware/session"
 	"github.com/oarkflow/fasthttp/middleware/timeout"
 )
 
@@ -461,17 +461,17 @@ func TestCooperativeTimeout(t *testing.T) {
 }
 
 func TestSessionMiddlewarePersistsBeforeResponseAndDestroys(t *testing.T) {
-	store := fh.NewMemoryStore(0)
-	manager := fh.NewSessionManager(store,
-		fh.SessionCookieName("sid"),
-		fh.SessionSecrets([]byte("0123456789abcdef0123456789abcdef")),
-		fh.SessionSecure(false),
-		fh.SessionMaxAge(time.Hour),
+	store := session.NewMemoryStore(0)
+	manager := session.NewSessionManager(store,
+		session.SessionCookieName("sid"),
+		session.SessionSecrets([]byte("0123456789abcdef0123456789abcdef")),
+		session.SessionSecure(false),
+		session.SessionMaxAge(time.Hour),
 	)
 	app := fh.New()
-	app.Use(sessionmw.New(manager))
+	app.Use(session.New(manager))
 	app.Get("/counter", func(ctx *fh.Ctx) error {
-		s := sessionmw.Get(ctx)
+		s := session.Get(ctx)
 		count, _ := s.Get("count").(float64)
 		if count == 0 {
 			if n, ok := s.Get("count").(int); ok {
@@ -483,13 +483,13 @@ func TestSessionMiddlewarePersistsBeforeResponseAndDestroys(t *testing.T) {
 		return ctx.SendString(fmt.Sprintf("%d", int(count)))
 	})
 	app.Get("/logout", func(ctx *fh.Ctx) error {
-		if err := manager.Destroy(ctx, sessionmw.Get(ctx)); err != nil {
+		if err := manager.Destroy(ctx, session.Get(ctx)); err != nil {
 			return err
 		}
 		return ctx.SendStatus(204)
 	})
 	app.Get("/session-stream", func(ctx *fh.Ctx) error {
-		sessionmw.Get(ctx).Set("streamed", true)
+		session.Get(ctx).Set("streamed", true)
 		return ctx.Stream(func(w *fh.StreamWriter) error { _, err := w.Write([]byte("streamed")); return err })
 	})
 	addr := testServer(t, app)

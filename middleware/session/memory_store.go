@@ -1,4 +1,4 @@
-package fasthttp
+package session
 
 import (
 	"sync"

@@ -1,14 +1,16 @@
-package fasthttp
+package session
 
 import (
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	fh "github.com/oarkflow/fasthttp"
 )
 
 func TestCookieSecurityValidation(t *testing.T) {
-	valid := &Cookie{Name: "__Host-session", Value: "abc_123", Path: "/", Secure: true, HttpOnly: true, SameSite: SameSiteStrict, Partitioned: true}
+	valid := &fh.Cookie{Name: "__Host-session", Value: "abc_123", Path: "/", Secure: true, HttpOnly: true, SameSite: fh.SameSiteStrict, Partitioned: true}
 	if err := valid.Valid(); err != nil {
 		t.Fatal(err)
 	}
@@ -17,11 +19,11 @@ func TestCookieSecurityValidation(t *testing.T) {
 		t.Fatalf("missing security attributes: %q", serialized)
 	}
 
-	invalid := []*Cookie{
+	invalid := []*fh.Cookie{
 		{Name: "bad\r\nInjected", Value: "x", Secure: true},
 		{Name: "session", Value: "x; injected", Secure: true},
 		{Name: "__Host-session", Value: "x", Path: "/", Secure: false},
-		{Name: "session", Value: "x", SameSite: SameSiteNone, Secure: false},
+		{Name: "session", Value: "x", SameSite: fh.SameSiteNone, Secure: false},
 		{Name: "session", Value: "x", Domain: "evil; Domain=example.com", Secure: true},
 	}
 	for _, cookie := range invalid {
@@ -30,14 +32,14 @@ func TestCookieSecurityValidation(t *testing.T) {
 		}
 	}
 
-	deletion := (&Cookie{Name: "session", Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(0, 0), Secure: true}).String()
+	deletion := (&fh.Cookie{Name: "session", Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(0, 0), Secure: true}).String()
 	if !strings.Contains(deletion, "Max-Age=0") || !strings.Contains(deletion, "GMT") {
 		t.Fatalf("invalid deletion cookie: %q", deletion)
 	}
 }
 
 func TestParseCookieUsesFirstDuplicate(t *testing.T) {
-	cookies := ParseCookie("sid=trusted; sid=shadow; quoted=\"value\"")
+	cookies := fh.ParseCookie("sid=trusted; sid=shadow; quoted=\"value\"")
 	if cookies["sid"] != "trusted" || cookies["quoted"] != "value" {
 		t.Fatalf("unexpected cookies: %#v", cookies)
 	}
@@ -54,7 +56,7 @@ func TestSessionTokenRotationTamperingAndBinding(t *testing.T) {
 	if err := oldManager.Save(response, s); err != nil {
 		t.Fatal(err)
 	}
-	oldToken := response.responseCookies[0].Value
+	oldToken := response.FirstCookie()
 
 	rotated := NewSessionManager(store, SessionCookieName("sid"), SessionSecrets(newKey, oldKey))
 	request := newTestCookieCtx()
@@ -67,7 +69,7 @@ func TestSessionTokenRotationTamperingAndBinding(t *testing.T) {
 	if err := rotated.Save(newResponse, loaded); err != nil {
 		t.Fatal(err)
 	}
-	if newResponse.responseCookies[0].Value == oldToken {
+	if newResponse.FirstCookie() == oldToken {
 		t.Fatal("session token was not signed with the active key")
 	}
 
@@ -151,14 +153,12 @@ func TestFileStoreAtomicRoundTripAndValidation(t *testing.T) {
 	}
 }
 
-func newTestCookieCtx() *Ctx {
-	c := &Ctx{}
-	c.Header.headers = make([]Header, maxHeaders)
-	c.reset()
+func newTestCookieCtx() *fh.Ctx {
+	c := &fh.Ctx{}
+	c.Header.Init()
 	return c
 }
 
-func setRequestCookie(c *Ctx, name, value string) {
-	c.Header.headers[0] = Header{Key: []byte("Cookie"), Value: []byte(name + "=" + value)}
-	c.Header.hcount = 1
+func setRequestCookie(c *fh.Ctx, name, value string) {
+	c.Header.SetCookie(c, name, value)
 }

@@ -74,6 +74,16 @@ func (h *RequestHeader) reset() {
 	h.hcount = 0
 }
 
+func (h *RequestHeader) Init() {
+	h.headers = make([]Header, maxHeaders)
+	h.reset()
+}
+
+func (h *RequestHeader) SetCookie(c *Ctx, name, value string) {
+	c.Header.headers[0] = Header{Key: []byte("Cookie"), Value: []byte(name + "=" + value)}
+	c.Header.hcount = 1
+}
+
 // Peek returns the value of a header by name (case-insensitive).
 // Returns nil if not found. Zero allocation.
 func (h *RequestHeader) Peek(name []byte) []byte {
@@ -291,6 +301,10 @@ func trimOWS(b []byte) []byte {
 		b = b[1:]
 	}
 	return trimRight(b)
+}
+
+func ValidToken(b []byte) bool {
+	return validToken(b)
 }
 
 func validToken(b []byte) bool {

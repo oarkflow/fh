@@ -324,7 +324,7 @@ func (c *Ctx) StatusCode() int {
 func (c *Ctx) Set(key, value string) {
 	k := []byte(key)
 	v := []byte(value)
-	if !validToken(k) || strings.IndexAny(value, "\x00\r\n") >= 0 {
+	if !validToken(k) || strings.ContainsAny(value, "\x00\r\n") {
 		return
 	}
 	if bytesEqualFold(k, headerContentLength) || bytesEqualFold(k, headerTransferEncoding) || bytesEqualFold(k, headerConnection) {
@@ -357,7 +357,7 @@ func (c *Ctx) Set(key, value string) {
 // Append adds a comma-separated response header value without replacing an
 // existing value. It is useful for fields such as Vary.
 func (c *Ctx) Append(key, value string) {
-	if !validToken([]byte(key)) || strings.IndexAny(value, "\x00\r\n") >= 0 {
+	if !validToken([]byte(key)) || strings.ContainsAny(value, "\x00\r\n") {
 		return
 	}
 	for i := 0; i < c.chCount; i++ {
@@ -385,11 +385,18 @@ func headerValueContainsToken(header []byte, token string) bool { return hasHead
 func (c *Ctx) Responded() bool { return c.responded }
 
 func (c *Ctx) Type(mime string) *Ctx {
-	if strings.IndexAny(mime, "\x00\r\n") >= 0 {
+	if strings.ContainsAny(mime, "\x00\r\n") {
 		return c
 	}
 	c.contentType = []byte(mime)
 	return c
+}
+
+func (c *Ctx) FirstCookie() string {
+	if len(c.responseCookies) == 0 {
+		return ""
+	}
+	return c.responseCookies[0].Value
 }
 
 func (c *Ctx) SendString(s string) error {

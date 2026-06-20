@@ -39,9 +39,9 @@ func main() {
 	// ──────────────────────────────────────────────────────────────────────
 	// 1. APP CONFIG + CREATION
 	// ──────────────────────────────────────────────────────────────────────
-	splEngine := template.NewSPL("examples/views")
+	splEngine := template.NewSPL("views")
 	splEngine.Config(template.SPLConfig{
-		Directory:  "examples/views",
+		Directory:  "views",
 		SSR:        true,
 		SecureMode: true,
 		Globals:    map[string]any{"siteName": "SPL Fasthttp Demo"},
@@ -113,20 +113,20 @@ func main() {
 	// ──────────────────────────────────────────────────────────────────────
 	// 3.5 SESSION
 	// ──────────────────────────────────────────────────────────────────────
-	sessionStore := fh.NewMemoryStore(5 * time.Minute)
-	sessionOptions := []fh.SessionOption{
-		fh.SessionCookieName("demo_sid"),
-		fh.SessionMaxAge(24 * time.Hour),
-		fh.SessionHTTPOnly(true),
-		fh.SessionSecure(false), // localhost HTTP only; omit this option behind TLS
-		fh.SessionPath("/"),
+	sessionStore := session.NewMemoryStore(5 * time.Minute)
+	sessionOptions := []session.SessionOption{
+		session.SessionCookieName("demo_sid"),
+		session.SessionMaxAge(24 * time.Hour),
+		session.SessionHTTPOnly(true),
+		session.SessionSecure(false), // localhost HTTP only; omit this option behind TLS
+		session.SessionPath("/"),
 	}
 	if secret := os.Getenv("SESSION_SECRET"); len(secret) >= 32 {
-		sessionOptions = append(sessionOptions, fh.SessionSecret([]byte(secret)))
+		sessionOptions = append(sessionOptions, session.SessionSecret([]byte(secret)))
 	} else {
 		log.Println("WARNING: SESSION_SECRET is unset; using an ephemeral development key")
 	}
-	sessionManager := fh.NewSessionManager(sessionStore, sessionOptions...)
+	sessionManager := session.NewSessionManager(sessionStore, sessionOptions...)
 	app.Use(session.New(sessionManager))
 
 	// Auth middleware: redirects to /login when session has no "user" key.
