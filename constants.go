@@ -1,4 +1,4 @@
-package fasthttp
+package fh
 
 // ── Request / response headers ────────────────────────────────────────────────
 const (

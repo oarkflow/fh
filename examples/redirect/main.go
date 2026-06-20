@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 func main() {

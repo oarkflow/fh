@@ -1,7 +1,7 @@
 // Package skip conditionally bypasses middleware.
 package skip
 
-import fh "github.com/oarkflow/fasthttp"
+import "github.com/oarkflow/fh"
 
 type Predicate func(*fh.Ctx) bool
 

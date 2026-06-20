@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 const (

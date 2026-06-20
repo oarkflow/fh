@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	fiber "github.com/oarkflow/fasthttp"
+	fiber "github.com/oarkflow/fh"
 )
 
 func main() {

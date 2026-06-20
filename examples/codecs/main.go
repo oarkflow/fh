@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/url"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 /*

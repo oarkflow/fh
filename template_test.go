@@ -1,4 +1,4 @@
-package fasthttp_test
+package fh_test
 
 import (
 	"io"
@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 type mockEngine struct {

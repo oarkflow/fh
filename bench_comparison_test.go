@@ -1,4 +1,4 @@
-package fasthttp_test
+package fh_test
 
 import (
 	"io"
@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 // ── In-memory pipe-based listener (no TCP stack, low noise) ───────────────

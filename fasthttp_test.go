@@ -1,4 +1,4 @@
-package fasthttp_test
+package fh_test
 
 import (
 	"bufio"
@@ -11,14 +11,14 @@ import (
 	"testing"
 	"time"
 
-	fh "github.com/oarkflow/fasthttp"
-	"github.com/oarkflow/fasthttp/middleware/compress"
-	"github.com/oarkflow/fasthttp/middleware/cors"
-	"github.com/oarkflow/fasthttp/middleware/recover"
-	"github.com/oarkflow/fasthttp/middleware/requestid"
-	"github.com/oarkflow/fasthttp/middleware/security"
-	"github.com/oarkflow/fasthttp/middleware/session"
-	"github.com/oarkflow/fasthttp/middleware/timeout"
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/middleware/compress"
+	"github.com/oarkflow/fh/middleware/cors"
+	"github.com/oarkflow/fh/middleware/recover"
+	"github.com/oarkflow/fh/middleware/requestid"
+	"github.com/oarkflow/fh/middleware/security"
+	"github.com/oarkflow/fh/middleware/session"
+	"github.com/oarkflow/fh/middleware/timeout"
 )
 
 // testServer starts the app on a random port and returns the address.

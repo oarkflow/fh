@@ -1,4 +1,4 @@
-package fasthttp_test
+package fh_test
 
 import (
 	"io"
@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	fh "github.com/oarkflow/fasthttp"
-	"github.com/oarkflow/fasthttp/middleware/compress"
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/middleware/compress"
 )
 
 func TestStaticFileServing(t *testing.T) {

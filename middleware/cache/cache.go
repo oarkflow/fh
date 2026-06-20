@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 type Entry struct {

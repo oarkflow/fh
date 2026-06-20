@@ -5,7 +5,7 @@ import (
 	"log"
 	"runtime/debug"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 type Logger interface {

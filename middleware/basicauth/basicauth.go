@@ -19,7 +19,7 @@ import (
 	"strings"
 	"sync"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 const (

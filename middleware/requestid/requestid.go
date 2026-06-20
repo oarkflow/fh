@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 const (

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 func TestCookieSecurityValidation(t *testing.T) {

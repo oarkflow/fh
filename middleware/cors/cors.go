@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 type OriginStore interface {

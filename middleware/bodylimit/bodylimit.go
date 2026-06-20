@@ -1,6 +1,6 @@
 package bodylimit
 
-import fh "github.com/oarkflow/fasthttp"
+import "github.com/oarkflow/fh"
 
 type Config struct {
 	Limit int

@@ -1,4 +1,4 @@
-package fasthttp_test
+package fh_test
 
 import (
 	"errors"
@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	fh "github.com/oarkflow/fasthttp"
-	"github.com/oarkflow/fasthttp/middleware/session"
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/middleware/session"
 )
 
 func TestCompiledRoutePatternUsesRouterSemantics(t *testing.T) {

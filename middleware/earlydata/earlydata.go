@@ -4,7 +4,7 @@ package earlydata
 import (
 	"strings"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 type Config struct {

@@ -6,14 +6,14 @@ import (
 	"log"
 	"time"
 
-	fh "github.com/oarkflow/fasthttp"
-	"github.com/oarkflow/fasthttp/middleware/bodylimit"
-	cachemw "github.com/oarkflow/fasthttp/middleware/cache"
-	"github.com/oarkflow/fasthttp/middleware/cors"
-	"github.com/oarkflow/fasthttp/middleware/csrf"
-	"github.com/oarkflow/fasthttp/middleware/earlydata"
-	"github.com/oarkflow/fasthttp/middleware/rewrite"
-	"github.com/oarkflow/fasthttp/middleware/skip"
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/middleware/bodylimit"
+	cachemw "github.com/oarkflow/fh/middleware/cache"
+	"github.com/oarkflow/fh/middleware/cors"
+	"github.com/oarkflow/fh/middleware/csrf"
+	"github.com/oarkflow/fh/middleware/earlydata"
+	"github.com/oarkflow/fh/middleware/rewrite"
+	"github.com/oarkflow/fh/middleware/skip"
 )
 
 func main() {

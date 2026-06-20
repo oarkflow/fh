@@ -1,4 +1,4 @@
-package fasthttp
+package fh
 
 // ── Status codes ──────────────────────────────────────────────────────────────
 const (

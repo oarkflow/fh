@@ -5,7 +5,7 @@ import (
 	"net"
 	"strings"
 
-	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fh"
 )
 
 // Rule matches a request and internally reroutes it to To. From uses exactly

@@ -1,4 +1,4 @@
-package fasthttp
+package fh
 
 // Group is a set of routes sharing a common path prefix and middleware.
 type Group struct {
