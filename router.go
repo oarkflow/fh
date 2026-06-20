@@ -1,7 +1,9 @@
 package fasthttp
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -30,8 +32,21 @@ type Router struct {
 	// Default false is safer.
 	UnsafeParams bool
 
-	trees map[string]*node
+	trees      map[string]*node
+	named      map[string]namedRoute
+	routeNames map[string]string
+	routes     map[string]struct{}
 }
+
+type namedRoute struct {
+	method string
+	path   string
+}
+
+var (
+	ErrRouteNotFound     = errors.New("fasthttp: named route not found")
+	ErrRouteParamMissing = errors.New("fasthttp: required route parameter missing")
+)
 
 type node struct {
 	static map[string]*node
@@ -56,8 +71,101 @@ func newRouter() *Router {
 
 func NewRouter() *Router {
 	return &Router{
-		trees: make(map[string]*node, 16),
+		trees:      make(map[string]*node, 16),
+		named:      make(map[string]namedRoute, 16),
+		routeNames: make(map[string]string, 16),
+		routes:     make(map[string]struct{}, 16),
 	}
+}
+
+// AddNamed registers a route and gives it a name for reverse URL generation.
+func (r *Router) AddNamed(method, path, name string, h HandlerFunc) {
+	r.Add(method, path, h)
+	r.Name(method, path, name)
+}
+
+// Name assigns a unique name to an already registered route.
+func (r *Router) Name(method, path, name string) {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	path = normalizeRoutePath(method, path)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		panic("fasthttp: route name must not be empty")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.frozen.Load() {
+		panic("fasthttp: cannot name route after router is frozen")
+	}
+	key := method + " " + path
+	if _, ok := r.routes[key]; !ok {
+		panic(fmt.Sprintf("fasthttp: cannot name unregistered route %s", key))
+	}
+	if old, ok := r.named[name]; ok && (old.method != method || old.path != path) {
+		panic(fmt.Sprintf("fasthttp: duplicate route name %q", name))
+	}
+	if oldName, ok := r.routeNames[key]; ok && oldName != name {
+		delete(r.named, oldName)
+	}
+	r.named[name] = namedRoute{method: method, path: path}
+	r.routeNames[key] = name
+}
+
+// URL builds a path for a named route. Unused values are appended as a
+// deterministically ordered query string.
+func (r *Router) URL(name string, values ...map[string]string) (string, error) {
+	if !r.frozen.Load() {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
+	route, ok := r.named[name]
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrRouteNotFound, name)
+	}
+	params := map[string]string(nil)
+	if len(values) > 0 {
+		params = values[0]
+	}
+	used := make(map[string]struct{})
+	segments := splitRouteSegments(route.path)
+	for i, segment := range segments {
+		if segment == "" || (segment[0] != ':' && segment[0] != '*') {
+			continue
+		}
+		key := segment[1:]
+		if key == "" {
+			key = "*"
+		}
+		value, found := params[key]
+		if !found {
+			return "", fmt.Errorf("%w %q for route %q", ErrRouteParamMissing, key, name)
+		}
+		used[key] = struct{}{}
+		if segment[0] == '*' {
+			parts := strings.Split(value, "/")
+			for j := range parts {
+				parts[j] = url.PathEscape(parts[j])
+			}
+			segments[i] = strings.Join(parts, "/")
+		} else {
+			segments[i] = url.PathEscape(value)
+		}
+	}
+	path := "/" + strings.Join(segments, "/")
+	if route.path == "*" {
+		path = "*"
+	}
+	query := make(url.Values)
+	for key, value := range params {
+		if _, ok := used[key]; !ok {
+			query.Set(key, value)
+		}
+	}
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return path, nil
 }
 
 // Freeze makes the router read-only.
@@ -99,6 +207,7 @@ func (r *Router) Add(method, path string, h HandlerFunc) {
 
 	segments := splitRouteSegments(path)
 	insertRoute(root, method, path, segments, 0, h, nil)
+	r.routes[method+" "+path] = struct{}{}
 }
 
 func (r *Router) Find(method, path string, params *[]Param) HandlerFunc {

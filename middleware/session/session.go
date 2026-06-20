@@ -30,6 +30,36 @@ type Session struct {
 	destroyed bool
 }
 
+const flashKey = "__fasthttp_flash"
+
+// Flash stores a value for the next request. Called without a value, it
+// retrieves and consumes the stored value.
+func (s *Session) Flash(key string, value ...any) any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Data == nil {
+		s.Data = make(map[string]any)
+	}
+	flashes, _ := s.Data[flashKey].(map[string]any)
+	if len(value) > 0 {
+		if flashes == nil {
+			flashes = make(map[string]any)
+			s.Data[flashKey] = flashes
+		}
+		flashes[key] = value[0]
+		return value[0]
+	}
+	if flashes == nil {
+		return nil
+	}
+	result := flashes[key]
+	delete(flashes, key)
+	if len(flashes) == 0 {
+		delete(s.Data, flashKey)
+	}
+	return result
+}
+
 func (s *Session) Set(key string, value any) {
 	s.mu.Lock()
 	if s.Data == nil {

@@ -36,6 +36,12 @@ func (g *Group) add(method, path string, handlers ...HandlerFunc) *Group {
 	return g
 }
 
+// Name names the most recently registered route in this group.
+func (g *Group) Name(name string) *Group {
+	g.app.Name(name)
+	return g
+}
+
 func (g *Group) Get(path string, handlers ...HandlerFunc) *Group {
 	return g.add("GET", path, handlers...)
 }

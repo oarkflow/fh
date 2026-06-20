@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -20,22 +21,22 @@ type Ctx struct {
 
 	params []Param
 
-	status          int
-	customHeaders   [16]Header
-	extraHeaders    []Header
-	chCount         int
-	body            []byte
-	contentType     []byte
-	responded       bool
-	forceClose      bool
-	upgraded        bool
-	upgradeBuffered []byte
-	trailers        []Header
+	status           int
+	customHeaders    [16]Header
+	extraHeaders     []Header
+	chCount          int
+	body             []byte
+	contentType      []byte
+	responded        bool
+	forceClose       bool
+	upgraded         bool
+	upgradeBuffered  []byte
+	trailers         []Header
 	responseTrailers []Header
-	requestContext  context.Context
-	bodyTransform   func([]byte) ([]byte, error)
-	h2              *h2Response
-	cachedIP        string
+	requestContext   context.Context
+	bodyTransform    func([]byte) ([]byte, error)
+	h2               *h2Response
+	cachedIP         string
 
 	handlers     []HandlerFunc
 	handlerIndex int
@@ -526,6 +527,45 @@ func (c *Ctx) Redirect(location string, code ...int) error {
 	c.status = sc
 	c.Set("Location", location)
 	return c.writeResponse(nil)
+}
+
+// RedirectTo redirects to a named route. Route parameters are substituted and
+// additional values become query parameters.
+func (c *Ctx) RedirectTo(name string, params map[string]string, code ...int) error {
+	location, err := c.server.URL(name, params)
+	if err != nil {
+		return err
+	}
+	return c.Redirect(location, code...)
+}
+
+// RedirectBack redirects to a same-origin Referer, or to fallback when the
+// Referer is absent, malformed, or points at another host.
+func (c *Ctx) RedirectBack(fallback string, code ...int) error {
+	location := fallback
+	if raw := c.Get(HeaderRefererStr); raw != "" {
+		if ref, err := url.Parse(raw); err == nil {
+			sameOrigin := !ref.IsAbs() || strings.EqualFold(ref.Host, b2s(c.Header.Host))
+			if sameOrigin && ref.User == nil && ref.Path != "" {
+				location = ref.RequestURI()
+			}
+		}
+	}
+	return c.Redirect(location, code...)
+}
+
+type contextFlashStore interface {
+	Flash(string, ...any) any
+}
+
+// Flash stores a value for the next request, or retrieves and consumes it when
+// called without a value. The session middleware must be registered.
+func (c *Ctx) Flash(key string, value ...any) any {
+	store, ok := c.Locals("session").(contextFlashStore)
+	if !ok {
+		panic("fasthttp: flash messages require session middleware")
+	}
+	return store.Flash(key, value...)
 }
 
 // writeResponseString writes a response with a string body — zero alloc.

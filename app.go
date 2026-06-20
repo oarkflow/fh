@@ -79,6 +79,7 @@ type App struct {
 	started      atomic.Bool
 	buildMu      sync.Mutex
 	groups       []*Group
+	lastRoute    namedRoute
 }
 
 type connState struct {
@@ -159,7 +160,26 @@ func (a *App) Add(method, path string, handlers ...HandlerFunc) *App {
 		}
 	}
 	a.router.Add(method, path, a.chain(handlers))
+	a.lastRoute = namedRoute{method: strings.ToUpper(strings.TrimSpace(method)), path: normalizeRoutePath(strings.ToUpper(strings.TrimSpace(method)), path)}
 	return a
+}
+
+// Name names the most recently registered route, allowing fluent usage such
+// as app.Get("/users/:id", handler).Name("users.show").
+func (a *App) Name(name string) *App {
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
+	a.assertMutable()
+	if a.lastRoute.method == "" {
+		panic("fasthttp: no route available to name")
+	}
+	a.router.Name(a.lastRoute.method, a.lastRoute.path, name)
+	return a
+}
+
+// URL generates a URL path for a named route.
+func (a *App) URL(name string, params ...map[string]string) (string, error) {
+	return a.router.URL(name, params...)
 }
 
 func (a *App) Get(path string, handlers ...HandlerFunc) *App {
