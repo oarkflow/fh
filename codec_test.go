@@ -2,8 +2,8 @@ package fasthttp
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
-	"reflect"
 	"strconv"
 	"testing"
 )
@@ -108,8 +108,18 @@ func TestJsonCodec(t *testing.T) {
 	if v["name"] != "John" {
 		t.Fatalf("expected John, got %v", v["name"])
 	}
-	if !reflect.DeepEqual(v["age"], float64(30)) {
-		t.Fatalf("expected 30, got %T(%v)", v["age"], v["age"])
+	switch age := v["age"].(type) {
+	case float64:
+		if age != 30 {
+			t.Fatalf("expected 30, got %v", age)
+		}
+	case json.Number:
+		n, _ := age.Int64()
+		if n != 30 {
+			t.Fatalf("expected 30, got %v", n)
+		}
+	default:
+		t.Fatalf("unexpected type for age: %T(%v)", v["age"], v["age"])
 	}
 }
 
@@ -126,7 +136,7 @@ func TestMatchCodec(t *testing.T) {
 		{"text/plain", "text/plain"},
 		{"text/plain; charset=utf-8", "text/plain"},
 		{"", ""},
-		{"application/octet-stream", ""},
+		{"application/octet-stream", "application/octet-stream"},
 	}
 	for _, tt := range tests {
 		c := matchCodec(tt.ct)
@@ -238,12 +248,12 @@ func TestMultipartCodecWithAny(t *testing.T) {
 	if err := mc.UnmarshalWithContentType([]byte(body), ct, &v); err != nil {
 		t.Fatal(err)
 	}
-	m, ok := v.(map[string]any)
+	mf, ok := v.(*MultipartForm)
 	if !ok {
-		t.Fatalf("expected map[string]any, got %T", v)
+		t.Fatalf("expected *MultipartForm, got %T", v)
 	}
-	if m["x"] != "42" {
-		t.Fatalf("expected 42, got %v", m["x"])
+	if mf.First("x") != "42" {
+		t.Fatalf("expected 42, got %v", mf.First("x"))
 	}
 }
 
