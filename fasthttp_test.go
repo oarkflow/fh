@@ -314,6 +314,68 @@ func TestPanicRecovery(t *testing.T) {
 	}
 }
 
+func TestSecurityHeaders(t *testing.T) {
+	app := fh.New()
+	app.Use(middleware.SecurityHeaders())
+	app.Get("/", func(ctx *fh.Ctx) error {
+		return ctx.SendString("ok")
+	})
+	addr := testServer(t, app)
+
+	conn, _ := net.Dial("tcp", addr)
+	defer conn.Close()
+	conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	resp, _ := io.ReadAll(conn)
+	s := string(resp)
+
+	checks := []struct {
+		name   string
+		header string
+	}{
+		{"X-Content-Type-Options", "X-Content-Type-Options: nosniff"},
+		{"X-Frame-Options", "X-Frame-Options: DENY"},
+		{"X-XSS-Protection", "X-XSS-Protection: 0"},
+		{"Referrer-Policy", "Referrer-Policy: no-referrer"},
+		{"Strict-Transport-Security", "Strict-Transport-Security: max-age=31536000; includeSubDomains"},
+		{"Content-Security-Policy", "Content-Security-Policy:"},
+		{"Permissions-Policy", "Permissions-Policy:"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(s, c.header) {
+			t.Errorf("missing response header %q", c.name)
+		}
+	}
+}
+
+func TestSecurityHeadersCustom(t *testing.T) {
+	app := fh.New()
+	app.Use(middleware.SecurityHeaders(middleware.SecurityConfig{
+		FrameDeny:          false,
+		ContentTypeNosniff: false,
+		HSTSMaxAge:         0,
+	}))
+	app.Get("/", func(ctx *fh.Ctx) error {
+		return ctx.SendString("ok")
+	})
+	addr := testServer(t, app)
+
+	conn, _ := net.Dial("tcp", addr)
+	defer conn.Close()
+	conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	resp, _ := io.ReadAll(conn)
+	s := string(resp)
+
+	if strings.Contains(s, "X-Frame-Options") {
+		t.Error("expected X-Frame-Options to be disabled")
+	}
+	if strings.Contains(s, "X-Content-Type-Options") {
+		t.Error("expected X-Content-Type-Options to be disabled")
+	}
+	if strings.Contains(s, "Strict-Transport-Security") {
+		t.Error("expected HSTS to be disabled")
+	}
+}
+
 func TestCORS(t *testing.T) {
 	app := fh.New()
 	app.Use(middleware.CORS())

@@ -73,6 +73,7 @@ func main() {
 	app.Use(middleware.Logger(middleware.LoggerConfig{
 		Format: "[${ip}] ${method} ${path} → ${status} (${latency})\n",
 	}))
+	app.Use(middleware.SecurityHeaders())
 	app.Use(middleware.RequestID())
 	app.Use(middleware.Recover())
 	app.Use(middleware.CORS(middleware.CORSConfig{
