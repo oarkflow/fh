@@ -720,15 +720,15 @@ func (a *App) dispatch(ctx *Ctx) {
 
 	path := ctx.path()
 	handler := a.router.FindBytes(ctx.Header.Method, path, &ctx.params)
-	if handler == nil && bytesEqualFold(ctx.Header.Method, methodHEAD) {
+	if handler == nil && bytesEqualFold(ctx.Header.Method, MethodHEAD) {
 		ctx.params = ctx.params[:0]
-		handler = a.router.FindBytes(methodGET, path, &ctx.params)
+		handler = a.router.FindBytes(MethodGET, path, &ctx.params)
 	}
 
 	if handler == nil {
 		ctx.params = ctx.params[:0]
 		allowed := a.router.Allowed(path)
-		if bytesEqualFold(ctx.Header.Method, methodOPTIONS) && len(path) == 1 && path[0] == '*' {
+		if bytesEqualFold(ctx.Header.Method, MethodOPTIONS) && len(path) == 1 && path[0] == '*' {
 			allowed = a.router.Methods()
 		}
 		fallback := func(ctx *Ctx) error {
@@ -736,7 +736,7 @@ func (a *App) dispatch(ctx *Ctx) {
 				return ctx.Status(404).SendString("404 Not Found")
 			}
 			ctx.Set("Allow", strings.Join(allowed, ", "))
-			if bytesEqualFold(ctx.Header.Method, methodOPTIONS) {
+			if bytesEqualFold(ctx.Header.Method, MethodOPTIONS) {
 				return ctx.SendStatus(204)
 			}
 			return ctx.Status(405).SendString("405 Method Not Allowed")

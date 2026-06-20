@@ -647,7 +647,7 @@ func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
 		}
 	}
 	c.responded = true
-	bodyAllowed := responseBodyAllowed(c.status) && !bytesEqualFold(c.Header.Method, methodHEAD)
+	bodyAllowed := responseBodyAllowed(c.status) && !bytesEqualFold(c.Header.Method, MethodHEAD)
 	length := len(body)
 	end := !bodyAllowed || length == 0
 	var contentLength *int
@@ -669,7 +669,7 @@ func (r *h2Response) beginStream(c *Ctx) error {
 	if r.ended.Load() {
 		return net.ErrClosed
 	}
-	end := !responseBodyAllowed(c.status) || bytesEqualFold(c.Header.Method, methodHEAD)
+	end := !responseBodyAllowed(c.status) || bytesEqualFold(c.Header.Method, MethodHEAD)
 	if err := r.conn.sendResponseHeaders(r.stream, c, nil, end); err != nil {
 		r.abort(h2InternalError)
 		return err

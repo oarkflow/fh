@@ -60,10 +60,10 @@ func (c *Ctx) beginStream() (*StreamWriter, error) {
 			return nil, err
 		}
 		c.responded = true
-		return &StreamWriter{ctx: c, h2: true, discard: !responseBodyAllowed(c.status) || bytesEqualFold(c.Header.Method, methodHEAD)}, nil
+		return &StreamWriter{ctx: c, h2: true, discard: !responseBodyAllowed(c.status) || bytesEqualFold(c.Header.Method, MethodHEAD)}, nil
 	}
 	c.responded = true
-	bodyAllowed := responseBodyAllowed(c.status) && !bytesEqualFold(c.Header.Method, methodHEAD)
+	bodyAllowed := responseBodyAllowed(c.status) && !bytesEqualFold(c.Header.Method, MethodHEAD)
 	chunked := string(c.Header.Proto) == "HTTP/1.1" && bodyAllowed
 	if bodyAllowed && !chunked {
 		c.forceClose = true

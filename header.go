@@ -7,19 +7,19 @@ import (
 
 // Common header names as byte slices — avoids repeated string→[]byte conversions.
 var (
-	headerContentType      = []byte("Content-Type")
-	headerContentLength    = []byte("Content-Length")
-	headerConnection       = []byte("Connection")
-	headerTransferEncoding = []byte("Transfer-Encoding")
-	headerHost             = []byte("Host")
+	HeaderContentType      = []byte("Content-Type")
+	HeaderContentLength    = []byte("Content-Length")
+	HeaderConnection       = []byte("Connection")
+	HeaderTransferEncoding = []byte("Transfer-Encoding")
+	HeaderHost             = []byte("Host")
 
-	methodGET     = []byte("GET")
-	methodPOST    = []byte("POST")
-	methodPUT     = []byte("PUT")
-	methodDELETE  = []byte("DELETE")
-	methodPATCH   = []byte("PATCH")
-	methodHEAD    = []byte("HEAD")
-	methodOPTIONS = []byte("OPTIONS")
+	MethodGET     = []byte("GET")
+	MethodPOST    = []byte("POST")
+	MethodPUT     = []byte("PUT")
+	MethodDELETE  = []byte("DELETE")
+	MethodPATCH   = []byte("PATCH")
+	MethodHEAD    = []byte("HEAD")
+	MethodOPTIONS = []byte("OPTIONS")
 
 	strHTTP11     = []byte("HTTP/1.1")
 	strHTTP10     = []byte("HTTP/1.0")
@@ -92,7 +92,7 @@ func (h *RequestHeader) Peek(name []byte) []byte {
 			return h.headers[i].Value
 		}
 	}
-	if bytesEqualFold(name, headerHost) {
+	if bytesEqualFold(name, HeaderHost) {
 		return h.Host
 	}
 	return nil
@@ -165,7 +165,7 @@ func parseRequestLine(buf []byte, h *RequestHeader) (int, error) {
 		}
 	}
 	validTarget := len(h.URI) > 0 && h.URI[0] == '/'
-	if bytesEqualFold(h.Method, methodOPTIONS) && bytes.Equal(h.URI, []byte("*")) {
+	if bytesEqualFold(h.Method, MethodOPTIONS) && bytes.Equal(h.URI, []byte("*")) {
 		validTarget = true
 	}
 	if bytesEqualFold(h.Method, []byte("CONNECT")) && len(h.URI) > 0 && bytes.IndexByte(h.URI, '/') < 0 {
@@ -250,27 +250,27 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 
 		// store well-known headers directly
 		switch {
-		case bytesEqualFold(key, headerHost):
+		case bytesEqualFold(key, HeaderHost):
 			if seenHost {
 				return 0, ErrMalformedRequest
 			}
 			seenHost = true
 			h.Host = val
-		case bytesEqualFold(key, headerContentType):
+		case bytesEqualFold(key, HeaderContentType):
 			h.ContentType = val
-		case bytesEqualFold(key, headerContentLength):
+		case bytesEqualFold(key, HeaderContentLength):
 			n, ok := parseContentLength(val)
 			if !ok || (h.HasContentLength && n != h.ContentLength) {
 				return 0, ErrMalformedRequest
 			}
 			h.ContentLength, h.HasContentLength = n, true
-		case bytesEqualFold(key, headerConnection):
+		case bytesEqualFold(key, HeaderConnection):
 			if hasHeaderToken(val, "close") {
 				h.KeepAlive = false
 			} else if bytes.Equal(h.Proto, strHTTP10) && hasHeaderToken(val, "keep-alive") {
 				h.KeepAlive = true
 			}
-		case bytesEqualFold(key, headerTransferEncoding):
+		case bytesEqualFold(key, HeaderTransferEncoding):
 			if seenTransferEncoding {
 				return 0, ErrMalformedRequest
 			}
@@ -294,6 +294,10 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 		return 0, ErrMalformedRequest
 	}
 	return pos, nil
+}
+
+func TrimOWS(b []byte) []byte {
+	return trimOWS(b)
 }
 
 func trimOWS(b []byte) []byte {
@@ -324,6 +328,10 @@ func forbiddenTokenByte(c byte) bool {
 	return false
 }
 
+func HasHeaderToken(value []byte, token string) bool {
+	return hasHeaderToken(value, token)
+}
+
 func hasHeaderToken(value []byte, token string) bool {
 	for len(value) > 0 {
 		end := indexByte(value, ',')
@@ -342,6 +350,10 @@ func hasHeaderToken(value []byte, token string) bool {
 		}
 	}
 	return false
+}
+
+func StrEqFold(b []byte, s string) bool {
+	return strEqFold(b, s)
 }
 
 func strEqFold(b []byte, s string) bool {
@@ -400,6 +412,10 @@ func parseIntFast(b []byte) int {
 		n = n*10 + int(c-'0')
 	}
 	return n
+}
+
+func BytesEqualFold(a, b []byte) bool {
+	return bytesEqualFold(a, b)
 }
 
 // bytesEqualFold reports whether a and b are equal under ASCII case folding.

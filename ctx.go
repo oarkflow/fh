@@ -327,10 +327,10 @@ func (c *Ctx) Set(key, value string) {
 	if !validToken(k) || strings.ContainsAny(value, "\x00\r\n") {
 		return
 	}
-	if bytesEqualFold(k, headerContentLength) || bytesEqualFold(k, headerTransferEncoding) || bytesEqualFold(k, headerConnection) {
+	if bytesEqualFold(k, HeaderContentLength) || bytesEqualFold(k, HeaderTransferEncoding) || bytesEqualFold(k, HeaderConnection) {
 		return
 	}
-	if bytesEqualFold(k, headerContentType) {
+	if bytesEqualFold(k, HeaderContentType) {
 		c.contentType = v
 		return
 	}
@@ -513,7 +513,7 @@ func (c *Ctx) writeResponseString(s string) error {
 	buf = append(buf, '\r', '\n')
 
 	// Body — append string directly, no []byte conversion
-	if bodyAllowed && !bytesEqualFold(c.Header.Method, methodHEAD) {
+	if bodyAllowed && !bytesEqualFold(c.Header.Method, MethodHEAD) {
 		buf = append(buf, s...)
 	}
 
@@ -586,7 +586,7 @@ func (c *Ctx) writeResponse(body []byte) error {
 	buf = append(buf, '\r', '\n')
 
 	// RFC 9110: a HEAD response has the same headers as GET but no content.
-	if bodyAllowed && len(body) > 0 && !bytesEqualFold(c.Header.Method, methodHEAD) {
+	if bodyAllowed && len(body) > 0 && !bytesEqualFold(c.Header.Method, MethodHEAD) {
 		buf = append(buf, body...)
 	}
 

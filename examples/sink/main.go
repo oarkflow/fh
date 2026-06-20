@@ -27,6 +27,7 @@ import (
 	"github.com/oarkflow/fasthttp/middleware/security"
 	"github.com/oarkflow/fasthttp/middleware/session"
 	"github.com/oarkflow/fasthttp/middleware/timeout"
+	"github.com/oarkflow/fasthttp/pkg/websocket"
 	"github.com/oarkflow/template"
 )
 
@@ -498,22 +499,43 @@ func main() {
 		})
 	})
 
+	wsManager := websocket.NewManager()
+
+	wsConfig := websocket.Config{
+		MaxMessageSize:       1 << 20,
+		MaxFrameSize:         64 << 10,
+		MaxFragments:         32,
+		ReadTimeout:          90 * time.Second,
+		WriteTimeout:         10 * time.Second,
+		PingInterval:         30 * time.Second,
+		PongTimeout:          75 * time.Second,
+		MaxMessagesPerSecond: 128,
+		AllowedOrigins:      []string{"https://yourdomain.com", "http://localhost:3000"},
+		Subprotocols:        []string{"json", "chat.v1"},
+		EnableHeartbeat:     true,
+		Manager:             wsManager,
+	}
+
 	// ──────────────────────────────────────────────────────────────────────
 	// 14. WEBSOCKET
 	// ──────────────────────────────────────────────────────────────────────
-	app.Get("/ws", fh.WebSocket(func(ws *fh.WSConn) error {
+	app.Get("/ws", websocket.NewWithConfig(wsConfig, func(ws *websocket.Conn) error {
 		for {
 			op, msg, err := ws.ReadMessage()
 			if err != nil {
 				return err
 			}
 			switch op {
-			case fh.WSText:
-				ws.WriteMessage(fh.WSText, []byte("echo: "+string(msg)))
-			case fh.WSClose:
+			case websocket.Text:
+				ws.WriteMessage(websocket.Text, []byte("echo: "+string(msg)))
+			case websocket.Binary:
+			if err := ws.WriteMessage(websocket.Binary, msg); err != nil {
+				return err
+			}
+			case websocket.Close:
 				return nil
-			case fh.WSPing:
-				ws.WriteMessage(fh.WSPong, nil)
+			case websocket.Ping:
+				ws.WriteMessage(websocket.Pong, nil)
 			}
 		}
 	}))
