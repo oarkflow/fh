@@ -538,3 +538,95 @@ func TestStaticInlineCompressionWithMiddleware(t *testing.T) {
 		t.Log("compression applied (by middleware or inline)")
 	}
 }
+
+func TestStaticStripSlash(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(dir+"/index.html", []byte("<h1>index</h1>"), 0644)
+	os.MkdirAll(dir+"/sub", 0755)
+	os.WriteFile(dir+"/sub/file.txt", []byte("nested"), 0644)
+
+	app := fh.New()
+	app.Static("/static", dir, fh.StaticConfig{
+		Browse:     true,
+		StripSlash: true,
+	})
+	addr := testServer(t, app)
+
+	// Both with and without trailing slash should serve the same content
+	for _, path := range []string{"/static", "/static/"} {
+		code, body := doRequest(t, addr, "GET", path, "", nil)
+		if code != 200 {
+			t.Fatalf("GET %s: expected 200, got %d (body: %q)", path, code, body)
+		}
+		if !strings.Contains(body, "<h1>index</h1>") {
+			t.Fatalf("GET %s: expected index content, got %q", path, body)
+		}
+	}
+
+	// Sub-path with trailing slash should also work
+	code, body := doRequest(t, addr, "GET", "/static/sub/", "", nil)
+	if code != 200 {
+		t.Fatalf("GET /static/sub/: expected 200, got %d (body: %q)", code, body)
+	}
+	if !strings.Contains(body, "file.txt") {
+		t.Fatalf("GET /static/sub/: expected directory listing, got %q", body)
+	}
+
+	// No redirect should happen
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.Write([]byte("GET /static HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+	conn.(*net.TCPConn).CloseWrite()
+	resp, _ := io.ReadAll(conn)
+	if strings.Contains(string(resp), "301") {
+		t.Fatal("expected no redirect with StripSlash")
+	}
+}
+
+func TestStaticStripSlashFS(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(dir+"/index.html", []byte("<h1>index</h1>"), 0644)
+
+	app := fh.New()
+	app.StaticFS("/embed", os.DirFS(dir), fh.StaticConfig{
+		Browse:     true,
+		StripSlash: true,
+	})
+	addr := testServer(t, app)
+
+	for _, path := range []string{"/embed", "/embed/"} {
+		code, body := doRequest(t, addr, "GET", path, "", nil)
+		if code != 200 {
+			t.Fatalf("GET %s: expected 200, got %d (body: %q)", path, code, body)
+		}
+		if !strings.Contains(body, "<h1>index</h1>") {
+			t.Fatalf("GET %s: expected index content, got %q", path, body)
+		}
+	}
+}
+
+func TestStaticGroupStripSlash(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(dir+"/index.html", []byte("<h1>index</h1>"), 0644)
+
+	app := fh.New()
+	g := app.Group("/v1")
+	g.Static("/static", dir, fh.StaticConfig{
+		Browse:     true,
+		StripSlash: true,
+	})
+	addr := testServer(t, app)
+
+	for _, path := range []string{"/v1/static", "/v1/static/"} {
+		code, body := doRequest(t, addr, "GET", path, "", nil)
+		if code != 200 {
+			t.Fatalf("GET %s: expected 200, got %d (body: %q)", path, code, body)
+		}
+		if !strings.Contains(body, "<h1>index</h1>") {
+			t.Fatalf("GET %s: expected index content, got %q", path, body)
+		}
+	}
+}

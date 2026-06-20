@@ -138,14 +138,16 @@ func main() {
 		})
 	})
 	subFS, _ := fs.Sub(publicFiles, "public")
-	app.Static("/static", "./public", fh.StaticConfig{
-		Compress: true,
-		MaxAge:   3600,
-		Browse:   true,
+	app.StaticFS("/static", subFS, fh.StaticConfig{
+		Compress:   true,
+		MaxAge:     3600,
+		Browse:     true,
+		StripSlash: true,
 	})
 	app.StaticFS("/embed", subFS, fh.StaticConfig{
-		Compress: true,
-		Browse:   true,
+		Compress:   true,
+		Browse:     true,
+		StripSlash: true,
 	})
 	app.Get("/search", func(ctx *fh.Ctx) error {
 		q := ctx.Query("q")
@@ -382,7 +384,7 @@ func main() {
 		}
 	}()
 
-	addr := ":8080"
+	addr := ":8081"
 	if len(os.Args) > 1 {
 		addr = os.Args[1]
 	}

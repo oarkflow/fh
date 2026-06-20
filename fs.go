@@ -41,6 +41,11 @@ type StaticConfig struct {
 	// CacheDuration limits how long file metadata is cached in memory.
 	// Zero disables caching.
 	CacheDuration time.Duration
+
+	// StripSlash strips the trailing slash from the request path before
+	// resolving the file. When true, both /dir and /dir/ serve the same
+	// content without a redirect.
+	StripSlash bool
 }
 
 func (c *StaticConfig) indexFile() string {
@@ -83,12 +88,16 @@ func (a *App) addStatic(prefix string, filesystem fs.FS, cfg StaticConfig) {
 
 	if cleanPrefix != "/" {
 		a.Get(strings.TrimRight(cleanPrefix, "/")+"/*", fsc.serve)
-		a.Get(cleanPrefix, func(c *Ctx) error {
-			if strings.HasSuffix(c.Path(), "/") {
-				return fsc.serve(c)
-			}
-			return c.Redirect(cleanPrefix+"/", 301)
-		})
+		if cfg.StripSlash {
+			a.Get(cleanPrefix, fsc.serve)
+		} else {
+			a.Get(cleanPrefix, func(c *Ctx) error {
+				if strings.HasSuffix(c.Path(), "/") {
+					return fsc.serve(c)
+				}
+				return c.Redirect(cleanPrefix+"/", 301)
+			})
+		}
 	} else {
 		a.Get("/", fsc.serve)
 		a.Get("/*", fsc.serve)
@@ -129,12 +138,16 @@ func (g *Group) addStatic(prefix string, filesystem fs.FS, cfg StaticConfig) {
 
 	if cleanPrefix != "/" {
 		g.Get(strings.TrimRight(cleanPrefix, "/")+"/*", fsc.serve)
-		g.Get(cleanPrefix, func(c *Ctx) error {
-			if strings.HasSuffix(c.Path(), "/") {
-				return fsc.serve(c)
-			}
-			return c.Redirect(fullPrefix+"/", 301)
-		})
+		if cfg.StripSlash {
+			g.Get(cleanPrefix, fsc.serve)
+		} else {
+			g.Get(cleanPrefix, func(c *Ctx) error {
+				if strings.HasSuffix(c.Path(), "/") {
+					return fsc.serve(c)
+				}
+				return c.Redirect(fullPrefix+"/", 301)
+			})
+		}
 	} else {
 		g.Get("/", fsc.serve)
 		g.Get("/*", fsc.serve)
@@ -186,7 +199,7 @@ func (s *staticFS) servePath(c *Ctx, upath string) error {
 }
 
 func (s *staticFS) serveDir(c *Ctx, upath string) error {
-	if !strings.HasSuffix(c.Path(), "/") {
+	if !s.cfg.StripSlash && !strings.HasSuffix(c.Path(), "/") {
 		return c.Redirect(c.Path()+"/", 301)
 	}
 
