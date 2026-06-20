@@ -92,17 +92,17 @@
         </select>
       }
     </div>
-    <div style="margin-top:0.75rem;">
-      <label style="font-size:0.8rem;font-weight:600;color:#475569;">Priority (${"@"}match/${"@"}case)</label>
-      <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:0.5rem;">
-        @for(p in priorities) {
-          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
-            <input type="radio" name="priority" value="${p}" data-spl-model="prefs.priority" />
-            @match(p){@case("low"){<span class="badge badge-green">${p|title}</span>}@case("medium"){<span class="badge badge-amber">${p|title}</span>}@case("high"){<span class="badge badge-red">${p|title}</span>}@case("critical"){<span class="badge badge-purple">${p|upper}</span>}}
-          </label>
-        }
+      <div style="margin-top:0.75rem;">
+        <label style="font-size:0.8rem;font-weight:600;color:#475569;">Priority (${"@"}match/${"@"}case)</label>
+        <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:0.5rem;">
+          @for(p in priorities) {
+            <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
+              <input type="radio" name="priority" value="${p}" on:click="prefs.priority='${p}'" />
+              @match(p){@case("low"){<span class="badge badge-green">${p|title}</span>}@case("medium"){<span class="badge badge-amber">${p|title}</span>}@case("high"){<span class="badge badge-red">${p|title}</span>}@case("critical"){<span class="badge badge-purple">${p|upper}</span>}}
+            </label>
+          }
+        </div>
       </div>
-    </div>
     <div style="margin-top:0.75rem;">
       <div style="display:flex;gap:1.5rem;flex-wrap:wrap;">
         @let(checkboxes = [{"model":"prefs.newsletter","text":"Newsletter"},{"model":"prefs.notifications","text":"Notifications"},{"model":"prefs.terms","text":"Accept terms"}])
