@@ -1,9 +1,11 @@
 package fasthttp
 
 import (
+	"fmt"
 	"sort"
 	"strings"
-	"unsafe"
+	"sync"
+	"sync/atomic"
 )
 
 type HandlerFunc func(*Ctx) error
@@ -13,58 +15,34 @@ type Param struct {
 	Value string
 }
 
-// Allowed returns methods that match path in deterministic order.
-func (r *Router) Allowed(path []byte) []string {
-	canonical := []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "CONNECT", "OPTIONS", "TRACE"}
-	allowed := make([]string, 0, 8)
-	seen := make(map[string]struct{}, len(r.trees)+1)
-	var params []Param
-	add := func(method string, root *node) {
-		params = params[:0]
-		if root != nil && match(root, path, &params) != nil {
-			if _, ok := seen[method]; !ok {
-				seen[method] = struct{}{}
-				allowed = append(allowed, method)
-			}
-		}
-	}
-	for _, method := range canonical {
-		add(method, r.trees[method])
-	}
-	if _, ok := seen["GET"]; ok {
-		if _, hasHead := seen["HEAD"]; !hasHead {
-			seen["HEAD"] = struct{}{}
-			allowed = append(allowed, "HEAD")
-		}
-	}
-	extra := make([]string, 0)
-	for method, root := range r.trees {
-		if _, ok := seen[method]; ok {
-			continue
-		}
-		before := len(allowed)
-		add(method, root)
-		if len(allowed) > before {
-			extra = append(extra, method)
-			allowed = allowed[:before]
-		}
-	}
-	sort.Strings(extra)
-	allowed = append(allowed, extra...)
-	if len(allowed) > 0 {
-		if _, ok := seen["OPTIONS"]; !ok {
-			allowed = append(allowed, "OPTIONS")
-		}
-	}
-	return allowed
+type Router struct {
+	mu sync.RWMutex
+
+	frozen atomic.Bool
+
+	// If true, route params are converted from []byte to string without allocation.
+	//
+	// Fastest mode, but only safe if:
+	//   - request path buffer lives until the handler finishes
+	//   - params are not stored after request completion
+	//   - params are not used asynchronously after request completion
+	//
+	// Default false is safer.
+	UnsafeParams bool
+
+	trees map[string]*node
 }
 
 type node struct {
-	path     string
-	children []*node
-	handler  *routeEndpoint
-	isParam  bool
-	isWild   bool
+	static map[string]*node
+
+	param     *node
+	paramName string
+
+	wild     *node
+	wildName string
+
+	handler *routeEndpoint
 }
 
 type routeEndpoint struct {
@@ -72,58 +50,556 @@ type routeEndpoint struct {
 	paramKeys []string
 }
 
-type Router struct {
-	trees map[string]*node
-}
-
-func (r *Router) Methods() []string {
-	methods := make([]string, 0, len(r.trees)+2)
-	for method := range r.trees {
-		methods = append(methods, method)
-	}
-	sort.Strings(methods)
-	has := func(want string) bool {
-		for _, method := range methods {
-			if method == want {
-				return true
-			}
-		}
-		return false
-	}
-	if has("GET") && !has("HEAD") {
-		methods = append(methods, "HEAD")
-	}
-	if !has("OPTIONS") {
-		methods = append(methods, "OPTIONS")
-	}
-	sort.Strings(methods)
-	return methods
-}
-
 func newRouter() *Router {
+	return NewRouter()
+}
+
+func NewRouter() *Router {
 	return &Router{
-		trees: make(map[string]*node, 8),
+		trees: make(map[string]*node, 16),
 	}
+}
+
+// Freeze makes the router read-only.
+// Call this after registering all routes and before serving traffic.
+//
+// After Freeze(), Find/FindBytes/Allowed/Methods use lock-free reads.
+func (r *Router) Freeze() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.frozen.Store(true)
 }
 
 func (r *Router) Add(method, path string, h HandlerFunc) {
-	method = strings.ToUpper(method)
-	if !validToken([]byte(method)) {
+	method = strings.ToUpper(strings.TrimSpace(method))
+
+	if !validTokenString(method) {
 		panic("fasthttp: invalid route method")
 	}
+
 	if h == nil {
 		panic("fasthttp: nil route handler")
 	}
+
+	path = normalizeRoutePath(method, path)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.frozen.Load() {
+		panic("fasthttp: cannot add route after router is frozen")
+	}
+
+	root := r.trees[method]
+	if root == nil {
+		root = &node{}
+		r.trees[method] = root
+	}
+
+	segments := splitRouteSegments(path)
+	insertRoute(root, method, path, segments, 0, h, nil)
+}
+
+func (r *Router) Find(method, path string, params *[]Param) HandlerFunc {
+	if r.frozen.Load() {
+		return r.findNoLock(method, s2b(path), params)
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.findNoLock(method, s2b(path), params)
+}
+
+func (r *Router) FindBytes(method, path []byte, params *[]Param) HandlerFunc {
+	if r.frozen.Load() {
+		return r.findNoLock(b2s(method), path, params)
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.findNoLock(b2s(method), path, params)
+}
+
+func (r *Router) findNoLock(method string, path []byte, params *[]Param) HandlerFunc {
+	method = strings.ToUpper(method)
+
+	var local []Param
+	if params == nil {
+		params = &local
+	} else {
+		*params = (*params)[:0]
+	}
+
+	root := r.trees[method]
+
+	// HEAD falls back to GET if HEAD is not explicitly registered.
+	if root == nil && method == "HEAD" {
+		root = r.trees["GET"]
+	}
+
+	if root == nil {
+		return nil
+	}
+
+	return match(root, cleanLookupPath(path), params, r.UnsafeParams)
+}
+
+// Allowed returns methods that match path in deterministic order.
+//
+// Behavior:
+//   - if GET matches and HEAD is not registered, HEAD is included
+//   - if any method matches, OPTIONS is included
+func (r *Router) Allowed(path []byte) []string {
+	if r.frozen.Load() {
+		return r.allowedNoLock(path)
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.allowedNoLock(path)
+}
+
+func (r *Router) allowedNoLock(path []byte) []string {
+	canonical := []string{
+		"GET",
+		"HEAD",
+		"POST",
+		"PUT",
+		"PATCH",
+		"DELETE",
+		"CONNECT",
+		"OPTIONS",
+		"TRACE",
+	}
+
+	lookupPath := cleanLookupPath(path)
+
+	allowed := make([]string, 0, 8)
+	seen := make(map[string]struct{}, len(r.trees)+2)
+
+	var tmp []Param
+
+	add := func(method string, root *node) {
+		if root == nil {
+			return
+		}
+
+		tmp = tmp[:0]
+
+		if match(root, lookupPath, &tmp, r.UnsafeParams) != nil {
+			if _, ok := seen[method]; !ok {
+				seen[method] = struct{}{}
+				allowed = append(allowed, method)
+			}
+		}
+	}
+
+	for _, method := range canonical {
+		add(method, r.trees[method])
+	}
+
+	if _, hasGET := seen["GET"]; hasGET {
+		if _, hasHEAD := seen["HEAD"]; !hasHEAD {
+			seen["HEAD"] = struct{}{}
+			allowed = append(allowed, "HEAD")
+		}
+	}
+
+	extra := make([]string, 0)
+
+	for method, root := range r.trees {
+		if _, ok := seen[method]; ok {
+			continue
+		}
+
+		tmp = tmp[:0]
+
+		if match(root, lookupPath, &tmp, r.UnsafeParams) != nil {
+			seen[method] = struct{}{}
+			extra = append(extra, method)
+		}
+	}
+
+	sort.Strings(extra)
+	allowed = append(allowed, extra...)
+
+	if len(allowed) > 0 {
+		if _, hasOPTIONS := seen["OPTIONS"]; !hasOPTIONS {
+			allowed = append(allowed, "OPTIONS")
+		}
+	}
+
+	return allowed
+}
+
+func (r *Router) Methods() []string {
+	if r.frozen.Load() {
+		return r.methodsNoLock()
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.methodsNoLock()
+}
+
+func (r *Router) methodsNoLock() []string {
+	methods := make([]string, 0, len(r.trees)+2)
+	seen := make(map[string]struct{}, len(r.trees)+2)
+
+	for method := range r.trees {
+		methods = append(methods, method)
+		seen[method] = struct{}{}
+	}
+
+	if _, hasGET := seen["GET"]; hasGET {
+		if _, hasHEAD := seen["HEAD"]; !hasHEAD {
+			seen["HEAD"] = struct{}{}
+			methods = append(methods, "HEAD")
+		}
+	}
+
+	if _, hasOPTIONS := seen["OPTIONS"]; !hasOPTIONS {
+		methods = append(methods, "OPTIONS")
+	}
+
+	sort.Strings(methods)
+
+	return methods
+}
+
+func insertRoute(
+	n *node,
+	method string,
+	fullPath string,
+	segments []string,
+	index int,
+	h HandlerFunc,
+	paramKeys []string,
+) {
+	if index == len(segments) {
+		if n.handler != nil {
+			panic(fmt.Sprintf("fasthttp: duplicate route %s %s", method, fullPath))
+		}
+
+		n.handler = &routeEndpoint{
+			fn:        h,
+			paramKeys: append([]string(nil), paramKeys...),
+		}
+
+		return
+	}
+
+	seg := segments[index]
+
+	if seg == "" {
+		panic(fmt.Sprintf("fasthttp: empty path segment in route %s %s", method, fullPath))
+	}
+
+	switch {
+	case seg[0] == ':':
+		name := seg[1:]
+
+		validateParamName(method, fullPath, name)
+
+		if n.param == nil {
+			n.param = &node{}
+			n.paramName = name
+		} else if n.paramName != name {
+			panic(fmt.Sprintf(
+				"fasthttp: conflicting parameter name in route %s %s: existing :%s, new :%s",
+				method,
+				fullPath,
+				n.paramName,
+				name,
+			))
+		}
+
+		paramKeys = append(paramKeys, name)
+		insertRoute(n.param, method, fullPath, segments, index+1, h, paramKeys)
+
+	case seg[0] == '*':
+		name := seg[1:]
+
+		// Supports:
+		//   /static/*      => key "*"
+		//   /static/*path  => key "path"
+		if name == "" {
+			name = "*"
+		} else {
+			validateParamName(method, fullPath, name)
+		}
+
+		if index != len(segments)-1 {
+			panic(fmt.Sprintf("fasthttp: wildcard must be final segment in route %s %s", method, fullPath))
+		}
+
+		if n.wild == nil {
+			n.wild = &node{}
+			n.wildName = name
+		} else if n.wildName != name {
+			panic(fmt.Sprintf(
+				"fasthttp: conflicting wildcard name in route %s %s: existing *%s, new *%s",
+				method,
+				fullPath,
+				n.wildName,
+				name,
+			))
+		}
+
+		paramKeys = append(paramKeys, name)
+		insertRoute(n.wild, method, fullPath, segments, len(segments), h, paramKeys)
+
+	default:
+		validateStaticSegment(method, fullPath, seg)
+
+		if n.static == nil {
+			n.static = make(map[string]*node, 4)
+		}
+
+		child := n.static[seg]
+		if child == nil {
+			child = &node{}
+			n.static[seg] = child
+		}
+
+		insertRoute(child, method, fullPath, segments, index+1, h, paramKeys)
+	}
+}
+
+func match(n *node, path []byte, params *[]Param, unsafeParams bool) HandlerFunc {
+	if len(path) == 0 {
+		if h := endpointHandler(n.handler, params); h != nil {
+			return h
+		}
+
+		// Allow /static/* to match /static and /static/
+		// with an empty wildcard value.
+		if n.wild != nil {
+			mark := len(*params)
+
+			*params = append(*params, Param{
+				Value: "",
+			})
+
+			if h := endpointHandler(n.wild.handler, params); h != nil {
+				return h
+			}
+
+			*params = (*params)[:mark]
+		}
+
+		return nil
+	}
+
+	seg, rest := nextSegment(path)
+
+	// 1. Static wins.
+	if len(n.static) > 0 {
+		if child := n.static[b2s(seg)]; child != nil {
+			mark := len(*params)
+
+			if h := match(child, rest, params, unsafeParams); h != nil {
+				return h
+			}
+
+			*params = (*params)[:mark]
+		}
+	}
+
+	// 2. Param second.
+	if n.param != nil && len(seg) > 0 {
+		mark := len(*params)
+
+		*params = append(*params, Param{
+			Value: paramValue(seg, unsafeParams),
+		})
+
+		if h := match(n.param, rest, params, unsafeParams); h != nil {
+			return h
+		}
+
+		*params = (*params)[:mark]
+	}
+
+	// 3. Wildcard last.
+	if n.wild != nil {
+		mark := len(*params)
+
+		*params = append(*params, Param{
+			Value: paramValue(path, unsafeParams),
+		})
+
+		if h := endpointHandler(n.wild.handler, params); h != nil {
+			return h
+		}
+
+		*params = (*params)[:mark]
+	}
+
+	return nil
+}
+
+func endpointHandler(endpoint *routeEndpoint, params *[]Param) HandlerFunc {
+	if endpoint == nil {
+		return nil
+	}
+
+	if len(endpoint.paramKeys) != len(*params) {
+		return nil
+	}
+
+	for i := range endpoint.paramKeys {
+		(*params)[i].Key = endpoint.paramKeys[i]
+	}
+
+	return endpoint.fn
+}
+
+func normalizeRoutePath(method, path string) string {
+	path = strings.TrimSpace(path)
+
 	if path == "" {
 		path = "/"
 	}
-	if path[0] != '/' && !(method == "OPTIONS" && path == "*") && method != "CONNECT" {
+
+	if method == "OPTIONS" && path == "*" {
+		return "*"
+	}
+
+	if path[0] != '/' {
 		panic("fasthttp: route path must begin with '/'")
 	}
-	if r.trees[method] == nil {
-		r.trees[method] = &node{}
+
+	if len(path) > 1 && strings.Contains(path, "//") {
+		panic("fasthttp: route path must not contain duplicate slashes")
 	}
-	insert(r.trees[method], path, h, nil)
+
+	return path
+}
+
+func splitRouteSegments(path string) []string {
+	if path == "" || path == "/" {
+		return nil
+	}
+
+	if path == "*" {
+		return []string{"*"}
+	}
+
+	if path[0] == '/' {
+		path = path[1:]
+	}
+
+	return strings.Split(path, "/")
+}
+
+func cleanLookupPath(path []byte) []byte {
+	for len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+
+	return path
+}
+
+func nextSegment(path []byte) (seg, rest []byte) {
+	for i := 0; i < len(path); i++ {
+		if path[i] == '/' {
+			seg = path[:i]
+			rest = path[i+1:]
+
+			for len(rest) > 0 && rest[0] == '/' {
+				rest = rest[1:]
+			}
+
+			return seg, rest
+		}
+	}
+
+	return path, nil
+}
+
+func validateStaticSegment(method, fullPath, seg string) {
+	if seg == "" {
+		panic(fmt.Sprintf("fasthttp: empty path segment in route %s %s", method, fullPath))
+	}
+
+	if seg[0] == ':' || seg[0] == '*' {
+		return
+	}
+
+	if strings.ContainsAny(seg, ":*") {
+		panic(fmt.Sprintf(
+			"fasthttp: ':' or '*' must appear only at the beginning of a segment in route %s %s",
+			method,
+			fullPath,
+		))
+	}
+}
+
+func validateParamName(method, fullPath, name string) {
+	if name == "" {
+		panic(fmt.Sprintf("fasthttp: empty route parameter in route %s %s", method, fullPath))
+	}
+
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+
+		ok :=
+			c >= 'a' && c <= 'z' ||
+				c >= 'A' && c <= 'Z' ||
+				c >= '0' && c <= '9' ||
+				c == '_'
+
+		if !ok {
+			panic(fmt.Sprintf(
+				"fasthttp: invalid route parameter %q in route %s %s",
+				name,
+				method,
+				fullPath,
+			))
+		}
+	}
+}
+
+func validTokenString(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+
+		ok :=
+			c == '!' ||
+				c == '#' ||
+				c == '$' ||
+				c == '%' ||
+				c == '&' ||
+				c == '\'' ||
+				c == '*' ||
+				c == '+' ||
+				c == '-' ||
+				c == '.' ||
+				c == '^' ||
+				c == '_' ||
+				c == '`' ||
+				c == '|' ||
+				c == '~' ||
+				c >= '0' && c <= '9' ||
+				c >= 'A' && c <= 'Z' ||
+				c >= 'a' && c <= 'z'
+
+		if !ok {
+			return false
+		}
+	}
+
+	return true
 }
 
 func hasParams(path string) bool {
@@ -132,173 +608,14 @@ func hasParams(path string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
-func (r *Router) FindBytes(method, path []byte, params *[]Param) HandlerFunc {
-	root := r.trees[string(method)]
-	if root == nil {
-		return nil
-	}
-	return match(root, path, params)
-}
-
-func (r *Router) Find(method, path string, params *[]Param) HandlerFunc {
-	root := r.trees[method]
-	if root == nil {
-		return nil
-	}
-	return match(root, []byte(path), params)
-}
-
-func insert(n *node, path string, h HandlerFunc, paramKeys []string) {
-	if path == "" || path == "/" {
-		n.handler = &routeEndpoint{fn: h, paramKeys: append([]string(nil), paramKeys...)}
-		return
+func paramValue(b []byte, unsafeMode bool) string {
+	if unsafeMode {
+		return b2s(b)
 	}
 
-	if len(path) > 0 && path[0] == '/' {
-		path = path[1:]
-	}
-
-	seg, rest := splitPath(path)
-	if strings.HasPrefix(seg, ":") {
-		if len(seg) == 1 {
-			panic("fasthttp: empty route parameter")
-		}
-		paramKeys = append(paramKeys, seg[1:])
-	} else if seg == "*" {
-		paramKeys = append(paramKeys, "*")
-		if rest != "" {
-			panic("fasthttp: wildcard must be the final route segment")
-		}
-	}
-
-	for _, child := range n.children {
-		if child.path == seg || (child.isParam && strings.HasPrefix(seg, ":")) ||
-			(child.isWild && seg == "*") {
-			if rest == "" {
-				child.handler = &routeEndpoint{fn: h, paramKeys: append([]string(nil), paramKeys...)}
-			} else {
-				insert(child, rest, h, paramKeys)
-			}
-			return
-		}
-	}
-
-	child := &node{path: seg}
-	if strings.HasPrefix(seg, ":") {
-		child.isParam = true
-	} else if seg == "*" {
-		child.isWild = true
-	}
-	n.children = append(n.children, child)
-
-	if rest == "" {
-		child.handler = &routeEndpoint{fn: h, paramKeys: append([]string(nil), paramKeys...)}
-	} else {
-		insert(child, rest, h, paramKeys)
-	}
-}
-
-func match(n *node, path []byte, params *[]Param) HandlerFunc {
-	if len(path) == 0 || (len(path) == 1 && path[0] == '/') {
-		return endpointHandler(n.handler, params)
-	}
-	if len(path) > 0 && path[0] == '/' {
-		path = path[1:]
-	}
-
-	seg, rest := splitPathBytes(path)
-
-	// Static routes have precedence regardless of registration order.
-	for _, child := range n.children {
-		if child.isParam || child.isWild {
-			continue
-		}
-		if strEqBytes(child.path, seg) {
-			if len(rest) == 0 {
-				if child.handler != nil {
-					return endpointHandler(child.handler, params)
-				}
-			} else if h := match(child, rest, params); h != nil {
-				return h
-			}
-		}
-	}
-	// Parameter branches may need to backtrack when a deeper segment fails.
-	for _, child := range n.children {
-		if !child.isParam {
-			continue
-		}
-		mark := len(*params)
-		*params = append(*params, Param{Value: b2s(seg)})
-		if len(rest) == 0 {
-			if child.handler != nil {
-				return endpointHandler(child.handler, params)
-			}
-		} else if h := match(child, rest, params); h != nil {
-			return h
-		}
-		*params = (*params)[:mark]
-	}
-	for _, child := range n.children {
-		if child.isWild {
-			mark := len(*params)
-			*params = append(*params, Param{Value: b2s(path)})
-			if child.handler != nil {
-				return endpointHandler(child.handler, params)
-			}
-			*params = (*params)[:mark]
-		}
-	}
-	return nil
-}
-
-func endpointHandler(endpoint *routeEndpoint, params *[]Param) HandlerFunc {
-	if endpoint == nil {
-		return nil
-	}
-	if len(endpoint.paramKeys) != len(*params) {
-		return nil
-	}
-	for i := range endpoint.paramKeys {
-		(*params)[i].Key = endpoint.paramKeys[i]
-	}
-	return endpoint.fn
-}
-
-func splitPath(path string) (seg, rest string) {
-	i := strings.IndexByte(path, '/')
-	if i < 0 {
-		return path, ""
-	}
-	return path[:i], path[i:]
-}
-
-func splitPathBytes(path []byte) (seg, rest []byte) {
-	for i, c := range path {
-		if c == '/' {
-			return path[:i], path[i:]
-		}
-	}
-	return path, nil
-}
-
-// b2s converts []byte to string without allocation.
-func b2s(b []byte) string {
-	return *(*string)(unsafe.Pointer(&b))
-}
-
-// strEqBytes reports whether a string and a byte slice are equal — zero alloc.
-func strEqBytes(s string, b []byte) bool {
-	if len(s) != len(b) {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return string(b)
 }

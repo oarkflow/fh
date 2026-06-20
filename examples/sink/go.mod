@@ -12,4 +12,4 @@ require (
 	github.com/oarkflow/spl v0.0.6 // indirect
 )
 
-replace github.com/oarkflow/fasthttp => ../
+replace github.com/oarkflow/fasthttp => ../../
