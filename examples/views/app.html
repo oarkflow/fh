@@ -93,14 +93,24 @@
       }
     </div>
       <div style="margin-top:0.75rem;">
-        <label style="font-size:0.8rem;font-weight:600;color:#475569;">Priority (${"@"}match/${"@"}case)</label>
+        <label style="font-size:0.8rem;font-weight:600;color:#475569;">Priority</label>
         <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:0.5rem;">
-          @for(p in priorities) {
-            <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
-              <input type="radio" name="priority" value="${p}" on:click="prefs.priority='${p}'" />
-              @match(p){@case("low"){<span class="badge badge-green">${p|title}</span>}@case("medium"){<span class="badge badge-amber">${p|title}</span>}@case("high"){<span class="badge badge-red">${p|title}</span>}@case("critical"){<span class="badge badge-purple">${p|upper}</span>}}
-            </label>
-          }
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
+            <input type="radio" name="priority" value="low" on:click="prefs.priority='low'" />
+            <span class="badge badge-green">Low</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
+            <input type="radio" name="priority" value="medium" checked on:click="prefs.priority='medium'" />
+            <span class="badge badge-amber">Medium</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
+            <input type="radio" name="priority" value="high" on:click="prefs.priority='high'" />
+            <span class="badge badge-red">High</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
+            <input type="radio" name="priority" value="critical" on:click="prefs.priority='critical'" />
+            <span class="badge badge-purple">CRITICAL</span>
+          </label>
         </div>
       </div>
     <div style="margin-top:0.75rem;">
@@ -119,11 +129,10 @@
   <div class="card" style="background:#eff6ff;border-color:#bfdbfe;">
     <div class="section-label">Live Preview (${"@"}reactive + filters)</div>
     @reactive(personal,prefs){<div style="display:grid;grid-template-columns:auto 1fr;gap:0.35rem 1.25rem;font-size:0.8rem;">
-      <strong>Name:</strong><span>${personal.firstName} ${personal.lastName | title}</span>
+      <strong>Name:</strong><span>${personal.firstName} <span style="text-transform:capitalize">${personal.lastName}</span></span>
       <strong>Email:</strong><span>${personal.email}</span>
-      <strong>Role:</strong><span>${prefs.role | title}</span>
-      <strong>Priority:</strong><span>${prefs.priority | upper}</span>
-      <strong>Bio length:</strong><span>${personal.bio | length} / ${bioLimit}</span>
+      <strong>Role:</strong><span>${prefs.role}</span>
+      <strong>Priority:</strong><span style="text-transform:uppercase">${prefs.priority}</span>
     </div>}
   </div>
 </div>
@@ -277,7 +286,7 @@
         <strong>Age:</strong><span>${personal.age}</span>
         <strong>Phone:</strong><span>${personal.phone}</span>
         <strong>Role:</strong><span>${prefs.role}</span>
-        <strong>Priority:</strong><span>${prefs.priority|upper}</span>
+        <strong>Priority:</strong><span style="text-transform:uppercase">${prefs.priority}</span>
         <strong>Rating:</strong><span>${rating}/5</span>
         <strong>Experience:</strong><span>${sliders.experience}%</span>
         <strong>Favorite Color:</strong><span style="display:flex;align-items:center;gap:0.4rem;"><span style="width:0.85rem;height:0.85rem;border-radius:50%;display:inline-block;background:${extras.favColor};border:1px solid #d1d5db;"></span>${extras.favColor}</span>

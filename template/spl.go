@@ -58,6 +58,7 @@ func NewSPL(directory string, extension ...string) *SPLEngine {
 	}
 	e.engine.AutoEscape = true
 	e.engine.BaseDir = directory
+	e.engine.SecureMode = true
 	return e
 }
 

@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Ctx struct {
@@ -48,6 +49,9 @@ type Ctx struct {
 	queryParsed bool
 	queryParams []Param
 	qcount      int
+
+	responseCookies []Cookie
+	responseTime    time.Time
 }
 
 type localEntry struct {
@@ -115,6 +119,8 @@ func (c *Ctx) reset() {
 	c.handlers = nil
 	c.handlerIndex = 0
 	c.cachedIP = ""
+	c.responseCookies = c.responseCookies[:0]
+	c.responseTime = time.Time{}
 }
 
 // Next continues the current middleware chain. A handler may return without
@@ -438,6 +444,13 @@ func (c *Ctx) writeResponseString(s string) error {
 	}
 	buf = appendExtraHeaders(buf, c.extraHeaders)
 
+	// Cookies
+	for i := range c.responseCookies {
+		buf = append(buf, "Set-Cookie: "...)
+		buf = append(buf, c.responseCookies[i].String()...)
+		buf = append(buf, '\r', '\n')
+	}
+
 	bodyAllowed := responseBodyAllowed(c.status)
 	if bodyAllowed {
 		buf = append(buf, "Content-Length: "...)
@@ -459,6 +472,7 @@ func (c *Ctx) writeResponseString(s string) error {
 		buf = append(buf, s...)
 	}
 
+	c.responseTime = time.Now()
 	*c.writeBuf = buf
 	return writeAll(c.conn, buf)
 }
@@ -501,6 +515,13 @@ func (c *Ctx) writeResponse(body []byte) error {
 	}
 	buf = appendExtraHeaders(buf, c.extraHeaders)
 
+	// Cookies
+	for i := range c.responseCookies {
+		buf = append(buf, "Set-Cookie: "...)
+		buf = append(buf, c.responseCookies[i].String()...)
+		buf = append(buf, '\r', '\n')
+	}
+
 	bodyAllowed := responseBodyAllowed(c.status)
 	if bodyAllowed {
 		buf = append(buf, "Content-Length: "...)
@@ -521,6 +542,7 @@ func (c *Ctx) writeResponse(body []byte) error {
 		buf = append(buf, body...)
 	}
 
+	c.responseTime = time.Now()
 	*c.writeBuf = buf
 	return writeAll(c.conn, buf)
 }

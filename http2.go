@@ -737,6 +737,9 @@ func (h *h2Conn) sendResponseHeaders(s *h2Stream, c *Ctx, contentLength *int, en
 		}
 		fields = append(fields, hpack.HeaderField{Name: name, Value: string(c.extraHeaders[i].Value)})
 	}
+	for i := range c.responseCookies {
+		fields = append(fields, hpack.HeaderField{Name: "set-cookie", Value: c.responseCookies[i].String()})
+	}
 	if headerListSize(fields) > int(h.peerMaxHeaderList.Load()) {
 		return h2ConnError{h2InternalError}
 	}

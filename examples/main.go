@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/orgware/fasthttp/middleware/recover"
 	"github.com/orgware/fasthttp/middleware/requestid"
 	"github.com/orgware/fasthttp/middleware/security"
+	"github.com/orgware/fasthttp/middleware/session"
 	"github.com/orgware/fasthttp/middleware/timeout"
 	"github.com/orgware/fasthttp/template"
 )
@@ -97,6 +99,66 @@ func main() {
 		Window: time.Minute,
 	}))
 	app.Use(compress.New())
+
+	// ──────────────────────────────────────────────────────────────────────
+	// 3.5 SESSION
+	// ──────────────────────────────────────────────────────────────────────
+	sessionStore := fh.NewMemoryStore(5 * time.Minute)
+	sessionManager := fh.NewSessionManager(sessionStore,
+		fh.SessionCookieName("demo_sid"),
+		fh.SessionMaxAge(24*time.Hour),
+		fh.SessionHTTPOnly(true),
+		fh.SessionSecure(false),
+		fh.SessionPath("/"),
+	)
+	app.Use(session.New(sessionManager))
+
+	// Auth middleware: redirects to /login when session has no "user" key.
+	auth := func(ctx *fh.Ctx) error {
+		s := session.Get(ctx)
+		if s.Get("user") == nil {
+			return ctx.Redirect("/login", 302)
+		}
+		return ctx.Next()
+	}
+
+	app.Get("/login", func(ctx *fh.Ctx) error {
+		s := session.Get(ctx)
+		if s.Get("user") != nil {
+			return ctx.Redirect("/dashboard", 302)
+		}
+		return ctx.Render("login", map[string]any{"title": "Sign In", "siteName": "fasthttp", "error": ""})
+	})
+	app.Post("/api/login", func(ctx *fh.Ctx) error {
+		body := string(ctx.Body())
+		username := parseFormValue(body, "username")
+		password := parseFormValue(body, "password")
+		if username != "admin" || password != "password" {
+			return ctx.Render("login", map[string]any{"title": "Sign In", "siteName": "fasthttp", "error": "Invalid credentials"})
+		}
+		s := session.Get(ctx)
+		s.Set("user", username)
+		s.Set("role", "admin")
+		s.Set("loginTime", time.Now().Format(time.RFC3339))
+		sessionManager.Regenerate(ctx, s)
+		return ctx.Redirect("/dashboard", 302)
+	})
+	app.Get("/dashboard", auth, func(ctx *fh.Ctx) error {
+		s := session.Get(ctx)
+		return ctx.Render("dashboard", map[string]any{
+			"title":     "Dashboard",
+			"siteName":  "fasthttp",
+			"user":      s.Get("user"),
+			"role":      s.Get("role"),
+			"loginTime": s.Get("loginTime"),
+			"sessionID": s.ID[:16] + "...",
+		})
+	})
+	app.Post("/api/logout", func(ctx *fh.Ctx) error {
+		s := session.Get(ctx)
+		sessionManager.Destroy(ctx, s)
+		return ctx.Redirect("/login", 302)
+	})
 
 	// Per-request start time via Locals
 	app.Use(func(ctx *fh.Ctx) error {
@@ -532,4 +594,19 @@ func main() {
 	if err := app.Listen(addr); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func parseFormValue(body, key string) string {
+	prefix := key + "="
+	for _, part := range strings.Split(body, "&") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, prefix) {
+			val := part[len(prefix):]
+			if decoded, err := url.QueryUnescape(val); err == nil {
+				return decoded
+			}
+			return val
+		}
+	}
+	return ""
 }
