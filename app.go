@@ -501,7 +501,9 @@ func (a *App) serveConn(conn net.Conn) {
 	if tc, ok := conn.(*tls.Conn); ok && !a.cfg.DisableHTTP2 {
 		_ = tc.SetDeadline(time.Now().Add(a.cfg.ReadTimeout))
 		if err := tc.Handshake(); err != nil {
-			a.emitError(err)
+			if !isExpectedConnErr(err) {
+				a.emitError(err)
+			}
 			return
 		}
 		_ = tc.SetDeadline(time.Time{})
@@ -540,7 +542,7 @@ func (a *App) serveConn(conn net.Conn) {
 				accumulated = buf[:len(accumulated)+n]
 			}
 			if err != nil {
-				if err != io.EOF {
+				if err != io.EOF && !isExpectedConnErr(err) {
 					a.emitError(err)
 				}
 				return
@@ -636,7 +638,7 @@ func (a *App) serveConn(conn net.Conn) {
 						if len(accumulated) >= messageEnd {
 							break
 						}
-						if err != io.EOF {
+						if err != io.EOF && !isExpectedConnErr(err) {
 							a.emitError(err)
 						}
 						releaseCtx(ctx)
@@ -782,6 +784,11 @@ func (a *App) emitError(err error) {
 	for _, fn := range a.hooks.onError {
 		fn(err)
 	}
+}
+
+func isExpectedConnErr(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout() || errors.Is(err, net.ErrClosed)
 }
 
 func defaultErrorHandler(ctx *Ctx, err error) {
