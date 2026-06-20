@@ -1,44 +1,194 @@
 package ipwhitelist
 
 import (
+	"errors"
 	"net"
 	"strings"
+	"sync"
 
 	fh "github.com/oarkflow/fasthttp"
 )
 
-func New(allowed ...string) fh.HandlerFunc {
-	networks := make([]*net.IPNet, 0, len(allowed))
-	ips := make([]net.IP, 0, len(allowed))
+var ErrForbidden = errors.New("ipwhitelist: forbidden")
 
-	for _, a := range allowed {
-		if strings.Contains(a, "/") {
-			_, n, err := net.ParseCIDR(a)
-			if err == nil {
-				networks = append(networks, n)
-			}
-		} else {
-			if ip := net.ParseIP(a); ip != nil {
-				ips = append(ips, ip)
-			}
-		}
+type KeyFunc func(ctx *fh.Ctx) string
+
+type ForbiddenHandler func(ctx *fh.Ctx) error
+
+type Store interface {
+	Allowed(ip net.IP) bool
+}
+
+type Config struct {
+	Allowed []string
+
+	Store Store
+
+	KeyFunc KeyFunc
+
+	// TrustProxyHeaders should only be enabled behind trusted proxies.
+	TrustProxyHeaders bool
+
+	Forbidden ForbiddenHandler
+}
+
+func New(allowed ...string) fh.HandlerFunc {
+	return NewWithConfig(Config{
+		Allowed: allowed,
+	})
+}
+
+func NewWithConfig(config Config) fh.HandlerFunc {
+	cfg, err := normalize(config)
+	if err != nil {
+		panic(err)
 	}
 
 	return func(ctx *fh.Ctx) error {
-		clientIP := net.ParseIP(ctx.IP())
-		if clientIP == nil {
-			return ctx.Status(403).SendString("Forbidden")
+		rawIP := ""
+
+		if cfg.KeyFunc != nil {
+			rawIP = cfg.KeyFunc(ctx)
 		}
-		for _, ip := range ips {
-			if ip.Equal(clientIP) {
-				return ctx.Next()
-			}
+
+		if rawIP == "" {
+			rawIP = clientIP(ctx, cfg.TrustProxyHeaders)
 		}
-		for _, n := range networks {
-			if n.Contains(clientIP) {
-				return ctx.Next()
-			}
+
+		ip := net.ParseIP(rawIP)
+		if ip == nil {
+			return cfg.Forbidden(ctx)
 		}
-		return ctx.Status(403).SendString("Forbidden")
+
+		if cfg.Store.Allowed(ip) {
+			return ctx.Next()
+		}
+
+		return cfg.Forbidden(ctx)
 	}
+}
+
+func normalize(cfg Config) (Config, error) {
+	if cfg.Forbidden == nil {
+		cfg.Forbidden = DefaultForbiddenHandler
+	}
+	if cfg.Store == nil {
+		store, err := NewMemoryStore(cfg.Allowed...)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.Store = store
+	}
+	return cfg, nil
+}
+
+func DefaultForbiddenHandler(ctx *fh.Ctx) error {
+	ctx.Set("Content-Type", "text/plain; charset=utf-8")
+	return ctx.Status(403).SendString("Forbidden")
+}
+
+func clientIP(ctx *fh.Ctx, trustProxy bool) string {
+	if trustProxy {
+		if ip := firstForwardedIP(ctx.Get("X-Forwarded-For")); ip != "" {
+			return ip
+		}
+		if ip := strings.TrimSpace(ctx.Get("X-Real-IP")); ip != "" {
+			return ip
+		}
+	}
+
+	return ctx.IP()
+}
+
+func firstForwardedIP(v string) string {
+	if v == "" {
+		return ""
+	}
+
+	if i := strings.IndexByte(v, ','); i >= 0 {
+		return strings.TrimSpace(v[:i])
+	}
+
+	return strings.TrimSpace(v)
+}
+
+// -----------------------------------------------------------------------------
+// In-memory whitelist store
+// -----------------------------------------------------------------------------
+
+type MemoryStore struct {
+	mu       sync.RWMutex
+	ips      []net.IP
+	networks []*net.IPNet
+}
+
+func NewMemoryStore(allowed ...string) (*MemoryStore, error) {
+	s := &MemoryStore{}
+	if err := s.Set(allowed...); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func MustMemoryStore(allowed ...string) *MemoryStore {
+	s, err := NewMemoryStore(allowed...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+func (s *MemoryStore) Set(allowed ...string) error {
+	ips := make([]net.IP, 0, len(allowed))
+	networks := make([]*net.IPNet, 0, len(allowed))
+
+	for _, item := range allowed {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+
+		if strings.Contains(item, "/") {
+			ip, network, err := net.ParseCIDR(item)
+			if err != nil {
+				return err
+			}
+			network.IP = ip
+			networks = append(networks, network)
+			continue
+		}
+
+		ip := net.ParseIP(item)
+		if ip == nil {
+			return errors.New("ipwhitelist: invalid IP: " + item)
+		}
+
+		ips = append(ips, ip)
+	}
+
+	s.mu.Lock()
+	s.ips = ips
+	s.networks = networks
+	s.mu.Unlock()
+
+	return nil
+}
+
+func (s *MemoryStore) Allowed(ip net.IP) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, allowed := range s.ips {
+		if allowed.Equal(ip) {
+			return true
+		}
+	}
+
+	for _, network := range s.networks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
 }
