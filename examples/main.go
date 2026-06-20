@@ -30,10 +30,9 @@ func main() {
 	// ──────────────────────────────────────────────────────────────────────
 	splEngine := template.NewSPL("examples/views")
 	splEngine.Config(template.SPLConfig{
-		Directory:  "examples/views",
-		Reload:     true,
-		SSR:        true,
-		Globals:    map[string]any{"siteName": "SPL Fasthttp Demo"},
+		Directory: "examples/views",
+		SSR:       true,
+		Globals:   map[string]any{"siteName": "SPL Fasthttp Demo"},
 	})
 
 	app := fh.New(fh.Config{
@@ -196,22 +195,20 @@ func main() {
 			"sha":  ctx.Param("sha"),
 		})
 	})
-	subFS, _ := fs.Sub(publicFiles, "public")
-	app.StaticFS("/static", subFS, fh.StaticConfig{
-		Compress:   true,
-		MaxAge:     3600,
-		Browse:     true,
-		StripSlash: true,
-	})
-	app.StaticFS("/embed", subFS, fh.StaticConfig{
-		Compress:   true,
-		Browse:     true,
-		StripSlash: true,
-	})
 	app.Get("/static/spl-runtime.min.js", func(ctx *fh.Ctx) error {
 		ctx.Set("Content-Type", "application/javascript")
 		ctx.Set("Cache-Control", "public, max-age=31536000, immutable")
 		return ctx.SendString(splEngine.RuntimeJS())
+	})
+	subFS, _ := fs.Sub(publicFiles, "public")
+	app.StaticFS("/static", subFS, fh.StaticConfig{
+		Compress:   true,
+		MaxAge:     3600,
+		StripSlash: true,
+	})
+	app.StaticFS("/embed", subFS, fh.StaticConfig{
+		Compress:   true,
+		StripSlash: true,
 	})
 	app.Get("/search", func(ctx *fh.Ctx) error {
 		q := ctx.Query("q")
