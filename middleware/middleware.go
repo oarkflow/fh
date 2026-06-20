@@ -1,10 +1,14 @@
 package middleware
 
 import (
+	"bytes"
 	"compress/gzip"
+	"context"
+	"crypto/subtle"
+	"errors"
 	"fmt"
+	"io"
 	"log"
-	"math/rand"
 	"net"
 	"strconv"
 	"strings"
@@ -94,21 +98,41 @@ func CORS(config ...CORSConfig) fh.HandlerFunc {
 		cfg = config[0]
 	}
 
-	origins := strings.Join(cfg.AllowOrigins, ", ")
+	allowedOrigins := make(map[string]struct{}, len(cfg.AllowOrigins))
+	wildcard := false
+	for _, origin := range cfg.AllowOrigins {
+		if origin == "*" {
+			wildcard = true
+		} else {
+			allowedOrigins[origin] = struct{}{}
+		}
+	}
 	methods := strings.Join(cfg.AllowMethods, ", ")
 	headers := strings.Join(cfg.AllowHeaders, ", ")
 	maxAge := strconv.Itoa(cfg.MaxAge)
 
 	return func(ctx *fh.Ctx) error {
-		ctx.Set("Access-Control-Allow-Origin", origins)
-		ctx.Set("Access-Control-Allow-Methods", methods)
-		ctx.Set("Access-Control-Allow-Headers", headers)
-		ctx.Set("Access-Control-Max-Age", maxAge)
+		origin := ctx.Get("Origin")
+		if origin == "" {
+			return ctx.Next()
+		}
+		_, exact := allowedOrigins[origin]
+		if !wildcard && !exact {
+			return ctx.Next()
+		}
+		if wildcard && !cfg.AllowCredentials {
+			ctx.Set("Access-Control-Allow-Origin", "*")
+		} else {
+			ctx.Set("Access-Control-Allow-Origin", origin)
+			ctx.Append("Vary", "Origin")
+		}
 		if cfg.AllowCredentials {
 			ctx.Set("Access-Control-Allow-Credentials", "true")
 		}
-
-		if ctx.Method() == "OPTIONS" {
+		if ctx.Method() == "OPTIONS" && ctx.Get("Access-Control-Request-Method") != "" {
+			ctx.Set("Access-Control-Allow-Methods", methods)
+			ctx.Set("Access-Control-Allow-Headers", headers)
+			ctx.Set("Access-Control-Max-Age", maxAge)
 			return ctx.SendStatus(204)
 		}
 
@@ -119,6 +143,7 @@ func CORS(config ...CORSConfig) fh.HandlerFunc {
 // ── RequestID ──────────────────────────────────────────────────────────────
 
 var ridCounter uint64
+var ridPrefix = strconv.FormatInt(time.Now().UnixNano(), 36)
 
 // RequestID attaches a unique X-Request-ID to every request.
 func RequestID() fh.HandlerFunc {
@@ -126,7 +151,7 @@ func RequestID() fh.HandlerFunc {
 		id := ctx.Get("X-Request-ID")
 		if id == "" {
 			n := atomic.AddUint64(&ridCounter, 1)
-			id = strconv.FormatUint(n, 36) + "-" + strconv.FormatUint(uint64(rand.Int63()), 36)
+			id = ridPrefix + "-" + strconv.FormatUint(n, 36)
 		}
 		ctx.Set("X-Request-ID", id)
 		ctx.Locals("requestID", id)
@@ -138,9 +163,9 @@ func RequestID() fh.HandlerFunc {
 
 // RateLimiterConfig configures the rate limiter middleware.
 type RateLimiterConfig struct {
-	Max        int           // requests per Window
-	Window     time.Duration // sliding window size
-	KeyFunc    func(*fh.Ctx) string
+	Max          int           // requests per Window
+	Window       time.Duration // sliding window size
+	KeyFunc      func(*fh.Ctx) string
 	LimitReached func(*fh.Ctx) error
 }
 
@@ -170,26 +195,23 @@ func RateLimiter(config RateLimiterConfig) fh.HandlerFunc {
 
 	var mu sync.RWMutex
 	buckets := make(map[string]*rateBucket, 1024)
+	var nextCleanup atomic.Int64
+	nextCleanup.Store(time.Now().Add(config.Window).UnixNano())
 
-	// periodic cleanup goroutine
-	go func() {
-		tick := time.NewTicker(config.Window)
-		defer tick.Stop()
-		for range tick.C {
-			now := time.Now()
+	return func(ctx *fh.Ctx) error {
+		now := time.Now()
+		if deadline := nextCleanup.Load(); now.UnixNano() >= deadline && nextCleanup.CompareAndSwap(deadline, now.Add(config.Window).UnixNano()) {
 			mu.Lock()
 			for k, b := range buckets {
 				b.mu.Lock()
-				if now.After(b.resetAt) {
+				expired := now.After(b.resetAt)
+				b.mu.Unlock()
+				if expired {
 					delete(buckets, k)
 				}
-				b.mu.Unlock()
 			}
 			mu.Unlock()
 		}
-	}()
-
-	return func(ctx *fh.Ctx) error {
 		key := config.KeyFunc(ctx)
 
 		mu.RLock()
@@ -207,7 +229,7 @@ func RateLimiter(config RateLimiterConfig) fh.HandlerFunc {
 		}
 
 		b.mu.Lock()
-		now := time.Now()
+		now = time.Now()
 		if now.After(b.resetAt) {
 			b.count = 0
 			b.resetAt = now.Add(config.Window)
@@ -234,6 +256,36 @@ func max(a, b int) int {
 	return b
 }
 
+func acceptsEncoding(header, encoding string) bool {
+	found, quality, wildcardQuality := false, 0.0, -1.0
+	for _, item := range strings.Split(header, ",") {
+		parts := strings.Split(item, ";")
+		name := strings.TrimSpace(parts[0])
+		q := 1.0
+		for _, parameter := range parts[1:] {
+			kv := strings.SplitN(strings.TrimSpace(parameter), "=", 2)
+			if len(kv) == 2 && strings.EqualFold(kv[0], "q") {
+				parsed, err := strconv.ParseFloat(kv[1], 64)
+				if err != nil || parsed < 0 || parsed > 1 {
+					q = 0
+				} else {
+					q = parsed
+				}
+			}
+		}
+		if strings.EqualFold(name, encoding) {
+			found, quality = true, q
+		}
+		if name == "*" {
+			wildcardQuality = q
+		}
+	}
+	if found {
+		return quality > 0
+	}
+	return wildcardQuality > 0
+}
+
 // ── Compress ───────────────────────────────────────────────────────────────
 
 var gzipPool = sync.Pool{
@@ -244,18 +296,33 @@ var gzipPool = sync.Pool{
 }
 
 // Compress adds gzip compression for responses when the client accepts it.
-// Uses pooled gzip writers — zero allocation per request.
+// Uses pooled gzip writers. Streaming handlers are buffered before compression
+// so the wire representation is never mislabeled.
 func Compress() fh.HandlerFunc {
 	return func(ctx *fh.Ctx) error {
 		ae := ctx.Get("Accept-Encoding")
-		if !strings.Contains(ae, "gzip") {
+		if !acceptsEncoding(ae, "gzip") {
 			return ctx.Next()
 		}
 		// Mark response for compression; actual compression done via wrapper
 		ctx.Set("Content-Encoding", "gzip")
-		ctx.Set("Vary", "Accept-Encoding")
-		// Note: full streaming gzip requires wrapping the conn writer.
-		// This sets headers; integrate with ctx.writeResponse for full impl.
+		ctx.Append("Vary", "Accept-Encoding")
+		ctx.TransformBody(func(body []byte) ([]byte, error) {
+			var dst bytes.Buffer
+			w := gzipPool.Get().(*gzip.Writer)
+			w.Reset(&dst)
+			if _, err := w.Write(body); err != nil {
+				gzipPool.Put(w)
+				return nil, err
+			}
+			if err := w.Close(); err != nil {
+				gzipPool.Put(w)
+				return nil, err
+			}
+			w.Reset(io.Discard)
+			gzipPool.Put(w)
+			return dst.Bytes(), nil
+		})
 		return ctx.Next()
 	}
 }
@@ -267,7 +334,7 @@ func BasicAuth(username, password string) fh.HandlerFunc {
 	expected := "Basic " + base64Encode(username+":"+password)
 	return func(ctx *fh.Ctx) error {
 		auth := ctx.Get("Authorization")
-		if auth != expected {
+		if len(auth) != len(expected) || subtle.ConstantTimeCompare([]byte(auth), []byte(expected)) != 1 {
 			ctx.Set("WWW-Authenticate", `Basic realm="Restricted"`)
 			return ctx.Status(401).SendString("Unauthorized")
 		}
@@ -281,16 +348,17 @@ func BasicAuth(username, password string) fh.HandlerFunc {
 // If the handler doesn't complete in time, a 503 is returned.
 func Timeout(d time.Duration) fh.HandlerFunc {
 	return func(ctx *fh.Ctx) error {
-		done := make(chan error, 1)
-		go func() {
-			done <- ctx.Next()
-		}()
-		select {
-		case err := <-done:
-			return err
-		case <-time.After(d):
+		deadline, cancel := context.WithTimeout(ctx.Context(), d)
+		defer cancel()
+		ctx.SetContext(deadline)
+		// Go cannot safely preempt arbitrary handler code. Downstream work must
+		// observe ctx.Context(); running it concurrently would permit writes to
+		// a recycled request context after a timeout response.
+		err := ctx.Next()
+		if errors.Is(deadline.Err(), context.DeadlineExceeded) && !ctx.Responded() {
 			return ctx.Status(503).SendString("Request Timeout")
 		}
+		return err
 	}
 }
 

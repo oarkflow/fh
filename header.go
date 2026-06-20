@@ -7,23 +7,23 @@ import (
 
 // Common header names as byte slices — avoids repeated string→[]byte conversions.
 var (
-	headerContentType     = []byte("Content-Type")
-	headerContentLength   = []byte("Content-Length")
-	headerConnection      = []byte("Connection")
+	headerContentType      = []byte("Content-Type")
+	headerContentLength    = []byte("Content-Length")
+	headerConnection       = []byte("Connection")
 	headerTransferEncoding = []byte("Transfer-Encoding")
-	headerHost            = []byte("Host")
+	headerHost             = []byte("Host")
 
-	methodGET    = []byte("GET")
-	methodPOST   = []byte("POST")
-	methodPUT    = []byte("PUT")
-	methodDELETE = []byte("DELETE")
-	methodPATCH  = []byte("PATCH")
-	methodHEAD   = []byte("HEAD")
+	methodGET     = []byte("GET")
+	methodPOST    = []byte("POST")
+	methodPUT     = []byte("PUT")
+	methodDELETE  = []byte("DELETE")
+	methodPATCH   = []byte("PATCH")
+	methodHEAD    = []byte("HEAD")
 	methodOPTIONS = []byte("OPTIONS")
 
-	strHTTP11 = []byte("HTTP/1.1")
-	strHTTP10 = []byte("HTTP/1.0")
-	strCRLF   = []byte("\r\n")
+	strHTTP11     = []byte("HTTP/1.1")
+	strHTTP10     = []byte("HTTP/1.0")
+	strCRLF       = []byte("\r\n")
 	strColonSpace = []byte(": ")
 )
 
@@ -40,14 +40,16 @@ type Header struct {
 // RequestHeader holds parsed request metadata. All fields are slices
 // into the underlying read buffer — no allocations during parse.
 type RequestHeader struct {
-	Method        []byte
-	URI           []byte
-	Proto         []byte
-	Host          []byte
-	ContentType   []byte
-	ContentLength int
-	KeepAlive     bool
-	Chunked       bool
+	Method                      []byte
+	URI                         []byte
+	Proto                       []byte
+	Host                        []byte
+	ContentType                 []byte
+	ContentLength               int
+	HasContentLength            bool
+	KeepAlive                   bool
+	Chunked                     bool
+	UnsupportedTransferEncoding bool
 
 	headers []Header // raw headers, capped at maxHeaders
 	hcount  int
@@ -56,14 +58,19 @@ type RequestHeader struct {
 const maxHeaders = 64
 
 func (h *RequestHeader) reset() {
-	h.Method = h.Method[:0]
-	h.URI = h.URI[:0]
-	h.Proto = h.Proto[:0]
-	h.Host = h.Host[:0]
-	h.ContentType = h.ContentType[:0]
+	if h.hcount > 0 {
+		clear(h.headers[:h.hcount])
+	}
+	h.Method = nil
+	h.URI = nil
+	h.Proto = nil
+	h.Host = nil
+	h.ContentType = nil
 	h.ContentLength = 0
+	h.HasContentLength = false
 	h.KeepAlive = false
 	h.Chunked = false
+	h.UnsupportedTransferEncoding = false
 	h.hcount = 0
 }
 
@@ -74,6 +81,9 @@ func (h *RequestHeader) Peek(name []byte) []byte {
 		if bytesEqualFold(h.headers[i].Key, name) {
 			return h.headers[i].Value
 		}
+	}
+	if bytesEqualFold(name, headerHost) {
+		return h.Host
 	}
 	return nil
 }
@@ -95,6 +105,9 @@ func parseRequestLine(buf []byte, h *RequestHeader) (int, error) {
 		return 0, ErrMalformedRequest
 	}
 	h.Method = buf[:i]
+	if len(h.Method) == 0 || !validToken(h.Method) {
+		return 0, ErrMalformedRequest
+	}
 	buf = buf[i+1:]
 
 	j := bytes.IndexByte(buf, ' ')
@@ -102,6 +115,21 @@ func parseRequestLine(buf []byte, h *RequestHeader) (int, error) {
 		return 0, ErrMalformedRequest
 	}
 	h.URI = buf[:j]
+	for _, c := range h.URI {
+		if c <= 0x20 || c == 0x7f || c == '#' {
+			return 0, ErrMalformedRequest
+		}
+	}
+	validTarget := len(h.URI) > 0 && h.URI[0] == '/'
+	if bytesEqualFold(h.Method, methodOPTIONS) && bytes.Equal(h.URI, []byte("*")) {
+		validTarget = true
+	}
+	if bytesEqualFold(h.Method, []byte("CONNECT")) && len(h.URI) > 0 && bytes.IndexByte(h.URI, '/') < 0 {
+		validTarget = true
+	}
+	if !validTarget {
+		return 0, ErrMalformedRequest
+	}
 	buf = buf[j+1:]
 
 	k := bytes.Index(buf, strCRLF)
@@ -109,6 +137,9 @@ func parseRequestLine(buf []byte, h *RequestHeader) (int, error) {
 		return 0, ErrMalformedRequest
 	}
 	h.Proto = buf[:k]
+	if !bytes.Equal(h.Proto, strHTTP11) && !bytes.Equal(h.Proto, strHTTP10) {
+		return 0, ErrMalformedRequest
+	}
 	h.KeepAlive = bytes.Equal(h.Proto, strHTTP11)
 	return i + 1 + j + 1 + k + 2, nil
 }
@@ -120,6 +151,7 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 		h.headers = make([]Header, maxHeaders)
 	}
 	h.hcount = 0
+	seenHost, seenTransferEncoding := false, false
 	pos := 0
 	for {
 		if pos >= len(src) {
@@ -141,10 +173,13 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 			return 0, ErrMalformedRequest
 		}
 		key := src[pos : pos+colon]
+		if len(key) == 0 || !validToken(key) {
+			return 0, ErrMalformedRequest
+		}
 		pos += colon + 1
 
 		// skip optional space
-		for pos < len(src) && src[pos] == ' ' {
+		for pos < len(src) && (src[pos] == ' ' || src[pos] == '\t') {
 			pos++
 		}
 
@@ -163,27 +198,140 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 			val = trimRight(src[pos : pos+end])
 			pos += end + 2
 		}
+		for _, c := range val {
+			if (c < 0x20 && c != '\t') || c == 0x7f {
+				return 0, ErrMalformedRequest
+			}
+		}
 
 		// store well-known headers directly
 		switch {
 		case bytesEqualFold(key, headerHost):
+			if seenHost {
+				return 0, ErrMalformedRequest
+			}
+			seenHost = true
 			h.Host = val
 		case bytesEqualFold(key, headerContentType):
 			h.ContentType = val
 		case bytesEqualFold(key, headerContentLength):
-			h.ContentLength = parseIntFast(val)
+			n, ok := parseContentLength(val)
+			if !ok || (h.HasContentLength && n != h.ContentLength) {
+				return 0, ErrMalformedRequest
+			}
+			h.ContentLength, h.HasContentLength = n, true
 		case bytesEqualFold(key, headerConnection):
-			h.KeepAlive = bytesEqualFold(val, []byte("keep-alive"))
+			if hasHeaderToken(val, "close") {
+				h.KeepAlive = false
+			} else if bytes.Equal(h.Proto, strHTTP10) && hasHeaderToken(val, "keep-alive") {
+				h.KeepAlive = true
+			}
 		case bytesEqualFold(key, headerTransferEncoding):
-			h.Chunked = bytes.Contains(val, []byte("chunked"))
+			if seenTransferEncoding {
+				return 0, ErrMalformedRequest
+			}
+			seenTransferEncoding = true
+			// RFC 9112 requires chunked to be the final transfer coding. This
+			// server currently accepts the common, unstacked form only.
+			h.Chunked = strEqFold(trimOWS(val), "chunked")
+			h.UnsupportedTransferEncoding = !h.Chunked
 		}
 
-		if h.hcount < maxHeaders {
-			h.headers[h.hcount] = Header{Key: key, Value: val}
-			h.hcount++
+		if h.hcount >= maxHeaders {
+			return 0, ErrMalformedRequest
 		}
+		h.headers[h.hcount] = Header{Key: key, Value: val}
+		h.hcount++
+	}
+	if h.Chunked && h.HasContentLength {
+		return 0, ErrMalformedRequest
+	}
+	if bytes.Equal(h.Proto, strHTTP11) && len(h.Host) == 0 {
+		return 0, ErrMalformedRequest
 	}
 	return pos, nil
+}
+
+func trimOWS(b []byte) []byte {
+	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t') {
+		b = b[1:]
+	}
+	return trimRight(b)
+}
+
+func validToken(b []byte) bool {
+	for _, c := range b {
+		if c <= 0x20 || c >= 0x7f || forbiddenTokenByte(c) {
+			return false
+		}
+	}
+	return len(b) > 0
+}
+
+func forbiddenTokenByte(c byte) bool {
+	switch c {
+	case '(', ')', '<', '>', '@', ',', ';', ':', '\\', '"', '/', '[', ']', '?', '=', '{', '}':
+		return true
+	}
+	return false
+}
+
+func hasHeaderToken(value []byte, token string) bool {
+	for len(value) > 0 {
+		end := indexByte(value, ',')
+		var part []byte
+		if end < 0 {
+			part, value = value, nil
+		} else {
+			part, value = value[:end], value[end+1:]
+		}
+		for len(part) > 0 && (part[0] == ' ' || part[0] == '\t') {
+			part = part[1:]
+		}
+		part = trimRight(part)
+		if strEqFold(part, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func strEqFold(b []byte, s string) bool {
+	if len(b) != len(s) {
+		return false
+	}
+	for i, c := range b {
+		d := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c |= 0x20
+		}
+		if d >= 'A' && d <= 'Z' {
+			d |= 0x20
+		}
+		if c != d {
+			return false
+		}
+	}
+	return true
+}
+
+func parseContentLength(b []byte) (int, bool) {
+	if len(b) == 0 {
+		return 0, false
+	}
+	n := 0
+	maxInt := int(^uint(0) >> 1)
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		d := int(c - '0')
+		if n > (maxInt-d)/10 {
+			return 0, false
+		}
+		n = n*10 + d
+	}
+	return n, true
 }
 
 // trimRight removes trailing whitespace/CR.

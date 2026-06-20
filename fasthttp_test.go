@@ -2,10 +2,12 @@ package fasthttp_test
 
 import (
 	"bufio"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -169,11 +171,13 @@ func TestQueryParams(t *testing.T) {
 func TestMiddlewareChain(t *testing.T) {
 	app := fh.New()
 	var order []string
+	done := make(chan struct{})
 
 	app.Use(func(ctx *fh.Ctx) error {
 		order = append(order, "mw1")
 		err := ctx.Next()
 		order = append(order, "mw1-after")
+		close(done)
 		return err
 	})
 
@@ -189,6 +193,7 @@ func TestMiddlewareChain(t *testing.T) {
 
 	addr := testServer(t, app)
 	doRequest(t, addr, "GET", "/", "", nil)
+	<-done
 
 	expected := []string{"mw1", "mw2", "handler", "mw1-after"}
 	for i, v := range expected {
@@ -214,10 +219,10 @@ func TestGroupRoutes(t *testing.T) {
 
 func TestGroupMiddleware(t *testing.T) {
 	app := fh.New()
-	var called bool
+	var called atomic.Bool
 
 	admin := app.Group("/admin", func(ctx *fh.Ctx) error {
-		called = true
+		called.Store(true)
 		return ctx.Next()
 	})
 	admin.Get("/secret", func(ctx *fh.Ctx) error {
@@ -226,7 +231,7 @@ func TestGroupMiddleware(t *testing.T) {
 
 	addr := testServer(t, app)
 	doRequest(t, addr, "GET", "/admin/secret", "", nil)
-	if !called {
+	if !called.Load() {
 		t.Fatal("group middleware not called")
 	}
 }
@@ -340,6 +345,48 @@ func TestRequestID(t *testing.T) {
 	resp, _ := io.ReadAll(conn)
 	if !strings.Contains(string(resp), "X-Request-ID") {
 		t.Fatalf("missing X-Request-ID header in response: %s", resp)
+	}
+}
+
+func TestCompressionNegotiationAndStreaming(t *testing.T) {
+	app := fh.New()
+	app.Use(middleware.Compress())
+	app.Get("/compressed", func(ctx *fh.Ctx) error {
+		return ctx.Stream(func(w *fh.StreamWriter) error {
+			_, _ = w.Write([]byte("hello "))
+			_, err := w.Write([]byte("world"))
+			return err
+		})
+	})
+	addr := testServer(t, app)
+	code, body := doRequest(t, addr, "GET", "/compressed", "", map[string]string{"Accept-Encoding": "gzip"})
+	if code != 200 {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	zr, err := gzip.NewReader(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := io.ReadAll(zr)
+	zr.Close()
+	if err != nil || string(decoded) != "hello world" {
+		t.Fatalf("decoded=%q err=%v", decoded, err)
+	}
+
+	_, body = doRequest(t, addr, "GET", "/compressed", "", map[string]string{"Accept-Encoding": "gzip;q=0"})
+	if !strings.Contains(body, "hello ") || !strings.Contains(body, "world") || strings.HasPrefix(body, "\x1f\x8b") {
+		t.Fatalf("q=0 response negotiation failed: %q", body)
+	}
+}
+
+func TestCooperativeTimeout(t *testing.T) {
+	app := fh.New()
+	app.Use(middleware.Timeout(5 * time.Millisecond))
+	app.Get("/timeout", func(ctx *fh.Ctx) error { <-ctx.Context().Done(); return nil })
+	addr := testServer(t, app)
+	code, _ := doRequest(t, addr, "GET", "/timeout", "", nil)
+	if code != 503 {
+		t.Fatalf("expected 503, got %d", code)
 	}
 }
 

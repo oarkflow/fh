@@ -8,8 +8,6 @@ import (
 	"time"
 
 	fh "github.com/orgware/fasthttp"
-
-	"github.com/gofiber/fiber/v2"
 )
 
 // ── In-memory pipe-based listener (no TCP stack, low noise) ───────────────
@@ -121,88 +119,6 @@ func BenchmarkFH_RouteWithParams(b *testing.B) {
 
 	ln := newPipeListener()
 	go app.Serve(ln)
-	defer app.Shutdown()
-
-	client, server := pipePair()
-	ln.ch <- server
-	defer client.Close()
-
-	req := []byte("GET /users/42/posts/7 HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
-	buf := make([]byte, 4096)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		client.Write(req)
-		client.Read(buf)
-	}
-}
-
-// ── gofiber pipe benchmarks ──────────────────────────────────────────────
-
-func BenchmarkFiber_HelloWorld(b *testing.B) {
-	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	app.Get("/bench", func(ctx *fiber.Ctx) error {
-		return ctx.SendString("hello")
-	})
-
-	ln := newPipeListener()
-	go app.Listener(ln)
-	defer app.Shutdown()
-
-	client, server := pipePair()
-	ln.ch <- server
-	defer client.Close()
-
-	req := []byte("GET /bench HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
-	buf := make([]byte, 4096)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		client.Write(req)
-		n, err := client.Read(buf)
-		if err != nil && err != io.EOF {
-			b.Fatal(err)
-		}
-		_ = n
-	}
-}
-
-func BenchmarkFiber_ParallelRequests(b *testing.B) {
-	b.ResetTimer()
-	b.ReportAllocs()
-	b.RunParallel(func(pb *testing.PB) {
-		app := fiber.New(fiber.Config{DisableStartupMessage: true})
-		app.Get("/bench", func(ctx *fiber.Ctx) error {
-			return ctx.SendString("hello")
-		})
-		ln := newPipeListener()
-		go app.Listener(ln)
-		defer app.Shutdown()
-
-		client, server := pipePair()
-		ln.ch <- server
-		defer client.Close()
-
-		req := []byte("GET /bench HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
-		buf := make([]byte, 4096)
-		for pb.Next() {
-			client.Write(req)
-			client.Read(buf)
-		}
-	})
-}
-
-func BenchmarkFiber_RouteWithParams(b *testing.B) {
-	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	app.Get("/users/:id/posts/:post", func(ctx *fiber.Ctx) error {
-		return ctx.SendString(ctx.Params("id") + ctx.Params("post"))
-	})
-
-	ln := newPipeListener()
-	go app.Listener(ln)
 	defer app.Shutdown()
 
 	client, server := pipePair()

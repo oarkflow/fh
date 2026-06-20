@@ -5,10 +5,10 @@ import (
 )
 
 var (
-	bufPool512  = sync.Pool{New: func() any { b := make([]byte, 512); return &b }}
-	bufPool4K   = sync.Pool{New: func() any { b := make([]byte, 4096); return &b }}
-	bufPool16K  = sync.Pool{New: func() any { b := make([]byte, 16384); return &b }}
-	bufPool64K  = sync.Pool{New: func() any { b := make([]byte, 65536); return &b }}
+	bufPool512 = sync.Pool{New: func() any { b := make([]byte, 512); return &b }}
+	bufPool4K  = sync.Pool{New: func() any { b := make([]byte, 4096); return &b }}
+	bufPool16K = sync.Pool{New: func() any { b := make([]byte, 16384); return &b }}
+	bufPool64K = sync.Pool{New: func() any { b := make([]byte, 65536); return &b }}
 )
 
 func getBuf(size int) *[]byte {
@@ -20,7 +20,11 @@ func getBuf(size int) *[]byte {
 	case size <= 16384:
 		return bufPool16K.Get().(*[]byte)
 	default:
-		return bufPool64K.Get().(*[]byte)
+		if size <= 65536 {
+			return bufPool64K.Get().(*[]byte)
+		}
+		b := make([]byte, size)
+		return &b
 	}
 }
 
