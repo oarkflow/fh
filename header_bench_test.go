@@ -28,6 +28,13 @@ func BenchmarkParseRequestLineOptions(b *testing.B) {
 	}
 }
 
+var (
+	benchMethod = []byte("POST")
+	benchPath   = []byte("/path")
+	benchGet    = []byte("GET")
+	benchRoot   = []byte("/")
+)
+
 func BenchmarkParseHeaders(b *testing.B) {
 	src := []byte("Host: example.com\r\nContent-Type: application/json\r\nContent-Length: 42\r\nAccept: */*\r\nUser-Agent: test\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n")
 	var h RequestHeader
@@ -35,8 +42,8 @@ func BenchmarkParseHeaders(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h.reset()
-		h.Method = []byte("POST")
-		h.URI = []byte("/path")
+		h.Method = benchMethod
+		h.URI = benchPath
 		h.Proto = strHTTP11
 		parseHeaders(src, &h)
 	}
@@ -52,15 +59,15 @@ func BenchmarkParseHeadersMany(b *testing.B) {
 	buf.WriteString("\r\n")
 	src := buf.Bytes()
 	var h RequestHeader
-	h.Method = []byte("GET")
-	h.URI = []byte("/")
+	h.Method = benchGet
+	h.URI = benchRoot
 	h.Proto = strHTTP11
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h.reset()
-		h.Method = []byte("GET")
-		h.URI = []byte("/")
+		h.Method = benchGet
+		h.URI = benchRoot
 		h.Proto = strHTTP11
 		parseHeaders(src, &h)
 	}

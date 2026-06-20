@@ -421,10 +421,10 @@ func TestRequestID(t *testing.T) {
 func TestCompressionNegotiationAndStreaming(t *testing.T) {
 	app := fh.New()
 	app.Use(compress.New())
+	payload := strings.Repeat("hello world ", 60) // > 512 bytes to bypass MinSize check
 	app.Get("/compressed", func(ctx *fh.Ctx) error {
 		return ctx.Stream(func(w *fh.StreamWriter) error {
-			_, _ = w.Write([]byte("hello "))
-			_, err := w.Write([]byte("world"))
+			_, err := w.Write([]byte(payload))
 			return err
 		})
 	})
@@ -439,7 +439,7 @@ func TestCompressionNegotiationAndStreaming(t *testing.T) {
 	}
 	decoded, err := io.ReadAll(zr)
 	zr.Close()
-	if err != nil || string(decoded) != "hello world" {
+	if err != nil || string(decoded) != payload {
 		t.Fatalf("decoded=%q err=%v", decoded, err)
 	}
 

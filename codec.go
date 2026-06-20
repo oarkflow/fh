@@ -610,11 +610,21 @@ func (formCodec) Marshal(v any) ([]byte, error) {
 
 func parseFormBytes(data []byte) (Form, error) {
 	opt := getCodecOptions()
-	vals := make(url.Values)
-	tree := make(map[string]any)
 	if len(data) == 0 {
-		return Form{Values: vals, Tree: tree}, nil
+		return Form{Values: make(url.Values), Tree: make(map[string]any)}, nil
 	}
+	// Pre-count pairs to pre-size maps and avoid growth allocations
+	nPairs := 1
+	for _, b := range data {
+		if b == '&' {
+			nPairs++
+		}
+	}
+	if nPairs > opt.MaxFormPairs {
+		return Form{}, fmt.Errorf("form: too many pairs > %d", opt.MaxFormPairs)
+	}
+	vals := make(url.Values, nPairs)
+	tree := make(map[string]any, nPairs)
 	pairs := 0
 	n := len(data)
 	i := 0
@@ -630,9 +640,6 @@ func parseFormBytes(data []byte) (Form, error) {
 		end := i
 		if end > start {
 			pairs++
-			if pairs > opt.MaxFormPairs {
-				return Form{}, fmt.Errorf("form: too many pairs > %d", opt.MaxFormPairs)
-			}
 
 			eq := -1
 			for j := start; j < end; j++ {
