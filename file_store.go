@@ -10,16 +10,21 @@ import (
 
 // FileStore stores sessions as JSON files on disk.
 type FileStore struct {
-	dir    string
-	mu     sync.Mutex
-	stopGC chan struct{}
+	dir      string
+	mu       sync.Mutex
+	stopGC   chan struct{}
+	stopOnce sync.Once
+	initErr  error
 }
 
 // NewFileStore creates a FileStore rooted at dir.
 // Pass 0 for gcInterval to disable automatic GC.
 func NewFileStore(dir string, gcInterval time.Duration) *FileStore {
-	os.MkdirAll(dir, 0700)
-	s := &FileStore{dir: dir}
+	err := os.MkdirAll(dir, 0700)
+	if err == nil {
+		err = os.Chmod(dir, 0700)
+	}
+	s := &FileStore{dir: dir, initErr: err}
 	if gcInterval > 0 {
 		s.stopGC = make(chan struct{})
 		go s.gcLoop(gcInterval)
@@ -30,7 +35,7 @@ func NewFileStore(dir string, gcInterval time.Duration) *FileStore {
 // StopGC stops the background garbage collection goroutine.
 func (s *FileStore) StopGC() {
 	if s.stopGC != nil {
-		close(s.stopGC)
+		s.stopOnce.Do(func() { close(s.stopGC) })
 	}
 }
 
@@ -48,6 +53,9 @@ func (s *FileStore) gcLoop(interval time.Duration) {
 }
 
 func (s *FileStore) path(id string) string {
+	if !validSessionID(id) {
+		return ""
+	}
 	return filepath.Join(s.dir, id+".session")
 }
 
@@ -81,7 +89,24 @@ func (s *FileStore) GC() {
 func (s *FileStore) Get(id string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, err := os.ReadFile(s.path(id))
+	if s.initErr != nil {
+		return nil, s.initErr
+	}
+	path := s.path(id)
+	if path == "" {
+		return nil, ErrInvalidSession
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4<<20 {
+		return nil, ErrInvalidSession
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -98,17 +123,67 @@ func (s *FileStore) Get(id string) (*Session, error) {
 func (s *FileStore) Set(session *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, err := json.Marshal(session)
+	if s.initErr != nil {
+		return s.initErr
+	}
+	if session == nil {
+		return ErrInvalidSession
+	}
+	snapshot := session.snapshot()
+	if !validSessionID(snapshot.ID) {
+		return ErrInvalidSession
+	}
+	data, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path(session.ID), data, 0600)
+	tmp, err := os.CreateTemp(s.dir, ".session-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, s.path(snapshot.ID)); err != nil {
+		return err
+	}
+	dir, err := os.Open(s.dir)
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	closeErr := dir.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 func (s *FileStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	err := os.Remove(s.path(id))
+	if s.initErr != nil {
+		return s.initErr
+	}
+	path := s.path(id)
+	if path == "" {
+		return ErrInvalidSession
+	}
+	err := os.Remove(path)
 	if os.IsNotExist(err) {
 		return nil
 	}

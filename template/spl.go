@@ -3,11 +3,14 @@
 package template
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/oarkflow/spl"
 )
@@ -29,15 +32,24 @@ type SPLConfig struct {
 	// SecureMode enables CSP-safe output mode.
 	SecureMode bool
 
+	// HydrationRuntimeURL makes SSR pages load the SPL runtime from this URL
+	// instead of embedding it inline.
+	HydrationRuntimeURL string
+
+	// HydrationAssetPrefix enables content-addressed external hydration
+	// programs below this public URL prefix.
+	HydrationAssetPrefix string
+
 	// Globals are template variables merged into every render.
 	Globals map[string]any
 }
 
 // SPLEngine wraps github.com/oarkflow/spl to implement fasthttp.TemplateEngine.
 type SPLEngine struct {
-	engine    *spl.Engine
-	cfg       SPLConfig
-	extension string
+	engine          *spl.Engine
+	cfg             SPLConfig
+	extension       string
+	hydrationAssets sync.Map
 }
 
 // NewSPL creates a new SPL template engine adapter.
@@ -70,13 +82,84 @@ func (e *SPLEngine) Config(cfg SPLConfig) *SPLEngine {
 		e.engine.SecureMode = true
 	}
 	e.engine.AutoEscape = true
+	e.engine.HydrationRuntimeURL = cfg.HydrationRuntimeURL
 	for k, v := range cfg.Globals {
 		e.engine.Globals[k] = v
 	}
 	if cfg.Extension != "" {
 		e.extension = cfg.Extension
 	}
+	if cfg.HydrationAssetPrefix != "" {
+		e.HydrationAssets(cfg.HydrationAssetPrefix)
+	} else {
+		e.engine.HydrationAssetURL = nil
+	}
 	return e
+}
+
+// HydrationRuntimeURL configures an external, cacheable SPL runtime URL.
+func (e *SPLEngine) HydrationRuntimeURL(url string) *SPLEngine {
+	e.cfg.HydrationRuntimeURL = url
+	e.engine.HydrationRuntimeURL = url
+	return e
+}
+
+// HydrationAssets stores generated hydration programs by content hash and
+// emits external script URLs rooted at prefix.
+func (e *SPLEngine) HydrationAssets(prefix string) *SPLEngine {
+	prefix = strings.TrimRight(prefix, "/")
+	e.cfg.HydrationAssetPrefix = prefix
+	e.engine.HydrationAssetURL = func(js string) string {
+		name := "spl-hydration." + runtimeAssetVersion(js) + ".js"
+		e.hydrationAssets.Store(name, js)
+		if prefix == "" {
+			return "/" + name
+		}
+		return prefix + "/" + name
+	}
+	return e
+}
+
+// HydrationAsset retrieves a generated hydration program by file name.
+func (e *SPLEngine) HydrationAsset(name string) (string, bool) {
+	if name == "" || filepath.Base(name) != name {
+		return "", false
+	}
+	asset, ok := e.hydrationAssets.Load(name)
+	if !ok {
+		return "", false
+	}
+	js, ok := asset.(string)
+	return js, ok
+}
+
+// ClearHydrationAssets releases generated assets, useful with Reload in long
+// running development processes.
+func (e *SPLEngine) ClearHydrationAssets() {
+	e.hydrationAssets.Range(func(key, _ any) bool { e.hydrationAssets.Delete(key); return true })
+}
+
+// Load parses all templates under the configured directory to warm caches and
+// fail startup on template errors.
+func (e *SPLEngine) Load() error {
+	e.engine.BaseDir = e.cfg.Directory
+	return filepath.Walk(e.cfg.Directory, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, e.extension) {
+			return nil
+		}
+		rel, err := filepath.Rel(e.cfg.Directory, path)
+		if err != nil {
+			return err
+		}
+		_, err = e.engine.RenderFile(rel, nil)
+		if err != nil {
+			return fmt.Errorf("spl: load %s: %w", rel, err)
+		}
+		return nil
+	})
 }
 
 // RuntimeJS returns the JavaScript runtime for SPL hydration.
@@ -84,18 +167,26 @@ func (e *SPLEngine) RuntimeJS() string {
 	return e.engine.RuntimeJS()
 }
 
+// RuntimeVersion returns the content hash used for cache-busting the external
+// runtime URL.
+func (e *SPLEngine) RuntimeVersion() string { return runtimeAssetVersion(e.engine.RuntimeJS()) }
+
 // Render implements fasthttp.TemplateEngine.
 func (e *SPLEngine) Render(w io.Writer, name string, data any, layout ...string) error {
 	if e.cfg.Reload {
 		e.engine.InvalidateCaches()
 	}
 
-	binding, ok := data.(map[string]any)
+	input, ok := data.(map[string]any)
 	if !ok {
 		if data != nil {
 			return fmt.Errorf("spl: data must be map[string]any, got %T", data)
 		}
-		binding = make(map[string]any)
+		input = nil
+	}
+	binding := make(map[string]any, len(input)+len(e.engine.Globals))
+	for k, v := range input {
+		binding[k] = v
 	}
 
 	for k, v := range e.engine.Globals {
@@ -104,14 +195,15 @@ func (e *SPLEngine) Render(w io.Writer, name string, data any, layout ...string)
 		}
 	}
 
-	if !strings.HasSuffix(name, e.extension) {
-		name += e.extension
+	name, err := normalizeTemplateName(name, e.extension)
+	if err != nil {
+		return err
 	}
 
 	if len(layout) > 0 && layout[0] != "" {
-		layoutName := layout[0]
-		if !strings.HasSuffix(layoutName, e.extension) {
-			layoutName += e.extension
+		layoutName, err := normalizeTemplateName(layout[0], e.extension)
+		if err != nil {
+			return err
 		}
 		tmplPath := filepath.Join(e.cfg.Directory, name)
 		content, err := os.ReadFile(tmplPath)
@@ -133,7 +225,6 @@ func (e *SPLEngine) Render(w io.Writer, name string, data any, layout ...string)
 	}
 
 	var out string
-	var err error
 	if e.cfg.SSR {
 		out, err = e.engine.RenderSSRFile(name, binding)
 	} else {
@@ -146,16 +237,43 @@ func (e *SPLEngine) Render(w io.Writer, name string, data any, layout ...string)
 	return err
 }
 
+func runtimeAssetVersion(src string) string {
+	sum := sha256.Sum256([]byte(src))
+	return hex.EncodeToString(sum[:16])
+}
+
+func normalizeTemplateName(name, extension string) (string, error) {
+	if name == "" || strings.IndexByte(name, 0) >= 0 || filepath.IsAbs(name) {
+		return "", fmt.Errorf("spl: invalid template path %q", name)
+	}
+	clean := filepath.Clean(name)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("spl: template path escapes base directory: %q", name)
+	}
+	if !strings.HasSuffix(clean, extension) {
+		clean += extension
+	}
+	return clean, nil
+}
+
 // moveScriptsInsideBody moves hydration script tags from after </html>
 // to just before </body>, ensuring valid HTML structure.
 func moveScriptsInsideBody(s string) string {
-	const marker = `<script type="application/json" data-spl-hydration>`
-	idx := strings.LastIndex(s, marker)
-	if idx < 0 {
+	bodyIdx := strings.LastIndex(s, `</body>`)
+	if bodyIdx < 0 {
 		return s
 	}
-	bodyIdx := strings.LastIndex(s, `</body>`)
-	if bodyIdx < 0 || bodyIdx > idx {
+	markers := []string{`<script data-spl-runtime`, `<script data-spl-hydration`, `<script type="application/json" data-spl-hydration>`}
+	idx := -1
+	for _, marker := range markers {
+		if found := strings.Index(s[bodyIdx:], marker); found >= 0 {
+			found += bodyIdx
+			if idx < 0 || found < idx {
+				idx = found
+			}
+		}
+	}
+	if idx < 0 {
 		return s
 	}
 	return s[:bodyIdx] + s[idx:] + s[bodyIdx:idx]

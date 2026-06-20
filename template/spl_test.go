@@ -257,6 +257,76 @@ func TestSPLEngineSSRNoBodyTag(t *testing.T) {
 	}
 }
 
+func TestSPLEngineExternalRuntimeAndHydrationAssets(t *testing.T) {
+	dir := t.TempDir()
+	tmpl := `<html><body>@signal(count = 3)<button>${count}</button>@click("inc", count, "inc", "1")</body></html>`
+	if err := os.WriteFile(filepath.Join(dir, "page.html"), []byte(tmpl), 0600); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewSPL(dir)
+	engine.Config(SPLConfig{Directory: dir, SSR: true, SecureMode: true})
+	runtimeURL := "/static/spl-runtime.min.js?v=" + engine.RuntimeVersion()
+	engine.HydrationRuntimeURL(runtimeURL).HydrationAssets("/static/hydration/")
+
+	var out bytes.Buffer
+	if err := engine.Render(&out, "page", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	result := out.String()
+	if !strings.Contains(result, `data-spl-runtime src="`+runtimeURL+`"`) {
+		t.Fatalf("missing external runtime: %q", result)
+	}
+	prefix := `data-spl-hydration src="/static/hydration/`
+	start := strings.Index(result, prefix)
+	if start < 0 {
+		t.Fatalf("missing external hydration asset: %q", result)
+	}
+	start += len(prefix)
+	end := strings.Index(result[start:], `"`)
+	if end < 0 {
+		t.Fatal("unterminated hydration URL")
+	}
+	name := result[start : start+end]
+	if !strings.HasPrefix(name, "spl-hydration.") || !strings.HasSuffix(name, ".js") {
+		t.Fatalf("unexpected asset name %q", name)
+	}
+	asset, ok := engine.HydrationAsset(name)
+	if !ok || !strings.Contains(asset, "window.__SPL_HYDRATE__") {
+		t.Fatalf("missing hydration program %q", asset)
+	}
+	if _, ok := engine.HydrationAsset("../" + name); ok {
+		t.Fatal("accepted hydration asset traversal")
+	}
+	if strings.LastIndex(result, "data-spl-hydration") > strings.LastIndex(result, "</body>") {
+		t.Fatal("hydration script is outside body")
+	}
+}
+
+func TestSPLEngineRenderDoesNotMutateBinding(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "page.html"), []byte(`${site}-${page}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewSPL(dir).Config(SPLConfig{Directory: dir, Globals: map[string]any{"site": "global"}})
+	binding := map[string]any{"page": "home"}
+	var out bytes.Buffer
+	if err := engine.Render(&out, "page", binding); err != nil {
+		t.Fatal(err)
+	}
+	if _, mutated := binding["site"]; mutated {
+		t.Fatal("render mutated caller binding")
+	}
+}
+
+func TestSPLEngineRejectsPathTraversal(t *testing.T) {
+	engine := NewSPL(t.TempDir())
+	for _, name := range []string{"../secret", "/absolute/template"} {
+		if err := engine.Render(&bytes.Buffer{}, name, nil); err == nil {
+			t.Fatalf("accepted unsafe template path %q", name)
+		}
+	}
+}
+
 func TestSPLEngineNonSSRUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	tmpl := `<html><body><h1>Hello</h1></body></html>`

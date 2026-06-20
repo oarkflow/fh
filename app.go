@@ -748,8 +748,12 @@ func (a *App) dispatch(ctx *Ctx) {
 		}
 	}
 
-	if err := handler(ctx); err != nil && !ctx.responded {
-		a.cfg.ErrorHandler(ctx, err)
+	if err := handler(ctx); err != nil {
+		if !ctx.responded {
+			a.cfg.ErrorHandler(ctx, err)
+		}
+	} else if !ctx.responded {
+		_ = ctx.SendStatus(200)
 	}
 }
 

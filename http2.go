@@ -638,6 +638,7 @@ func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
 	if c.responded || r.ended.Load() {
 		return nil
 	}
+	if err := c.runBeforeResponse(); err != nil { return err }
 	if c.bodyTransform != nil {
 		var err error
 		body, err = c.bodyTransform(body)

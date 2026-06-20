@@ -7,12 +7,16 @@ import (
 // New returns a middleware that loads the session on request and saves it
 // before the response is sent. The session is stored in Ctx locals under "session".
 func New(manager *fh.SessionManager) fh.HandlerFunc {
+	if manager == nil {
+		panic("session middleware requires a manager")
+	}
 	return func(ctx *fh.Ctx) error {
-		s := manager.Get(ctx)
+		s, complete, err := manager.Begin(ctx)
+		if err != nil {
+			return err
+		}
 		ctx.Locals("session", s)
-		defer func() {
-			manager.Save(ctx, s)
-		}()
+		ctx.OnBeforeResponse(complete)
 		return ctx.Next()
 	}
 }

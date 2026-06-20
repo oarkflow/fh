@@ -46,16 +46,18 @@ func main() {
 		SecureMode: true,
 		Globals:    map[string]any{"siteName": "SPL Fasthttp Demo"},
 	})
+	splEngine.HydrationRuntimeURL("/static/spl-runtime.min.js?v=" + splEngine.RuntimeVersion())
+	splEngine.HydrationAssets("/static/hydration")
 
 	app := fh.New(fh.Config{
-		ReadTimeout:         10 * time.Second,
-		WriteTimeout:        10 * time.Second,
-		IdleTimeout:         60 * time.Second,
-		MaxConnections:      1000,
-		ReadBufferSize:      8192,
-		MaxRequestBodySize:  4 * 1024 * 1024,
-		DisableKeepAlive:    false,
-		TemplateEngine:      splEngine,
+		ReadTimeout:        10 * time.Second,
+		WriteTimeout:       10 * time.Second,
+		IdleTimeout:        60 * time.Second,
+		MaxConnections:     1000,
+		ReadBufferSize:     8192,
+		MaxRequestBodySize: 4 * 1024 * 1024,
+		DisableKeepAlive:   false,
+		TemplateEngine:     splEngine,
 	})
 
 	// ──────────────────────────────────────────────────────────────────────
@@ -85,7 +87,14 @@ func main() {
 	app.Use(logger.New(logger.Config{
 		Format: "[${ip}] ${method} ${path} → ${status} (${latency})\n",
 	}))
-	app.Use(security.New())
+	app.Use(security.New(security.Config{
+		ContentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+		FrameDeny:             true,
+		ContentTypeNosniff:    true,
+		XSSProtection:         "0",
+		ReferrerPolicy:        "no-referrer",
+		PermissionsPolicy:     "geolocation=(), microphone=(), camera=()",
+	}))
 	app.Use(requestid.New())
 	app.Use(recover.New())
 	app.Use(cors.New(cors.Config{
@@ -105,13 +114,19 @@ func main() {
 	// 3.5 SESSION
 	// ──────────────────────────────────────────────────────────────────────
 	sessionStore := fh.NewMemoryStore(5 * time.Minute)
-	sessionManager := fh.NewSessionManager(sessionStore,
+	sessionOptions := []fh.SessionOption{
 		fh.SessionCookieName("demo_sid"),
-		fh.SessionMaxAge(24*time.Hour),
+		fh.SessionMaxAge(24 * time.Hour),
 		fh.SessionHTTPOnly(true),
-		fh.SessionSecure(false),
+		fh.SessionSecure(false), // localhost HTTP only; omit this option behind TLS
 		fh.SessionPath("/"),
-	)
+	}
+	if secret := os.Getenv("SESSION_SECRET"); len(secret) >= 32 {
+		sessionOptions = append(sessionOptions, fh.SessionSecret([]byte(secret)))
+	} else {
+		log.Println("WARNING: SESSION_SECRET is unset; using an ephemeral development key")
+	}
+	sessionManager := fh.NewSessionManager(sessionStore, sessionOptions...)
 	app.Use(session.New(sessionManager))
 
 	// Auth middleware: redirects to /login when session has no "user" key.
@@ -272,6 +287,15 @@ func main() {
 		ctx.Set("Content-Type", "application/javascript")
 		ctx.Set("Cache-Control", "public, max-age=31536000, immutable")
 		return ctx.SendString(splEngine.RuntimeJS())
+	})
+	app.Get("/static/hydration/:asset", func(ctx *fh.Ctx) error {
+		asset, ok := splEngine.HydrationAsset(ctx.Param("asset"))
+		if !ok {
+			return ctx.SendStatus(404)
+		}
+		ctx.Set("Content-Type", "application/javascript; charset=utf-8")
+		ctx.Set("Cache-Control", "public, max-age=31536000, immutable")
+		return ctx.SendString(asset)
 	})
 	subFS, _ := fs.Sub(publicFiles, "public")
 	app.StaticFS("/static", subFS, fh.StaticConfig{

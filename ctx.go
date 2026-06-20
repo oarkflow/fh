@@ -52,6 +52,8 @@ type Ctx struct {
 
 	responseCookies []Cookie
 	responseTime    time.Time
+	beforeResponse  []func(*Ctx) error
+	beforeRan       bool
 }
 
 type localEntry struct {
@@ -119,8 +121,35 @@ func (c *Ctx) reset() {
 	c.handlers = nil
 	c.handlerIndex = 0
 	c.cachedIP = ""
+	clear(c.responseCookies)
 	c.responseCookies = c.responseCookies[:0]
 	c.responseTime = time.Time{}
+	clear(c.beforeResponse)
+	c.beforeResponse = c.beforeResponse[:0]
+	c.beforeRan = false
+}
+
+// OnBeforeResponse registers a one-shot hook run immediately before response
+// headers are encoded. It is intended for transactional middleware such as
+// sessions that must persist before Set-Cookie reaches the wire.
+func (c *Ctx) OnBeforeResponse(fn func(*Ctx) error) {
+	if fn != nil && !c.responded && !c.beforeRan {
+		c.beforeResponse = append(c.beforeResponse, fn)
+	}
+}
+
+func (c *Ctx) runBeforeResponse() error {
+	if c.beforeRan {
+		return nil
+	}
+	c.beforeRan = true
+	var firstErr error
+	for _, fn := range c.beforeResponse {
+		if err := fn(c); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // Next continues the current middleware chain. A handler may return without
@@ -418,6 +447,9 @@ func (c *Ctx) writeResponseString(s string) error {
 	if c.responded {
 		return nil
 	}
+	if err := c.runBeforeResponse(); err != nil {
+		return err
+	}
 	c.responded = true
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
@@ -484,6 +516,9 @@ func (c *Ctx) writeResponse(body []byte) error {
 	}
 	if c.responded {
 		return nil
+	}
+	if err := c.runBeforeResponse(); err != nil {
+		return err
 	}
 	if c.bodyTransform != nil {
 		var err error

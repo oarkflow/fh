@@ -17,6 +17,7 @@ import (
 	"github.com/orgware/fasthttp/middleware/recover"
 	"github.com/orgware/fasthttp/middleware/requestid"
 	"github.com/orgware/fasthttp/middleware/security"
+	sessionmw "github.com/orgware/fasthttp/middleware/session"
 	"github.com/orgware/fasthttp/middleware/timeout"
 )
 
@@ -457,6 +458,94 @@ func TestCooperativeTimeout(t *testing.T) {
 	if code != 503 {
 		t.Fatalf("expected 503, got %d", code)
 	}
+}
+
+func TestSessionMiddlewarePersistsBeforeResponseAndDestroys(t *testing.T) {
+	store := fh.NewMemoryStore(0)
+	manager := fh.NewSessionManager(store,
+		fh.SessionCookieName("sid"),
+		fh.SessionSecrets([]byte("0123456789abcdef0123456789abcdef")),
+		fh.SessionSecure(false),
+		fh.SessionMaxAge(time.Hour),
+	)
+	app := fh.New()
+	app.Use(sessionmw.New(manager))
+	app.Get("/counter", func(ctx *fh.Ctx) error {
+		s := sessionmw.Get(ctx)
+		count, _ := s.Get("count").(float64)
+		if count == 0 {
+			if n, ok := s.Get("count").(int); ok {
+				count = float64(n)
+			}
+		}
+		count++
+		s.Set("count", int(count))
+		return ctx.SendString(fmt.Sprintf("%d", int(count)))
+	})
+	app.Get("/logout", func(ctx *fh.Ctx) error {
+		if err := manager.Destroy(ctx, sessionmw.Get(ctx)); err != nil {
+			return err
+		}
+		return ctx.SendStatus(204)
+	})
+	app.Get("/session-stream", func(ctx *fh.Ctx) error {
+		sessionmw.Get(ctx).Set("streamed", true)
+		return ctx.Stream(func(w *fh.StreamWriter) error { _, err := w.Write([]byte("streamed")); return err })
+	})
+	addr := testServer(t, app)
+
+	first := rawHTTP11(t, addr, "GET /counter HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
+	cookie := responseCookiePair(first, "sid")
+	if cookie == "" || !strings.Contains(first, "HttpOnly") || !strings.Contains(first, "SameSite=Lax") || !strings.Contains(first, "Expires=") {
+		t.Fatalf("session cookie missing security attributes: %q", first)
+	}
+	second := rawHTTP11(t, addr, "GET /counter HTTP/1.1\r\nHost: local\r\nCookie: "+cookie+"\r\nConnection: close\r\n\r\n")
+	if !strings.HasSuffix(second, "2") {
+		t.Fatalf("session did not persist: %q", second)
+	}
+	logout := rawHTTP11(t, addr, "GET /logout HTTP/1.1\r\nHost: local\r\nCookie: "+cookie+"\r\nConnection: close\r\n\r\n")
+	if !strings.Contains(logout, "Max-Age=0") {
+		t.Fatalf("logout did not expire cookie: %q", logout)
+	}
+	again := rawHTTP11(t, addr, "GET /counter HTTP/1.1\r\nHost: local\r\nCookie: "+cookie+"\r\nConnection: close\r\n\r\n")
+	if !strings.HasSuffix(again, "1") {
+		t.Fatalf("destroyed session was resurrected: %q", again)
+	}
+	streamed := rawHTTP11(t, addr, "GET /session-stream HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
+	if responseCookiePair(streamed, "sid") == "" {
+		t.Fatalf("streamed response omitted session cookie: %q", streamed)
+	}
+}
+
+func rawHTTP11(t *testing.T, addr, request string) string {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(resp)
+}
+
+func responseCookiePair(response, name string) string {
+	for _, line := range strings.Split(response, "\r\n") {
+		prefix := "Set-Cookie: " + name + "="
+		if strings.HasPrefix(line, prefix) {
+			value := strings.TrimPrefix(line, "Set-Cookie: ")
+			if semi := strings.IndexByte(value, ';'); semi >= 0 {
+				value = value[:semi]
+			}
+			return value
+		}
+	}
+	return ""
 }
 
 func TestAllMethods(t *testing.T) {

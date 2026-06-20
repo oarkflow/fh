@@ -20,6 +20,9 @@ func (c *Ctx) Hijack(handler func(net.Conn) error) error {
 	if c.responded || c.upgraded || handler == nil {
 		return ErrInvalidUpgrade
 	}
+	if err := c.runBeforeResponse(); err != nil {
+		return err
+	}
 	c.responded, c.upgraded, c.forceClose = true, true, true
 	_ = c.conn.SetDeadline(time.Time{})
 	return handler(&prefixedConn{Conn: c.conn, prefix: c.upgradeBuffered})
@@ -34,6 +37,9 @@ func (c *Ctx) Upgrade(protocol string, handler func(net.Conn) error) error {
 		!hasHeaderToken(c.Header.Peek(headerConnection), "upgrade") ||
 		!strEqFold(trimOWS(c.Header.Peek([]byte("Upgrade"))), protocol) {
 		return ErrInvalidUpgrade
+	}
+	if err := c.runBeforeResponse(); err != nil {
+		return err
 	}
 	c.responded, c.upgraded, c.forceClose = true, true, true
 	if c.writeBuf == nil {
@@ -51,6 +57,13 @@ func (c *Ctx) Upgrade(protocol string, handler func(net.Conn) error) error {
 		buf = append(buf, '\r', '\n')
 	}
 	buf = appendExtraHeaders(buf, c.extraHeaders)
+	for i := range c.responseCookies {
+		if value := c.responseCookies[i].String(); value != "" {
+			buf = append(buf, "Set-Cookie: "...)
+			buf = append(buf, value...)
+			buf = append(buf, '\r', '\n')
+		}
+	}
 	buf = append(buf, '\r', '\n')
 	*c.writeBuf = buf
 	if err := writeAll(c.conn, buf); err != nil {

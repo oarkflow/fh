@@ -52,6 +52,9 @@ func (c *Ctx) SendStream(r io.Reader) error {
 }
 
 func (c *Ctx) beginStream() (*StreamWriter, error) {
+	if err := c.runBeforeResponse(); err != nil {
+		return nil, err
+	}
 	if c.h2 != nil {
 		if err := c.h2.beginStream(c); err != nil {
 			return nil, err
@@ -83,6 +86,13 @@ func (c *Ctx) beginStream() (*StreamWriter, error) {
 		buf = append(buf, '\r', '\n')
 	}
 	buf = appendExtraHeaders(buf, c.extraHeaders)
+	for i := range c.responseCookies {
+		if value := c.responseCookies[i].String(); value != "" {
+			buf = append(buf, "Set-Cookie: "...)
+			buf = append(buf, value...)
+			buf = append(buf, '\r', '\n')
+		}
+	}
 	if chunked {
 		buf = append(buf, "Transfer-Encoding: chunked\r\n"...)
 	}

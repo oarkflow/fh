@@ -10,6 +10,7 @@ type MemoryStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	stopGC   chan struct{}
+	stopOnce sync.Once
 }
 
 // NewMemoryStore creates a MemoryStore with an optional GC interval.
@@ -28,7 +29,7 @@ func NewMemoryStore(gcInterval time.Duration) *MemoryStore {
 // StopGC stops the background garbage collection goroutine.
 func (s *MemoryStore) StopGC() {
 	if s.stopGC != nil {
-		close(s.stopGC)
+		s.stopOnce.Do(func() { close(s.stopGC) })
 	}
 }
 
@@ -50,7 +51,10 @@ func (s *MemoryStore) GC() {
 	now := time.Now()
 	s.mu.Lock()
 	for id, session := range s.sessions {
-		if !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt) {
+		session.mu.RLock()
+		expires := session.ExpiresAt
+		session.mu.RUnlock()
+		if !expires.IsZero() && now.After(expires) {
 			delete(s.sessions, id)
 		}
 	}
@@ -64,12 +68,16 @@ func (s *MemoryStore) Get(id string) (*Session, error) {
 	if !ok {
 		return nil, nil
 	}
-	return session, nil
+	return session.snapshot(), nil
 }
 
 func (s *MemoryStore) Set(session *Session) error {
+	if session == nil || !validSessionID(session.ID) {
+		return ErrInvalidSession
+	}
+	snapshot := session.snapshot()
 	s.mu.Lock()
-	s.sessions[session.ID] = session
+	s.sessions[snapshot.ID] = snapshot
 	s.mu.Unlock()
 	return nil
 }
