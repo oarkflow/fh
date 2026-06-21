@@ -1,0 +1,91 @@
+rule "cache-banned-user" {
+  name "Block user banned by cache lookup"
+  status active
+  priority 990
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    store.exists("demo-cache", concat("ban:user:", user.id)) equals true
+  }
+
+  risk {
+    base 95
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 90
+  }
+
+  actions {
+    critical {
+      run block
+      run notify_soc
+      run create_incident
+    }
+  }
+}
+
+rule "tenant-lockdown" {
+  name "Block requests for tenants in lockdown from JSON datasource"
+  status active
+  priority 980
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    tenant.lockdown equals true
+  }
+
+  risk {
+    base 95
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 90
+  }
+
+  actions {
+    critical {
+      run block
+      run notify_soc
+    }
+  }
+}
+
+rule "block-bad-ip" {
+  name "Block traffic from known bad IPs"
+  status active
+  priority 1000
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    network.ip.blacklisted equals true
+  }
+
+  risk {
+    base 95
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 90
+  }
+
+  actions {
+    critical {
+      run block
+      run notify_soc
+      run create_incident
+    }
+  }
+}

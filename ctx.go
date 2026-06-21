@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 	"sync/atomic"
+	"time"
 )
 
 var (
@@ -260,7 +260,7 @@ func (c *Ctx) Param(name string) string {
 	return ""
 }
 
-func (c *Ctx) Query(name string) string {
+func (c *Ctx) Query(name string, def ...string) string {
 	if !c.queryParsed {
 		c.parseQuery()
 	}
@@ -268,6 +268,9 @@ func (c *Ctx) Query(name string) string {
 		if c.queryParams[i].Key == name {
 			return c.queryParams[i].Value
 		}
+	}
+	if len(def) > 0 {
+		return def[0]
 	}
 	return ""
 }

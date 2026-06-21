@@ -1,0 +1,10 @@
+{
+  "demo-bank": {
+    "lockdown": false,
+    "region": "apac"
+  },
+  "locked-bank": {
+    "lockdown": true,
+    "region": "emea"
+  }
+}

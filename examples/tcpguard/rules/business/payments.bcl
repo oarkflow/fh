@@ -1,0 +1,31 @@
+rule "high-value-payment-after-hours" {
+  name "Block high-value payments after hours"
+  status active
+  priority 650
+  authz_policy "allow-payment-approvers"
+
+  trigger {
+    on business.high_value_payment
+  }
+
+  when {
+    business.outside_hours equals true
+  }
+
+  risk {
+    base 92
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 90
+  }
+
+  actions {
+    critical {
+      run block
+      run create_incident
+      run notify_soc
+    }
+  }
+}

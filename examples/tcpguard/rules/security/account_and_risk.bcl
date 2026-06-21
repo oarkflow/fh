@@ -1,0 +1,102 @@
+rule "locked-account" {
+  name "Challenge locked accounts from SQL datasource"
+  status active
+  priority 970
+  authz_policy "allow-authenticated-routes"
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    user.account.locked equals true
+  }
+
+  risk {
+    base 80
+    max 89
+  }
+
+  severity {
+    high when risk.score greater_or_equal 75
+  }
+
+  actions {
+    high {
+      run mfa_challenge
+      run notify_admin
+    }
+  }
+}
+
+rule "external-risk-score" {
+  name "Challenge elevated risk from HTTP datasource"
+  status active
+  priority 960
+  authz_policy "allow-authenticated-routes"
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    store.field("external-risk", "score") greater_or_equal 80
+  }
+
+  risk {
+    base 85
+    max 89
+  }
+
+  severity {
+    high when risk.score greater_or_equal 75
+  }
+
+  actions {
+    high {
+      run mfa_challenge
+      run notify_admin
+    }
+  }
+}
+
+rule "signed-transfer-replay-or-mitm" {
+  name "Block invalid signed transfer requests and replayed nonces"
+  status active
+  priority 850
+  authz_policy "allow-transfer-route"
+
+  scope {
+    paths ["/api/v1/transfers"]
+  }
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    any {
+      security.signature.valid equals false
+      security.nonce.reused equals true
+      security.timestamp.skew_seconds greater_than 60
+    }
+  }
+
+  risk {
+    base 90
+    add 10 when security.nonce.reused equals true
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 90
+  }
+
+  actions {
+    critical {
+      run block
+      run create_incident
+      run notify_soc
+    }
+  }
+}

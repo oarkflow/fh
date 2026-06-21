@@ -1,0 +1,32 @@
+rule "debug-query-probe" {
+  name "Throttle debug/probe query usage"
+  status active
+  priority 500
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    any {
+      request.query.debug equals "true"
+      request.query.probe equals "1"
+    }
+  }
+
+  risk {
+    base 55
+    max 70
+  }
+
+  severity {
+    medium when risk.score greater_or_equal 50
+  }
+
+  actions {
+    medium {
+      run throttle
+      run audit
+    }
+  }
+}

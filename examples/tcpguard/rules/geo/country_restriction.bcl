@@ -1,0 +1,38 @@
+rule "geo-country-restriction" {
+  name "Restrict geo-protected endpoint to Nepal IPs"
+  status active
+  priority 975
+
+  scope {
+    paths ["/geo-restricted"]
+  }
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    all {
+      network.geo_found equals true
+      network.country not_equals "NP"
+    }
+  }
+
+  risk {
+    base 95
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 90
+  }
+
+  actions {
+    critical {
+      run block
+      run block_country 15m
+      run notify_soc
+      run create_incident
+    }
+  }
+}
