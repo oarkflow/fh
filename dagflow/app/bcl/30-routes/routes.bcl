@@ -1,0 +1,87 @@
+route_group "api" {
+  prefix "/api"
+  middlewares ["cors", "api_key", "small_body"]
+
+  route_group "email" {
+    prefix "/email"
+    middlewares ["email_rate_limit"]
+
+    route "send_email" {
+      method "POST"
+      path "/send"
+      workflow "email_flow"
+      mode sync
+    }
+
+    route "send_email_async" {
+      method "POST"
+      path "/send/async"
+      workflow "email_flow"
+      mode async
+    }
+
+    route "send_approval" {
+      method "POST"
+      path "/approval"
+      workflow "email_approval_flow"
+      mode sync
+    }
+
+    route "send_and_audit" {
+      method "POST"
+      path "/send-and-audit"
+      chain "email_api_chain"
+      mode sync
+    }
+
+    route "send_inline_reuse" {
+      method "POST"
+      path "/send-inline-reuse"
+      workflow "email_then_audit_inside_dag"
+      mode sync
+    }
+
+    route "script_enrich" {
+      method "POST"
+      path "/script-enrich"
+      workflow "script_email_enrich"
+      mode sync
+    }
+  }
+
+  route_group "orders" {
+    prefix "/orders"
+
+    route "order_check" {
+      method "POST"
+      path "/:order_id/check"
+      workflow "parallel_order_checks"
+      mode sync
+      envelope true
+    }
+  }
+
+  route_group "files" {
+    prefix "/files"
+
+    route "wildcard_file" {
+      method "POST"
+      path "/*path"
+      workflow "batch_uppercase"
+      mode sync
+      envelope true
+    }
+  }
+}
+
+route_group "ops_api" {
+  prefix "/admin"
+  middlewares ["api_key"]
+
+  route "admin_metadata" {
+    method "POST"
+    path "/metadata-proxy"
+    workflow "audit_flow"
+    mode sync
+  }
+}

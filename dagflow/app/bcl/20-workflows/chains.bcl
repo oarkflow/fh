@@ -1,0 +1,39 @@
+workflow "audit_flow" {
+  name "Audit Workflow"
+  version "1.0.0"
+  first "audit"
+
+  node "audit" {
+    type function
+    handler "audit_event"
+    last true
+  }
+}
+
+workflow "email_then_audit_inside_dag" {
+  name "Email Then Audit Reuse Workflow"
+  version "1.0.0"
+  first "email"
+
+  node "email" {
+    type workflow
+    workflow "email_flow"
+  }
+
+  node "audit" {
+    type workflow
+    workflow "audit_flow"
+    last true
+  }
+
+  edge "email_to_audit" {
+    from "email"
+    to "audit"
+    type simple
+  }
+}
+
+chain "email_api_chain" {
+  name "Email then Audit Chain"
+  workflows ["email_flow", "audit_flow"]
+}

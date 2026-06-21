@@ -1,0 +1,17 @@
+workflow "script_email_enrich" {
+  name "Interpreter Script Email Enrichment"
+  version "1.0.0"
+  first "enrich"
+  max_visits 32
+  debug true
+
+  # Do not set input_schema/output_schema here. Some generated core versions
+  # validate node schema references before schema blocks are merged into the
+  # engine. The route and workflow still work; schema validation can be
+  # re-enabled after the core loader is fixed.
+  node "enrich" {
+    type script
+    handler "script_enrich_email"
+    last true
+  }
+}

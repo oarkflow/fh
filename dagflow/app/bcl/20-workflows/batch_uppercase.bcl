@@ -1,0 +1,34 @@
+workflow "batch_uppercase" {
+  name "Batch Uppercase Iterator Workflow"
+  version "1.0.0"
+  first "items"
+  max_visits 256
+
+  node "items" {
+    type function
+    handler "identity"
+  }
+
+  node "upper" {
+    type function
+    handler "uppercase"
+  }
+
+  node "done" {
+    type function
+    handler "identity"
+    last true
+  }
+
+  edge "each" {
+    from "items"
+    to "upper"
+    type iterator
+  }
+
+  edge "upper_done" {
+    from "upper"
+    to "done"
+    type simple
+  }
+}

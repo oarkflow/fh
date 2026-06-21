@@ -1,0 +1,49 @@
+workflow "email_approval_flow" {
+  name "Human Approval Email Workflow"
+  version "1.0.0"
+  first "receive"
+  max_visits 128
+  debug true
+
+  node "receive" {
+    type function
+    handler "receive_email"
+  }
+
+  node "approval" {
+    type page
+    pause true
+  }
+
+  node "send" {
+    type function
+    handler "send_email"
+    mode background
+    await true
+  }
+
+  node "store" {
+    type function
+    handler "store_message"
+    last true
+  }
+
+  edge "receive_to_approval" {
+    from "receive"
+    to "approval"
+    type simple
+  }
+
+  edge "approval_to_send" {
+    from "approval"
+    to "send"
+    type branch
+    when `result.approved == true`
+  }
+
+  edge "send_to_store" {
+    from "send"
+    to "store"
+    type simple
+  }
+}

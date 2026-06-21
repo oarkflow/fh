@@ -1,0 +1,28 @@
+# Optional schemas. They are intentionally not referenced by nodes/routes in this
+# compatibility BCL because some generated core versions did not merge schema
+# blocks before validation. Keeping them here is harmless and allows future
+# OpenAPI/schema support once the core decoder is corrected.
+schema "EmailRequest" {
+  type object
+  required ["to", "subject", "body"]
+
+  field "to" {
+    type string
+    required true
+    format "email"
+  }
+
+  field "subject" {
+    type string
+    required true
+  }
+
+  field "body" {
+    type string
+    required true
+  }
+}
+
+schema "EmailResponse" {
+  type object
+}
