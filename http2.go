@@ -3,6 +3,7 @@ package fh
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -81,6 +82,7 @@ type h2Conn struct {
 	peerInitialWindow int64
 	peerMaxFrame      atomic.Uint32
 	peerMaxHeaderList atomic.Uint32
+	upgradeStream     *h2Stream
 }
 
 type h2Stream struct {
@@ -130,14 +132,21 @@ func (h *h2Conn) serve(initial []byte, prefaceConsumed bool) {
 	if len(initial) > 0 {
 		h.r = io.MultiReader(bytes.NewReader(initial), h.conn)
 	}
-	if !prefaceConsumed {
-		var preface [24]byte
-		if _, err := io.ReadFull(h.r, preface[:]); err != nil || !bytes.Equal(preface[:], h2ClientPreface) {
-			return
-		}
-	}
+	// The server connection preface (SETTINGS) must be sent as the first
+	// HTTP/2 frame (RFC 7540 §3.5). For prior-knowledge the client has
+	// already sent its preface in the read buffer; for upgrade and TLS
+	// the client preface follows after the server's SETTINGS.
 	if err := h.sendSettings(); err != nil {
 		return
+	}
+	if !prefaceConsumed {
+		var preface [24]byte
+		if _, err := io.ReadFull(h.r, preface[:]); err != nil {
+			return
+		}
+		if !bytes.Equal(preface[:], h2ClientPreface) {
+			return
+		}
 	}
 	first := true
 	for {
@@ -161,7 +170,44 @@ func (h *h2Conn) serve(initial []byte, prefaceConsumed bool) {
 			}
 			return
 		}
+		if first == false && h.upgradeStream != nil {
+			s := h.upgradeStream
+			h.upgradeStream = nil
+			h.dispatch(s)
+		}
 	}
+}
+
+// prepareUpgrade converts the HTTP/1.1 upgrade request into HTTP/2 stream 1
+// and applies the settings carried in HTTP2-Settings (RFC 7540 section 3.2).
+func (h *h2Conn) prepareUpgrade(c *Ctx) error {
+	settings, err := base64.RawURLEncoding.DecodeString(string(trimOWS(c.Header.Peek([]byte("HTTP2-Settings")))))
+	if err != nil || len(settings)%6 != 0 {
+		return h2ConnError{h2ProtocolError}
+	}
+	if err := h.applySettings(settings); err != nil {
+		return err
+	}
+	streamCtx, cancel := context.WithCancel(context.Background())
+	s := &h2Stream{
+		id: 1, method: string(c.Header.Method), path: string(c.Header.URI),
+		authority: string(c.Header.Host), scheme: "http", body: append([]byte(nil), c.body...),
+		sendWindow: h.peerInitialWindow, recvWindow: h2InitialWindow,
+		ended: true, ctx: streamCtx, cancel: cancel,
+		hasContentLength: c.Header.HasContentLength, contentLength: c.Header.ContentLength,
+	}
+	for i := 0; i < c.Header.hcount; i++ {
+		name := strings.ToLower(string(c.Header.headers[i].Key))
+		switch name {
+		case "connection", "proxy-connection", "keep-alive", "upgrade", "http2-settings", "transfer-encoding", "host":
+			continue
+		}
+		s.headers = append(s.headers, hpack.HeaderField{Name: name, Value: string(c.Header.headers[i].Value)})
+	}
+	h.mu.Lock()
+	h.streams[1], h.lastStream, h.upgradeStream = s, 1, s
+	h.mu.Unlock()
+	return nil
 }
 
 type h2ConnError struct{ code uint32 }
@@ -247,8 +293,15 @@ func (h *h2Conn) handleSettings(f h2Frame) error {
 	if len(f.payload)%6 != 0 {
 		return h2ConnError{h2FrameSizeError}
 	}
-	for i := 0; i < len(f.payload); i += 6 {
-		id, value := binary.BigEndian.Uint16(f.payload[i:i+2]), binary.BigEndian.Uint32(f.payload[i+2:i+6])
+	if err := h.applySettings(f.payload); err != nil {
+		return err
+	}
+	return h.writeFrame(h2Settings, h2FlagAck, 0, nil)
+}
+
+func (h *h2Conn) applySettings(payload []byte) error {
+	for i := 0; i < len(payload); i += 6 {
+		id, value := binary.BigEndian.Uint16(payload[i:i+2]), binary.BigEndian.Uint32(payload[i+2:i+6])
 		switch id {
 		case 1:
 			h.writeMu.Lock()
@@ -286,7 +339,7 @@ func (h *h2Conn) handleSettings(f h2Frame) error {
 			h.peerMaxHeaderList.Store(value)
 		}
 	}
-	return h.writeFrame(h2Settings, h2FlagAck, 0, nil)
+	return nil
 }
 
 func (h *h2Conn) handleHeaders(f h2Frame) error {
@@ -639,7 +692,9 @@ func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
 	if c.responded || r.ended.Load() {
 		return nil
 	}
-	if err := c.runBeforeResponse(); err != nil { return err }
+	if err := c.runBeforeResponse(); err != nil {
+		return err
+	}
 	if c.bodyTransform != nil {
 		var err error
 		body, err = c.bodyTransform(body)

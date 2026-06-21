@@ -19,13 +19,19 @@ A complete, production-ready implementation of [RFC 7541](https://httpwg.org/spe
 
 ### 1 — Zero allocation on static-table hot path
 
-Indexed fields that map to static table entries are decoded with **0 B/op, 0 allocs/op**.
+One-byte indexed fields that map to static table entries use a dedicated fast path and
+decode with **0 B/op, 0 allocs/op**.
 The emit callback receives a `HeaderField` whose `Name`/`Value` strings point directly into
 the static table's pre-interned backing — no copy, no heap allocation.
 
 ```
-BenchmarkDecodeStaticHit   48M ops   74 ns/op   0 B/op   0 allocs/op
+BenchmarkComparison/DecodeStatic/Custom   54M ops   22.1 ns/op   0 B/op   0 allocs/op
+BenchmarkComparison/DecodeStatic/XNet     34M ops   34.9 ns/op   0 B/op   0 allocs/op
 ```
+
+On an Apple M2 Pro with Go 1.25, the custom static-table path is about 36% faster
+than `golang.org/x/net/http2/hpack` v0.56.0. Run `go test ./pkg/hpack -run '^$'
+-bench BenchmarkComparison -benchmem` to reproduce the comparison on your CPU.
 
 ### 2 — Pooled scratch buffers for Huffman decoding
 

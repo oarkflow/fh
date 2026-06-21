@@ -162,9 +162,9 @@ func TestDynamicTableEviction(t *testing.T) {
 	enc.SetMaxDynamicTableSize(64)
 
 	fields := []HeaderField{
-		{Name: "a", Value: "bb"},       // size = 1+2+32 = 35
-		{Name: "cc", Value: "ddd"},     // size = 2+3+32 = 37 — evicts "a"
-		{Name: "ee", Value: "ffffff"},  // size = 2+6+32 = 40 — evicts "cc"
+		{Name: "a", Value: "bb"},      // size = 1+2+32 = 35
+		{Name: "cc", Value: "ddd"},    // size = 2+3+32 = 37 — evicts "a"
+		{Name: "ee", Value: "ffffff"}, // size = 2+6+32 = 40 — evicts "cc"
 	}
 	for _, f := range fields {
 		if err := enc.WriteField(f); err != nil {
@@ -510,11 +510,51 @@ func BenchmarkDecoderPool(b *testing.B) {
 	}
 }
 
+// BenchmarkComparison keeps performance claims reproducible against the
+// reference implementation used by net/http's HTTP/2 stack.
+/*
+func BenchmarkComparison(b *testing.B) {
+	b.Run("DecodeStatic/Custom", func(b *testing.B) {
+		wire := []byte{0x82, 0x87, 0x84, 0x88, 0x90}
+		d := NewDecoder(4096, func(HeaderField) {})
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = d.Write(wire)
+			_ = d.Close()
+		}
+	})
+	b.Run("DecodeStatic/XNet", func(b *testing.B) {
+		wire := []byte{0x82, 0x87, 0x84, 0x88, 0x90}
+		d := xhpack.NewDecoder(4096, func(xhpack.HeaderField) {})
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = d.Write(wire)
+			_ = d.Close()
+		}
+	})
+	b.Run("HuffmanEncode/Custom", func(b *testing.B) {
+		s := "www.example.com/path/to/resource?query=value&other=thing"
+		dst := make([]byte, 0, 128)
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			dst = AppendHuffmanString(dst[:0], s)
+		}
+	})
+	b.Run("HuffmanEncode/XNet", func(b *testing.B) {
+		s := "www.example.com/path/to/resource?query=value&other=thing"
+		dst := make([]byte, 0, 128)
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			dst = xhpack.AppendHuffmanString(dst[:0], s)
+		}
+	})
+}
+*/
 // FuzzDecode is a fuzz target for the decoder. Run with:
 //
 //	go test -fuzz=FuzzDecode -fuzztime=30s
 func FuzzDecode(f *testing.F) {
-	f.Add([]byte{0x82})                                          // :method: GET
+	f.Add([]byte{0x82})                                        // :method: GET
 	f.Add(mustHex("828684410f7777772e6578616d706c652e636f6d")) // C.3.1
 	f.Add([]byte{0x00})
 	f.Add([]byte{0xFF, 0x80, 0x80, 0x80, 0x01})

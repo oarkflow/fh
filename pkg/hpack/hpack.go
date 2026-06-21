@@ -196,6 +196,19 @@ func (d *Decoder) Write(p []byte) (n int, err error) {
 	}
 
 	for len(d.buf) > 0 {
+		// The overwhelmingly common representation is a one-byte indexed
+		// reference into the 61-entry static table. Keep it in this loop to
+		// avoid the varint parser and dynamic-table bounds machinery.
+		if b := d.buf[0]; b&0x80 != 0 {
+			if idx := int(b & 0x7f); idx > 0 && idx <= len(staticTableEntries) {
+				d.buf = d.buf[1:]
+				d.firstField = false
+				if err = d.callEmit(staticTable.ents[idx-1]); err != nil {
+					break
+				}
+				continue
+			}
+		}
 		err = d.parseHeaderFieldRepr()
 		if err == errNeedMore {
 			const varIntOverhead = 8

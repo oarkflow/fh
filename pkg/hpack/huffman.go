@@ -7,48 +7,74 @@ import (
 // ── Huffman encoding ─────────────────────────────────────────────────────────
 
 // AppendHuffmanString appends s Huffman-encoded to dst.
-// Uses a 64-bit accumulation register: max code length is 30 bits, so we can
-// always pack 2+ codes per flush, minimising append calls.
+//
+// Codegen notes (Go 1.22 amd64):
+//
+//  1. `n += uint(huffmanCodeLen[c])` before `x <<= huffmanCodeLen[c] % 64`
+//     lets the compiler reuse the already-loaded codeLen byte for both the
+//     addition and the shift without an extra register move.
+//
+//  2. `x <<= huffmanCodeLen[c] % 64` — the `% 64` is a hint that the shift
+//     amount is always in [0,63], eliminating the branchless overflow guard
+//     (CMPQ/SBBQ/ANDQ sequence) the compiler emits for an unbounded shift.
+//
+//  3. `n %= 32` instead of `n -= 32` after the flush — same hint: tells the
+//     compiler n is in [0,31] for the subsequent `x >> n` shift, removing
+//     another guard sequence.
+//
+//  4. Case 2/3 of the tail flush use uint16 intermediates so the compiler
+//     emits ROLW + a single wide store rather than two independent byte stores.
+//
+// Max Huffman code length is 30 bits (see huffmanCodeLen), so the 64-bit
+// accumulator always has room for at least one more code before a flush.
 func AppendHuffmanString(dst []byte, s string) []byte {
-	var x uint64
-	var n uint
-
+	var (
+		x uint64 // bit accumulator
+		n uint   // valid bits in x
+	)
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		clen := uint(huffmanCodeLen[c])
-		x = (x << clen) | uint64(huffmanCodes[c])
-		n += clen
+		n += uint(huffmanCodeLen[c])
+		x <<= huffmanCodeLen[c] % 64 // % 64 removes compiler shift-overflow guard
+		x |= uint64(huffmanCodes[c])
 		if n >= 32 {
-			n -= 32
-			y := uint32(x >> n)
+			n %= 32             // %= 32 informs compiler 0 <= n <= 31 for shift below
+			y := uint32(x >> n) // uint32: compiler emits BSWAP + single 4-byte MOV
 			dst = append(dst, byte(y>>24), byte(y>>16), byte(y>>8), byte(y))
 		}
 	}
-
-	// Pad and flush remaining bits.
+	// Pad remaining bits with EOS prefix (all-1s, RFC 7541 §5.2).
 	if over := n % 8; over > 0 {
-		// EOS padding: 0x3fffffff, 30-bit, pad byte = 0xff
-		const eosPadByte = 0xff
+		const (
+			eosCode    = 0x3fffffff
+			eosNBits   = 30
+			eosPadByte = eosCode >> (eosNBits - 8) // = 0xff
+		)
 		pad := 8 - over
-		x = (x << pad) | (uint64(eosPadByte) >> over)
-		n += pad
+		x = (x << pad) | (eosPadByte >> over)
+		n += pad // n is now a multiple of 8 in {8,16,24,32}
 	}
+	// Flush 0-4 remaining bytes. uint16 intermediates let the compiler use
+	// ROLW and emit 2-byte stores instead of two independent MOVB instructions.
 	switch n / 8 {
 	case 0:
+		return dst
 	case 1:
-		dst = append(dst, byte(x))
+		return append(dst, byte(x))
 	case 2:
-		dst = append(dst, byte(x>>8), byte(x))
+		y := uint16(x)
+		return append(dst, byte(y>>8), byte(y))
 	case 3:
-		dst = append(dst, byte(x>>16), byte(x>>8), byte(x))
-	default: // 4
-		dst = append(dst, byte(x>>24), byte(x>>16), byte(x>>8), byte(x))
+		y := uint16(x >> 8)
+		return append(dst, byte(y>>8), byte(y), byte(x))
 	}
-	return dst
+	// case 4:
+	y := uint32(x)
+	return append(dst, byte(y>>24), byte(y>>16), byte(y>>8), byte(y))
 }
 
-// HuffmanEncodeLength returns the number of bytes required to Huffman-encode s
-// (rounded up to the next byte boundary).
+// HuffmanEncodeLength returns the number of bytes required to Huffman-encode s,
+// rounded up to the next byte boundary.
 func HuffmanEncodeLength(s string) uint64 {
 	n := uint64(0)
 	for i := 0; i < len(s); i++ {

@@ -581,12 +581,14 @@ func (a *App) serveConn(conn net.Conn) {
 				}
 				h2c := newH2Conn(a, conn)
 				a.setH2Conn(conn, h2c)
+				_ = conn.SetReadDeadline(time.Time{})
 				h2c.serve(nil, true)
 				return
 			}
 			if !a.cfg.DisableHTTP2 && len(accumulated) > len(h2ClientPreface) && bytes.Equal(accumulated[:len(h2ClientPreface)], h2ClientPreface) {
 				h2c := newH2Conn(a, conn)
 				a.setH2Conn(conn, h2c)
+				_ = conn.SetReadDeadline(time.Time{})
 				h2c.serve(accumulated[len(h2ClientPreface):], true)
 				return
 			}
@@ -618,18 +620,35 @@ func (a *App) serveConn(conn net.Conn) {
 
 		// h2c upgrade: HTTP/1.1 Upgrade: h2c, Connection: Upgrade, HTTP2-Settings
 		if !a.cfg.DisableHTTP2 && hasUpgradeH2C(ctx) {
+			leftover, bodyErr := readH2CUpgradeBody(conn, ctx, accumulated, headEnd+4, a.cfg.MaxRequestBodySize, a.cfg.ReadTimeout)
+			if bodyErr != nil {
+				releaseCtx(ctx)
+				if errors.Is(bodyErr, ErrBodyTooLarge) {
+					_ = writeAll(conn, serverError413)
+				} else {
+					_ = writeAll(conn, serverError400)
+				}
+				return
+			}
+			h2c := newH2Conn(a, conn)
+			if err := h2c.prepareUpgrade(ctx); err != nil {
+				releaseCtx(ctx)
+				_ = writeAll(conn, serverError400)
+				return
+			}
 			upgrade := []byte("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n")
 			if err := writeAll(conn, upgrade); err != nil {
 				releaseCtx(ctx)
 				return
 			}
-			h2c := newH2Conn(a, conn)
-			defer func() {
-				_ = conn.SetReadDeadline(time.Time{})
-			}()
+			// Clear the read deadline set during HTTP/1.1 header parsing.
+			// HTTP/2 manages its own deadlines.
+			_ = conn.SetReadDeadline(time.Time{})
+			// Pass any data read beyond the HTTP/1.1 headers (e.g. the start
+			// of the HTTP/2 client preface) so it is not lost.
 			a.setH2Conn(conn, h2c)
 			releaseCtx(ctx)
-			h2c.serve(nil, false)
+			h2c.serve(leftover, false)
 			return
 		}
 
@@ -865,6 +884,39 @@ func hasUpgradeH2C(ctx *Ctx) bool {
 	}
 	settings := trimOWS(ctx.Header.Peek([]byte("HTTP2-Settings")))
 	return len(settings) > 0
+}
+
+func readH2CUpgradeBody(conn net.Conn, ctx *Ctx, buffered []byte, bodyStart, maxBody int, timeout time.Duration) ([]byte, error) {
+	data := buffered[bodyStart:]
+	if ctx.Header.Chunked {
+		body, leftover, trailers, err := readChunkedBody(conn, data, maxBody, timeout)
+		if err != nil {
+			return nil, err
+		}
+		ctx.body, ctx.trailers = body, trailers
+		return leftover, nil
+	}
+	length := ctx.Header.ContentLength
+	if length > maxBody {
+		return nil, ErrBodyTooLarge
+	}
+	if length == 0 {
+		return data, nil
+	}
+	if len(data) < length {
+		body := make([]byte, length)
+		copy(body, data)
+		if timeout > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(timeout))
+		}
+		if _, err := io.ReadFull(conn, body[len(data):]); err != nil {
+			return nil, err
+		}
+		ctx.body = body
+		return nil, nil
+	}
+	ctx.body = data[:length]
+	return data[length:], nil
 }
 
 func isExpectedConnErr(err error) bool {

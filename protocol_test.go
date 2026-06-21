@@ -381,6 +381,76 @@ func TestHTTP2PriorKnowledgeRequest(t *testing.T) {
 	}
 }
 
+func TestHTTP2CleartextUpgradeRequestBecomesStreamOne(t *testing.T) {
+	app := New()
+	app.Post("/upgrade-h2", func(c *Ctx) error {
+		if string(c.Header.Proto) != "HTTP/2.0" {
+			t.Fatalf("unexpected protocol %q", c.Header.Proto)
+		}
+		return c.SendString("upgraded:" + string(c.Body()))
+	})
+	client := runPipeApp(t, app)
+	settings := "AAMAAABk" // SETTINGS_MAX_CONCURRENT_STREAMS = 100.
+	request := "POST /upgrade-h2 HTTP/1.1\r\nHost: local\r\nConnection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: " + settings + "\r\nContent-Length: 4\r\n\r\nping"
+	if _, err := io.WriteString(client, request); err != nil {
+		t.Fatal(err)
+	}
+	const switching = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n"
+	got := make([]byte, len(switching))
+	if _, err := io.ReadFull(client, got); err != nil || string(got) != switching {
+		t.Fatalf("upgrade response %q: %v", got, err)
+	}
+	prefaceWritten := make(chan error, 1)
+	go func() {
+		_, err := client.Write(h2ClientPreface)
+		prefaceWritten <- err
+	}()
+	serverSettings, err := readTestH2Frame(client)
+	if err != nil || serverSettings.typ != h2Settings {
+		t.Fatalf("server settings: %#v %v", serverSettings, err)
+	}
+	if err := <-prefaceWritten; err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestH2Frame(client, h2Settings, 0, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := readTestH2Frame(client)
+	if err != nil || ack.typ != h2Settings || ack.flags&h2FlagAck == 0 {
+		t.Fatalf("settings ack: %#v %v", ack, err)
+	}
+
+	decoder := hpack.NewDecoder(4096, func(hpack.HeaderField) {})
+	status, body, ended := "", []byte(nil), false
+	for !ended {
+		frame, err := readTestH2Frame(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if frame.streamID != 1 {
+			continue
+		}
+		switch frame.typ {
+		case h2Headers:
+			fields, err := decoder.DecodeFull(frame.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range fields {
+				if field.Name == ":status" {
+					status = field.Value
+				}
+			}
+		case h2Data:
+			body = append(body, frame.payload...)
+		}
+		ended = frame.flags&h2FlagEndStream != 0
+	}
+	if status != "200" || string(body) != "upgraded:ping" {
+		t.Fatalf("status=%q body=%q", status, body)
+	}
+}
+
 func TestHTTP2GracefulGoAway(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	app := New()
