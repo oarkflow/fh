@@ -3,6 +3,9 @@ package fh
 import (
 	"bytes"
 	"errors"
+	"net/textproto"
+	"strconv"
+	"strings"
 )
 
 // Common header names, methods, and protocol strings as []byte.
@@ -25,13 +28,13 @@ const (
 	HeaderHostStr             = "Host"
 	HeaderServerStr           = "Server"
 	HeaderDateStr             = "Date"
-	HeaderCacheControlStr     = "Cache-Control"
-	HeaderUserAgentStr        = "User-Agent"
-	HeaderAuthorizationStr    = "Authorization"
-	HeaderAcceptStr           = "Accept"
-	HeaderAcceptEncodingStr   = "Accept-Encoding"
-	HeaderAcceptLanguageStr   = "Accept-Language"
-	HeaderContentEncodingStr  = "Content-Encoding"
+	HeaderCacheControlStr      = "Cache-Control"
+	HeaderUserAgentStr         = "User-Agent"
+	HeaderAuthorizationStr     = "Authorization"
+	HeaderAcceptStr            = "Accept"
+	HeaderAcceptEncodingStr    = "Accept-Encoding"
+	HeaderAcceptLanguageStr    = "Accept-Language"
+	HeaderContentEncodingStr   = "Content-Encoding"
 	HeaderContentDispositionStr = "Content-Disposition"
 	HeaderLocationStr         = "Location"
 	HeaderSetCookieStr        = "Set-Cookie"
@@ -154,6 +157,106 @@ func (h *RequestHeader) PeekStr(name string) string {
 		return ""
 	}
 	return string(v)
+}
+
+// Get is the string-based, Fiber-style request header accessor.
+func (h *RequestHeader) Get(name string, defaults ...string) string {
+	value := h.PeekStr(name)
+	if value == "" && len(defaults) != 0 {
+		return defaults[0]
+	}
+	return value
+}
+
+// Values returns every value stored for a request header.
+func (h *RequestHeader) Values(name string) []string {
+	values := make([]string, 0, 1)
+	for i := 0; i < h.hcount; i++ {
+		if strBytesEqualFold(name, h.headers[i].Key) {
+			values = append(values, string(h.headers[i].Value))
+		}
+	}
+	return values
+}
+
+// GetHeaders returns all request headers and preserves repeated fields.
+func (h *RequestHeader) GetHeaders() map[string][]string {
+	headers := make(map[string][]string, h.hcount)
+	for i := 0; i < h.hcount; i++ {
+		key := textproto.CanonicalMIMEHeaderKey(string(h.headers[i].Key))
+		headers[key] = append(headers[key], string(h.headers[i].Value))
+	}
+	if len(h.Host) != 0 && len(headers[HeaderHostStr]) == 0 {
+		headers[HeaderHostStr] = []string{string(h.Host)}
+	}
+	if len(h.ContentType) != 0 && len(headers[HeaderContentTypeStr]) == 0 {
+		headers[HeaderContentTypeStr] = []string{string(h.ContentType)}
+	}
+	return headers
+}
+
+// Set replaces all existing values for name with value.
+func (h *RequestHeader) Set(name, value string) {
+	h.Del(name)
+	h.Add(name, value)
+}
+
+// Add appends a request header value without replacing existing values.
+func (h *RequestHeader) Add(name, value string) {
+	key := []byte(name)
+	if !validToken(key) || stringsContainsCTL(value) {
+		return
+	}
+	if h.hcount == len(h.headers) {
+		h.headers = append(h.headers, Header{})
+	}
+	h.headers[h.hcount] = Header{Key: key, Value: []byte(value)}
+	h.hcount++
+	h.syncKnownHeader(name, value)
+}
+
+// Del removes every value for a request header.
+func (h *RequestHeader) Del(name string) {
+	write := 0
+	for i := 0; i < h.hcount; i++ {
+		if strBytesEqualFold(name, h.headers[i].Key) {
+			continue
+		}
+		h.headers[write] = h.headers[i]
+		write++
+	}
+	clear(h.headers[write:h.hcount])
+	h.hcount = write
+	switch {
+	case strings.EqualFold(name, HeaderHostStr):
+		h.Host = nil
+	case strings.EqualFold(name, HeaderContentTypeStr):
+		h.ContentType = nil
+	case strings.EqualFold(name, HeaderContentLengthStr):
+		h.ContentLength, h.HasContentLength = 0, false
+	}
+}
+
+func (h *RequestHeader) syncKnownHeader(name, value string) {
+	switch {
+	case strings.EqualFold(name, HeaderHostStr):
+		h.Host = []byte(value)
+	case strings.EqualFold(name, HeaderContentTypeStr):
+		h.ContentType = []byte(value)
+	case strings.EqualFold(name, HeaderContentLengthStr):
+		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
+			h.ContentLength, h.HasContentLength = n, true
+		}
+	}
+}
+
+func stringsContainsCTL(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\r' || value[i] == '\n' || value[i] == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *RequestHeader) peekStr(name string) []byte {

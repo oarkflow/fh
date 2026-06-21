@@ -807,6 +807,7 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 		ctx.Header.URI = []byte(s.path)
 		ctx.Header.Proto = []byte("HTTP/2.0")
 		ctx.Header.Host = []byte(s.authority)
+		ctx.originalURI = append(ctx.originalURI[:0], ctx.Header.URI...)
 		ctx.Header.KeepAlive = true
 		if cap(ctx.Header.headers) < maxHeaders {
 			ctx.Header.headers = make([]Header, maxHeaders)

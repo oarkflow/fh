@@ -671,6 +671,7 @@ func (a *App) serveConn(conn net.Conn) {
 			_ = writeAll(conn, serverError501)
 			return
 		}
+		ctx.originalURI = append(ctx.originalURI[:0], ctx.Header.URI...)
 
 		// h2c upgrade: HTTP/1.1 Upgrade: h2c, Connection: Upgrade, HTTP2-Settings
 		if !a.cfg.DisableHTTP2 && hasUpgradeH2C(ctx) {

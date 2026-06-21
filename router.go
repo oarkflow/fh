@@ -12,6 +12,9 @@ import (
 
 type HandlerFunc func(*Ctx) error
 
+// Handler is the Fiber-compatible name for a request handler.
+type Handler = HandlerFunc
+
 type Param struct {
 	Key   string
 	Value string

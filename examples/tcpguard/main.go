@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/authorizer"
 	"github.com/oarkflow/tcpguard"
 	"github.com/oarkflow/tcpguard/bcl"
 )
@@ -149,7 +150,7 @@ func main() {
 	app.Post("/_demo/sign", func(c *fh.Ctx) error {
 		method := c.Query("method", http.MethodPost)
 		path := c.Query("path", "/api/v1/transfers")
-		body := c.Body()
+		body := c.BodyRaw()
 		return c.JSON(map[string]any{
 			"method":    method,
 			"path":      path,
@@ -174,14 +175,14 @@ func main() {
 		return c.JSON(records)
 	})
 	app.Post("/_demo/approvals/:id/approve", func(c *fh.Ctx) error {
-		record, err := guard.Approve(c.Context(), c.Param("id"), c.Get("X-Approver", "security-admin"), c.Get("X-Reason", "approved from Fiber demo"))
+		record, err := guard.Approve(c.Context(), c.Params("id"), c.Get("X-Approver", "security-admin"), c.Get("X-Reason", "approved from Fiber demo"))
 		if err != nil {
 			return c.Status(http.StatusBadRequest).JSON(errorBody(err))
 		}
 		return c.JSON(record)
 	})
 	app.Post("/_demo/approvals/:id/reject", func(c *fh.Ctx) error {
-		record, err := guard.Reject(c.Context(), c.Param("id"), c.Get("X-Approver", "security-admin"), c.Get("X-Reason", "rejected from Fiber demo"))
+		record, err := guard.Reject(c.Context(), c.Params("id"), c.Get("X-Approver", "security-admin"), c.Get("X-Reason", "rejected from Fiber demo"))
 		if err != nil {
 			return c.Status(http.StatusBadRequest).JSON(errorBody(err))
 		}
@@ -205,7 +206,7 @@ func main() {
 		return c.JSON(map[string]any{"valid": true, "envelopes": envelopes})
 	})
 
-	app.Use(guard.Middleware())
+	app.Use(authorizer.New(guard))
 
 	app.Get("/public", func(c *fh.Ctx) error {
 		return c.JSON(map[string]any{"ok": true, "message": "clean request allowed", "risk": c.GetRespHeader("X-TCPGuard-Risk")})

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"sync"
@@ -80,6 +81,7 @@ type Ctx struct {
 	trailers         []Header
 	responseTrailers []Header
 	requestContext   context.Context
+	originalURI      []byte
 	bodyTransform    func([]byte) ([]byte, error)
 	h2               *h2Response
 	cachedIP         string
@@ -160,6 +162,7 @@ func (c *Ctx) reset() {
 	clear(c.responseTrailers)
 	c.responseTrailers = c.responseTrailers[:0]
 	c.requestContext = context.Background()
+	c.originalURI = c.originalURI[:0]
 	c.bodyTransform = nil
 	c.h2 = nil
 	if c.lcount > 0 {
@@ -224,6 +227,15 @@ func (c *Ctx) Next() error {
 
 func (c *Ctx) Method() string { return string(c.Header.Method) }
 
+// OriginalURL returns the request target as it arrived, before any Rewrite.
+// The name mirrors Fiber's Ctx API.
+func (c *Ctx) OriginalURL() string {
+	if len(c.originalURI) != 0 {
+		return string(c.originalURI)
+	}
+	return string(c.Header.URI)
+}
+
 func (c *Ctx) path() []byte {
 	uri := c.Header.URI
 	for i, v := range uri {
@@ -258,6 +270,16 @@ func (c *Ctx) Param(name string) string {
 		}
 	}
 	return ""
+}
+
+// Params is the Fiber-compatible alias for Param. If the parameter is absent,
+// the optional default value is returned.
+func (c *Ctx) Params(name string, defaults ...string) string {
+	value := c.Param(name)
+	if value == "" && len(defaults) != 0 {
+		return defaults[0]
+	}
+	return value
 }
 
 func (c *Ctx) Query(name string, def ...string) string {
@@ -340,6 +362,9 @@ func (c *Ctx) parseQuery() {
 }
 
 func (c *Ctx) Body() []byte { return c.body }
+
+// BodyRaw is the Fiber-compatible name for the unmodified request body.
+func (c *Ctx) BodyRaw() []byte { return c.body }
 
 // QueryParser decodes the query string into v. The target type should be
 // *map[string]any for unstructured access; struct decoding is not yet supported.
@@ -430,7 +455,28 @@ func (c *Ctx) AddBodyTransform(fn func([]byte) ([]byte, error)) {
 	}
 }
 
-func (c *Ctx) Get(name string) string { return c.Header.PeekStr(name) }
+func (c *Ctx) Get(name string, defaults ...string) string {
+	value := c.Header.PeekStr(name)
+	if value == "" && len(defaults) != 0 {
+		return defaults[0]
+	}
+	return value
+}
+
+// GetReqHeaders returns all request header values, preserving repeated fields.
+func (c *Ctx) GetReqHeaders() map[string][]string { return c.Header.GetHeaders() }
+
+// GetHeaders is an alias for GetReqHeaders.
+func (c *Ctx) GetHeaders() map[string][]string { return c.GetReqHeaders() }
+
+// Hostname returns the request host without its port.
+func (c *Ctx) Hostname() string {
+	host := string(c.Header.Host)
+	if parsed, _, err := net.SplitHostPort(host); err == nil {
+		return parsed
+	}
+	return strings.Trim(host, "[]")
+}
 
 func (c *Ctx) Locals(key string, value ...any) any {
 	if len(value) > 0 {
@@ -578,6 +624,35 @@ func (c *Ctx) ResponseHeader(name string) string {
 		}
 	}
 	return ""
+}
+
+// GetRespHeader is the Fiber-compatible alias for ResponseHeader.
+func (c *Ctx) GetRespHeader(name string, defaults ...string) string {
+	value := c.ResponseHeader(name)
+	if value == "" && len(defaults) != 0 {
+		return defaults[0]
+	}
+	return value
+}
+
+// GetRespHeaders returns all response headers set on the context.
+func (c *Ctx) GetRespHeaders() map[string][]string {
+	headers := make(map[string][]string, c.chCount+len(c.extraHeaders)+1)
+	if len(c.contentType) != 0 {
+		headers[HeaderContentTypeStr] = []string{string(c.contentType)}
+	}
+	for i := 0; i < c.chCount; i++ {
+		key := textproto.CanonicalMIMEHeaderKey(string(c.customHeaders[i].Key))
+		headers[key] = append(headers[key], string(c.customHeaders[i].Value))
+	}
+	for i := range c.extraHeaders {
+		key := textproto.CanonicalMIMEHeaderKey(string(c.extraHeaders[i].Key))
+		headers[key] = append(headers[key], string(c.extraHeaders[i].Value))
+	}
+	for i := range c.responseCookies {
+		headers[HeaderSetCookieStr] = append(headers[HeaderSetCookieStr], c.responseCookies[i].String())
+	}
+	return headers
 }
 
 // HasResponseCookies reports whether the response currently sets cookies.

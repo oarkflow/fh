@@ -10,6 +10,7 @@ guard "tcpguard-fiber-server" {
   authz {
     file "./tcpguard.authz"
     strict false
+    enforce_http true
     timeout 25ms
     error_policy deny
   }
