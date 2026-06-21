@@ -2,10 +2,10 @@ package main
 
 import (
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/oarkflow/bcl"
+	"github.com/oarkflow/fh"
 )
 
 func (e *Engine) AddCondition(c ConditionSpec) error {
@@ -40,11 +40,11 @@ func (e *Engine) evalRouteCondition(rc RouteConfig, facts map[string]any) (bool,
 	return e.evalNamedOrInline(rc.Condition, rc.When, facts)
 }
 
-func (e *Engine) evalMiddlewareCondition(c MiddlewareConfig, r *http.Request) (bool, error) {
+func (e *Engine) evalMiddlewareCondition(c MiddlewareConfig, ctx *fh.Ctx) (bool, error) {
 	if c.Condition == "" && c.When == "" {
 		return true, nil
 	}
-	facts := httpConditionFacts(r, nil, nil, RouteConfig{})
+	facts := httpConditionFacts(ctx, nil, nil, RouteConfig{})
 	return e.evalNamedOrInline(c.Condition, c.When, facts)
 }
 
@@ -158,10 +158,10 @@ func (e *Engine) workflowFacts(task *Task, node *Node, result any, extra map[str
 	return facts
 }
 
-func httpConditionFacts(r *http.Request, params map[string]string, input any, rc RouteConfig) map[string]any {
+func httpConditionFacts(c *fh.Ctx, params map[string]string, input any, rc RouteConfig) map[string]any {
 	headers := map[string]any{}
-	if r != nil {
-		for k, v := range r.Header {
+	if c != nil {
+		for k, v := range c.GetReqHeaders() {
 			if len(v) == 1 {
 				headers[k] = v[0]
 			} else {
@@ -170,20 +170,14 @@ func httpConditionFacts(r *http.Request, params map[string]string, input any, rc
 		}
 	}
 	query := map[string]any{}
-	if r != nil {
-		for k, v := range r.URL.Query() {
-			if len(v) == 1 {
-				query[k] = v[0]
-			} else {
-				query[k] = v
-			}
-		}
+	if c != nil {
+		_ = c.QueryParser(&query)
 	}
 	method, path, remote := "", "", ""
-	if r != nil {
-		method, path, remote = r.Method, r.URL.Path, r.RemoteAddr
+	if c != nil {
+		method, path, remote = c.Method(), c.Path(), c.IP()
 	}
-	return map[string]any{"request": map[string]any{"method": method, "path": path, "headers": headers, "query": query, "remote_addr": remote, "client_ip": clientIP(r), "body": input}, "route": map[string]any{"id": rc.ID, "method": rc.Method, "path": rc.Path, "workflow": rc.Workflow, "chain": rc.Chain}, "path": params, "input": input, "result": input}
+	return map[string]any{"request": map[string]any{"method": method, "path": path, "headers": headers, "query": query, "remote_addr": remote, "client_ip": clientIP(c), "body": input}, "route": map[string]any{"id": rc.ID, "method": rc.Method, "path": rc.Path, "workflow": rc.Workflow, "chain": rc.Chain}, "path": params, "input": input, "result": input}
 }
 
 func cloneFacts(in map[string]any) map[string]any {

@@ -6,24 +6,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oarkflow/fh"
 )
 
 type HTTPApp struct {
 	engine      *Engine
 	routes      []compiledRoute
-	middlewares map[string]func(http.Handler) http.Handler
+	middlewares map[string]fh.HandlerFunc
 	global      []string
 }
+
 type compiledRoute struct {
 	cfg      RouteConfig
 	segments []pathSegment
 }
+
 type pathSegment struct {
 	literal  string
 	param    string
@@ -31,9 +33,9 @@ type pathSegment struct {
 }
 
 func NewHTTPApp(engine *Engine, cfg *Config) (*HTTPApp, error) {
-	app := &HTTPApp{engine: engine, middlewares: map[string]func(http.Handler) http.Handler{}, global: append([]string(nil), cfg.GlobalMiddlewares...)}
+	app := &HTTPApp{engine: engine, middlewares: map[string]fh.HandlerFunc{}, global: append([]string(nil), cfg.GlobalMiddlewares...)}
 	for _, mc := range cfg.Middlewares {
-		mw, err := buildMiddleware(engine, mc)
+		mw, err := buildMiddleware(mc)
 		if err != nil {
 			return nil, err
 		}
@@ -42,9 +44,9 @@ func NewHTTPApp(engine *Engine, cfg *Config) (*HTTPApp, error) {
 		}
 		app.middlewares[mc.ID] = mw
 	}
-	for _, gc := range app.global {
-		if app.middlewares[gc] == nil {
-			return nil, fmt.Errorf("global middleware %s not found", gc)
+	for _, name := range app.global {
+		if app.middlewares[name] == nil {
+			return nil, fmt.Errorf("global middleware %s not found", name)
 		}
 	}
 	for _, rc := range FlattenRoutes(cfg) {
@@ -57,21 +59,59 @@ func NewHTTPApp(engine *Engine, cfg *Config) (*HTTPApp, error) {
 	return app, nil
 }
 
-func conditionalMiddleware(e *Engine, cfg MiddlewareConfig, mw func(http.Handler) http.Handler) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		wrapped := mw(next)
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ok, err := e.evalMiddlewareCondition(cfg, r)
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "middleware condition failed", "middleware": cfg.ID, "detail": err.Error()})
-				return
+// Register installs every BCL-defined route directly in fh's router.
+func (a *HTTPApp) Register(app *fh.App) error {
+	for i := range a.routes {
+		cr := a.routes[i]
+		handlers := make([]fh.HandlerFunc, 0, len(a.global)+len(cr.cfg.Middlewares)+1)
+		for _, name := range append(append([]string{}, a.global...), cr.cfg.Middlewares...) {
+			mw := a.middlewares[name]
+			if mw == nil {
+				return fmt.Errorf("route %s middleware %s not found", cr.cfg.ID, name)
 			}
+			handlers = append(handlers, mw)
+		}
+		handlers = append(handlers, func(c *fh.Ctx) error {
+			params, ok := matchPath(cr.segments, c.Path())
 			if !ok {
-				next.ServeHTTP(w, r)
-				return
+				return writeJSON(c, fh.StatusNotFound, map[string]any{"error": "route not found"})
 			}
-			wrapped.ServeHTTP(w, r)
+			if cr.cfg.When != "" || cr.cfg.Condition != "" {
+				ok, err := a.engine.evalRouteCondition(cr.cfg, httpConditionFacts(c, params, nil, cr.cfg))
+				if err != nil {
+					return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": "route condition failed", "detail": err.Error()})
+				}
+				if !ok {
+					return writeJSON(c, fh.StatusNotFound, map[string]any{"error": "route not found"})
+				}
+			}
+			return a.handleWorkflowRoute(c, cr.cfg, params)
 		})
+		app.Add(cr.cfg.Method, fhRoutePath(cr.cfg.Path), handlers...)
+	}
+	return nil
+}
+
+func fhRoutePath(path string) string {
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		if strings.HasPrefix(part, "{") && strings.HasSuffix(part, "}") {
+			parts[i] = ":" + strings.TrimSuffix(strings.TrimPrefix(part, "{"), "}")
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+func conditionalMiddleware(e *Engine, cfg MiddlewareConfig, mw fh.HandlerFunc) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		ok, err := e.evalMiddlewareCondition(cfg, c)
+		if err != nil {
+			return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": "middleware condition failed", "middleware": cfg.ID, "detail": err.Error()})
+		}
+		if !ok {
+			return c.Next()
+		}
+		return mw(c)
 	}
 }
 
@@ -112,114 +152,62 @@ func compileRoute(rc RouteConfig, e *Engine) (compiledRoute, error) {
 			return compiledRoute{}, err
 		}
 	}
-	if len(rc.Workflows) > 0 {
-		for _, id := range rc.Workflows {
-			if _, err := e.workflow(id); err != nil {
-				return compiledRoute{}, err
-			}
+	for _, id := range rc.Workflows {
+		if _, err := e.workflow(id); err != nil {
+			return compiledRoute{}, err
 		}
 	}
 	return compiledRoute{cfg: rc, segments: parsePath(rc.Path)}, nil
 }
 
-func (a *HTTPApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	for _, cr := range a.routes {
-		if r.Method != cr.cfg.Method {
-			continue
-		}
-		params, ok := matchPath(cr.segments, r.URL.Path)
-		if !ok {
-			continue
-		}
-		if cr.cfg.When != "" || cr.cfg.Condition != "" {
-			facts := httpConditionFacts(r, params, nil, cr.cfg)
-			ok, err := a.engine.evalRouteCondition(cr.cfg, facts)
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "route condition failed", "detail": err.Error()})
-				return
-			}
-			if !ok {
-				writeJSON(w, http.StatusNotFound, map[string]any{"error": "route not found"})
-				return
-			}
-		}
-		var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.handleWorkflowRoute(w, r, cr.cfg, params) })
-		chainNames := append([]string(nil), a.global...)
-		chainNames = append(chainNames, cr.cfg.Middlewares...)
-		for i := len(chainNames) - 1; i >= 0; i-- {
-			mw := a.middlewares[chainNames[i]]
-			if mw == nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "middleware not found", "name": chainNames[i]})
-				return
-			}
-			h = mw(h)
-		}
-		h.ServeHTTP(w, r)
-		return
-	}
-	writeJSON(w, http.StatusNotFound, map[string]any{"error": "route not found"})
-}
-
-func (a *HTTPApp) handleWorkflowRoute(w http.ResponseWriter, r *http.Request, rc RouteConfig, params map[string]string) {
-	input, err := readInput(r, params, rc.Envelope)
+func (a *HTTPApp) handleWorkflowRoute(c *fh.Ctx, rc RouteConfig, params map[string]string) error {
+	input, err := readInput(c, params, rc.Envelope)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
+		return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
 	}
 	if err := a.engine.ValidateAgainstSchema(rc.InputSchema, input); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "schema validation failed", "detail": err.Error()})
-		return
+		return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": "schema validation failed", "detail": err.Error()})
 	}
+	ctx := c.Context()
 	if rc.Workflow != "" {
-		if key := r.Header.Get("Idempotency-Key"); key != "" {
-			if existing, ok, err := a.engine.handleIdempotency(r.Context(), key, rc.Workflow, input); err != nil {
-				writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
-				return
+		if key := c.Get("Idempotency-Key"); key != "" {
+			if existing, ok, err := a.engine.handleIdempotency(ctx, key, rc.Workflow, input); err != nil {
+				return writeJSON(c, fh.StatusConflict, map[string]any{"error": err.Error()})
 			} else if ok {
-				writeJSON(w, http.StatusOK, existing)
-				return
+				return writeJSON(c, fh.StatusOK, existing)
 			}
 		}
 		if rc.Mode == RouteAsync || rc.Mode == RouteDetached {
-			task, err := a.engine.RunAsync(r.Context(), rc.Workflow, input)
-			a.engine.recordIdempotencyFromRequest(r, rc.Workflow, input, task)
+			task, err := a.engine.RunAsync(ctx, rc.Workflow, input)
+			a.engine.recordIdempotencyFromRequest(c, rc.Workflow, input, task)
 			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-				return
+				return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": err.Error()})
 			}
-			writeJSON(w, http.StatusAccepted, task)
-			return
+			return writeJSON(c, fh.StatusAccepted, task)
 		}
-		task, err := a.engine.RunSync(r.Context(), rc.Workflow, input)
-		a.engine.recordIdempotencyFromRequest(r, rc.Workflow, input, task)
+		task, err := a.engine.RunSync(ctx, rc.Workflow, input)
+		a.engine.recordIdempotencyFromRequest(c, rc.Workflow, input, task)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, taskOrError(task, err))
-			return
+			return writeJSON(c, fh.StatusInternalServerError, taskOrError(task, err))
 		}
 		if task.Status == TaskWaiting || task.Status == TaskPaused {
-			writeJSON(w, http.StatusAccepted, task)
-			return
+			return writeJSON(c, fh.StatusAccepted, task)
 		}
-		writeJSON(w, http.StatusOK, task)
-		return
+		return writeJSON(c, fh.StatusOK, task)
 	}
 	if rc.Chain != "" {
 		if rc.Mode == RouteAsync || rc.Mode == RouteDetached {
-			run, err := a.engine.RunChainAsync(r.Context(), rc.Chain, input)
+			run, err := a.engine.RunChainAsync(ctx, rc.Chain, input)
 			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-				return
+				return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": err.Error()})
 			}
-			writeJSON(w, http.StatusAccepted, run)
-			return
+			return writeJSON(c, fh.StatusAccepted, run)
 		}
-		run, err := a.engine.RunChainSync(r.Context(), rc.Chain, input)
+		run, err := a.engine.RunChainSync(ctx, rc.Chain, input)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, chainOrError(run, err))
-			return
+			return writeJSON(c, fh.StatusInternalServerError, chainOrError(run, err))
 		}
-		writeJSON(w, http.StatusOK, run)
-		return
+		return writeJSON(c, fh.StatusOK, run)
 	}
 	if rc.Mode == RouteAsync || rc.Mode == RouteDetached {
 		run := newChainRun("adhoc", rc.Workflows, input)
@@ -243,15 +231,13 @@ func (a *HTTPApp) handleWorkflowRoute(w http.ResponseWriter, r *http.Request, rc
 			}
 			a.engine.finishChain(run, runErr)
 		}()
-		writeJSON(w, http.StatusAccepted, run)
-		return
+		return writeJSON(c, fh.StatusAccepted, run)
 	}
-	run, err := a.engine.RunWorkflowIDsSync(r.Context(), rc.Workflows, input)
+	run, err := a.engine.RunWorkflowIDsSync(ctx, rc.Workflows, input)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, chainOrError(run, err))
-		return
+		return writeJSON(c, fh.StatusInternalServerError, chainOrError(run, err))
 	}
-	writeJSON(w, http.StatusOK, run)
+	return writeJSON(c, fh.StatusOK, run)
 }
 
 func parsePath(path string) []pathSegment {
@@ -268,9 +254,6 @@ func parsePath(path string) []pathSegment {
 			seg.wildcard = "*"
 		case strings.HasPrefix(p, "*"):
 			seg.wildcard = strings.TrimPrefix(p, "*")
-			if seg.wildcard == "" {
-				seg.wildcard = "*"
-			}
 		case strings.HasPrefix(p, ":"):
 			seg.param = strings.TrimPrefix(p, ":")
 		case strings.HasPrefix(p, "{") && strings.HasSuffix(p, "}"):
@@ -291,16 +274,14 @@ func matchPath(pattern []pathSegment, actual string) (map[string]string, bool) {
 	}
 	params := map[string]string{}
 	pi := 0
-	for si, seg := range pattern {
+	for _, seg := range pattern {
 		if seg.wildcard != "" {
 			name := seg.wildcard
 			if name == "*" {
 				name = "wildcard"
 			}
-			if pi <= len(parts) {
-				params[name] = strings.Join(parts[pi:], "/")
-			}
-			return trueMap(params), true
+			params[name] = strings.Join(parts[pi:], "/")
+			return params, true
 		}
 		if pi >= len(parts) {
 			return nil, false
@@ -314,42 +295,25 @@ func matchPath(pattern []pathSegment, actual string) (map[string]string, bool) {
 			return nil, false
 		}
 		pi++
-		if si == len(pattern)-1 && pi != len(parts) {
-			return nil, false
-		}
 	}
-	if pi != len(parts) {
-		return nil, false
-	}
-	return params, true
+	return params, pi == len(parts)
 }
 
-func trueMap(m map[string]string) map[string]string {
-	if m == nil {
-		return map[string]string{}
-	}
-	return m
-}
-
-func readInput(r *http.Request, params map[string]string, envelope bool) (any, error) {
+func readInput(c *fh.Ctx, params map[string]string, envelope bool) (any, error) {
 	query := map[string]any{}
-	for k, v := range r.URL.Query() {
-		if len(v) == 1 {
-			query[k] = v[0]
-		} else {
-			query[k] = v
-		}
+	if err := c.QueryParser(&query); err != nil {
+		return nil, err
 	}
 	var body any = map[string]any{}
-	if r.Body != nil && r.Body != http.NoBody {
-		dec := json.NewDecoder(r.Body)
+	if len(c.Body()) > 0 {
+		dec := json.NewDecoder(strings.NewReader(string(c.Body())))
 		dec.UseNumber()
-		if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		if err := dec.Decode(&body); err != nil {
 			return nil, err
 		}
 	}
 	if envelope {
-		return map[string]any{"body": body, "path": params, "query": query, "method": r.Method}, nil
+		return map[string]any{"body": body, "path": params, "query": query, "method": c.Method()}, nil
 	}
 	if len(params) > 0 || len(query) > 0 {
 		if m, ok := body.(map[string]any); ok {
@@ -367,94 +331,80 @@ func readInput(r *http.Request, params map[string]string, envelope bool) (any, e
 	return body, nil
 }
 
-func buildMiddleware(e *Engine, c MiddlewareConfig) (func(http.Handler) http.Handler, error) {
-	if c.ID == "" || c.Type == "" {
+func buildMiddleware(cfg MiddlewareConfig) (fh.HandlerFunc, error) {
+	if cfg.ID == "" || cfg.Type == "" {
 		return nil, errors.New("middleware requires id and type")
 	}
-	switch c.Type {
+	switch cfg.Type {
 	case "recover":
-		return func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				defer func() {
-					if rec := recover(); rec != nil {
-						writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "panic recovered", "detail": fmt.Sprint(rec)})
-					}
-				}()
-				next.ServeHTTP(w, r)
-			})
+		return func(c *fh.Ctx) (err error) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					err = writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": "panic recovered", "detail": fmt.Sprint(rec)})
+				}
+			}()
+			return c.Next()
 		}, nil
 	case "logger":
-		return func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				start := time.Now()
-				next.ServeHTTP(w, r)
-				log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
-			})
+		return func(c *fh.Ctx) error {
+			start := time.Now()
+			err := c.Next()
+			log.Printf("%s %s %s", c.Method(), c.Path(), time.Since(start))
+			return err
 		}, nil
 	case "request_id":
-		return func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				id := r.Header.Get("X-Request-ID")
-				if id == "" {
-					id = newID("req")
-				}
-				w.Header().Set("X-Request-ID", id)
-				next.ServeHTTP(w, r)
-			})
+		return func(c *fh.Ctx) error {
+			id := c.Get("X-Request-ID")
+			if id == "" {
+				id = newID("req")
+			}
+			c.Set("X-Request-ID", id)
+			return c.Next()
 		}, nil
 	case "api_key":
-		header := c.Header
+		header, status, msg := cfg.Header, cfg.Status, cfg.Message
 		if header == "" {
 			header = "X-API-Key"
 		}
-		status := c.Status
 		if status == 0 {
-			status = http.StatusUnauthorized
+			status = fh.StatusUnauthorized
 		}
-		msg := c.Message
 		if msg == "" {
 			msg = "unauthorized"
 		}
-		return func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				got := r.Header.Get(header)
-				if subtle.ConstantTimeCompare([]byte(got), []byte(c.Value)) != 1 {
-					writeJSON(w, status, map[string]any{"error": msg})
-					return
-				}
-				next.ServeHTTP(w, r)
-			})
+		return func(c *fh.Ctx) error {
+			if subtle.ConstantTimeCompare([]byte(c.Get(header)), []byte(cfg.Value)) != 1 {
+				return writeJSON(c, status, map[string]any{"error": msg})
+			}
+			return c.Next()
 		}, nil
 	case "max_body":
-		maxBytes := c.MaxBytes
-		if maxBytes <= 0 {
-			maxBytes = 1 << 20
+		max := cfg.MaxBytes
+		if max <= 0 {
+			max = 1 << 20
 		}
-		return func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-				next.ServeHTTP(w, r)
-			})
+		return func(c *fh.Ctx) error {
+			if int64(len(c.Body())) > max {
+				return writeJSON(c, fh.StatusPayloadTooLarge, map[string]any{"error": "request body too large"})
+			}
+			return c.Next()
 		}, nil
 	case "cors":
-		return func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Request-ID")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-				if r.Method == http.MethodOptions {
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				next.ServeHTTP(w, r)
-			})
+		return func(c *fh.Ctx) error {
+			c.Set("Access-Control-Allow-Origin", "*")
+			c.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Request-ID")
+			c.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			if c.Method() == "OPTIONS" {
+				return c.SendStatus(fh.StatusNoContent)
+			}
+			return c.Next()
 		}, nil
 	case "rate_limit":
-		limit := c.Limit
+		limit := cfg.Limit
 		if limit <= 0 {
 			limit = 60
 		}
-		window, err := parseDuration(c.Window)
+		window, err := parseDuration(cfg.Window)
 		if err != nil {
 			return nil, err
 		}
@@ -462,19 +412,15 @@ func buildMiddleware(e *Engine, c MiddlewareConfig) (func(http.Handler) http.Han
 			window = time.Minute
 		}
 		rl := newRateLimiter(limit, window)
-		return func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				ip := clientIP(r)
-				if !rl.allow(ip) {
-					w.Header().Set("Retry-After", fmt.Sprintf("%.0f", window.Seconds()))
-					writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "rate limit exceeded"})
-					return
-				}
-				next.ServeHTTP(w, r)
-			})
+		return func(c *fh.Ctx) error {
+			if !rl.allow(clientIP(c)) {
+				c.Set("Retry-After", fmt.Sprintf("%.0f", window.Seconds()))
+				return writeJSON(c, fh.StatusTooManyRequests, map[string]any{"error": "rate limit exceeded"})
+			}
+			return c.Next()
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported middleware type %s", c.Type)
+		return nil, fmt.Errorf("unsupported middleware type %s", cfg.Type)
 	}
 }
 

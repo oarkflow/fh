@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"reflect"
 	"strings"
+
+	"github.com/oarkflow/fh"
 )
 
 func newID(prefix string) string {
@@ -55,29 +55,23 @@ func nodeIDs(items []RunItem) []string {
 	return out
 }
 
-func clientIP(r *http.Request) string {
-	if r == nil {
+func clientIP(c *fh.Ctx) string {
+	if c == nil {
 		return ""
 	}
-	if x := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); x != "" {
+	if x := strings.TrimSpace(c.Get("X-Forwarded-For")); x != "" {
 		return strings.TrimSpace(strings.Split(x, ",")[0])
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
+	return c.IP()
 }
 
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+func writeJSON(c *fh.Ctx, code int, v any) error {
+	return c.Status(code).JSON(v)
 }
 
-func readJSONBody(r *http.Request) (any, error) {
+func readJSONBody(c *fh.Ctx) (any, error) {
 	var input any
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(strings.NewReader(string(c.Body())))
 	dec.UseNumber()
 	if err := dec.Decode(&input); err != nil {
 		return nil, err

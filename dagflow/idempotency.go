@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"time"
+
+	"github.com/oarkflow/fh"
 )
 
 func (e *Engine) handleIdempotency(ctx context.Context, key, workflowID string, input any) (*Task, bool, error) {
@@ -26,11 +27,11 @@ func (e *Engine) handleIdempotency(ctx context.Context, key, workflowID string, 
 	return t, true, nil
 }
 
-func (e *Engine) recordIdempotencyFromRequest(r *http.Request, workflowID string, input any, task *Task) {
-	if task == nil || r == nil {
+func (e *Engine) recordIdempotencyFromRequest(c *fh.Ctx, workflowID string, input any, task *Task) {
+	if task == nil || c == nil {
 		return
 	}
-	key := r.Header.Get("Idempotency-Key")
+	key := c.Get("Idempotency-Key")
 	if key == "" {
 		return
 	}

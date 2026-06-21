@@ -3,9 +3,10 @@ package main
 import (
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"strings"
+
+	"github.com/oarkflow/fh"
 )
 
 func openRuntimeStorage() (TaskStore, ChainStore, Broker, func(), error) {
@@ -35,23 +36,21 @@ func openRuntimeStorage() (TaskStore, ChainStore, Broker, func(), error) {
 	}
 }
 
-func opsGuard(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func opsGuard(next fh.HandlerFunc) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
 		token := os.Getenv("DAGFLOW_ADMIN_TOKEN")
 		if token == "" && os.Getenv("DAGFLOW_ENV") == "production" {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "DAGFLOW_ADMIN_TOKEN is required in production"})
-			return
+			return writeJSON(c, fh.StatusServiceUnavailable, map[string]any{"error": "DAGFLOW_ADMIN_TOKEN is required in production"})
 		}
 		if token != "" {
-			got := r.Header.Get("X-Admin-Token")
-			if got == "" && strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
-				got = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			got := c.Get("X-Admin-Token")
+			if got == "" && strings.HasPrefix(c.Get("Authorization"), "Bearer ") {
+				got = strings.TrimPrefix(c.Get("Authorization"), "Bearer ")
 			}
 			if got != token {
-				writeJSON(w, http.StatusForbidden, map[string]any{"error": "admin token required"})
-				return
+				return writeJSON(c, fh.StatusForbidden, map[string]any{"error": "admin token required"})
 			}
 		}
-		next(w, r)
+		return next(c)
 	}
 }

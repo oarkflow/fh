@@ -1,6 +1,6 @@
 # Dagflow Production Runtime
 
-Dagflow is a BCL-configured workflow/pipeline orchestration HTTP server for Go. It supports workflow-as-route, route groups, middlewares, reusable workflows, workflow chaining, background/distributed node execution, rich DAG edges, task operations, runtime metadata APIs, SVG graphs, idempotency, DLQ, leases, outbox records, Postgres storage, and interpreter-backed script nodes.
+Dagflow is a BCL-configured workflow/pipeline orchestration server for Go, served natively by [`github.com/oarkflow/fh`](https://github.com/oarkflow/fh). It supports workflow-as-route, route groups, middlewares, reusable workflows, workflow chaining, background/distributed node execution, rich DAG edges, task operations, runtime metadata APIs, SVG graphs, idempotency, DLQ, leases, outbox records, Postgres storage, and interpreter-backed script nodes.
 
 This package fixes the previous startup race/loader issue where a route could validate before all workflow blocks were reliably loaded. `LoadBCLDir` now decodes every `.bcl`/`.hcl` file independently, merges fragments deterministically, and validates after all workflows, routes, scripts, schemas, conditions, and chains are registered. The sample BCL has also been split so each workflow is a separate file.
 
@@ -80,10 +80,11 @@ go run .
 ├── storage_production.go       # Postgres Storage implementation
 ├── postgres_broker.go          # durable queue broker using Postgres jobs
 ├── durable_store.go            # file-backed dev store
-├── metadata_api.go             # workflow/task metadata APIs
+├── http.go                     # native fh dynamic routes and middleware
+├── metadata_api.go             # native fh workflow/task metadata APIs
 ├── validation_openapi.go       # validator and OpenAPI generation
 ├── interpreter_runtime.go      # github.com/oarkflow/interpreter script runtime
-└── main.go                     # CLI/server bootstrap
+└── main.go                     # CLI and fh server bootstrap
 ```
 
 ## BCL directory loading

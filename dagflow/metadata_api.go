@@ -2,9 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"net/http"
 	"sort"
-	"strings"
+
+	"github.com/oarkflow/fh"
 )
 
 type WorkflowMetadata struct {
@@ -83,153 +83,119 @@ func (e *Engine) WorkflowSnapshots(id string) []WorkflowSnapshot {
 	return out
 }
 
-func opsWorkflows(engine *Engine) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, engine.ListWorkflowMetadata())
+func opsWorkflows(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error { return writeJSON(c, fh.StatusOK, engine.ListWorkflowMetadata()) }
+}
+func opsWorkflow(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		m, err := engine.WorkflowMetadata(c.Param("id"))
+		if err != nil {
+			return writeJSON(c, fh.StatusNotFound, map[string]any{"error": err.Error()})
+		}
+		return writeJSON(c, fh.StatusOK, m)
 	}
 }
-func opsWorkflow(engine *Engine) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/ops/workflows/"), "/")
-		parts := strings.Split(path, "/")
-		if len(parts) == 0 || parts[0] == "" {
-			writeJSON(w, 400, map[string]any{"error": "workflow id required"})
-			return
+func opsWorkflowGraph(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		svg, err := engine.WorkflowSVG(c.Param("id"), c.Query("nested") == "true")
+		if err != nil {
+			return writeJSON(c, fh.StatusNotFound, map[string]any{"error": err.Error()})
 		}
-		id := parts[0]
-		if len(parts) == 1 {
-			m, err := engine.WorkflowMetadata(id)
-			if err != nil {
-				writeJSON(w, 404, map[string]any{"error": err.Error()})
-				return
-			}
-			writeJSON(w, 200, m)
-			return
-		}
-		switch parts[1] {
-		case "graph.svg":
-			nested := r.URL.Query().Get("nested") == "true"
-			svg, err := engine.WorkflowSVG(id, nested)
-			if err != nil {
-				writeJSON(w, 404, map[string]any{"error": err.Error()})
-				return
-			}
-			w.Header().Set("Content-Type", "image/svg+xml")
-			_, _ = w.Write([]byte(svg))
-		case "versions":
-			writeJSON(w, 200, engine.WorkflowSnapshots(id))
-		case "metadata":
-			m, err := engine.WorkflowMetadata(id)
-			if err != nil {
-				writeJSON(w, 404, map[string]any{"error": err.Error()})
-				return
-			}
-			writeJSON(w, 200, m)
-		default:
-			writeJSON(w, 404, map[string]any{"error": "unknown workflow operation"})
-		}
+		c.Type("image/svg+xml")
+		return c.SendString(svg)
 	}
 }
-func opsMetadata(engine *Engine, cfg *Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"workflows": engine.ListWorkflowMetadata(), "chains": engine.ListChains(), "conditions": engine.ListConditions(), "schemas": engine.Schemas(), "routes": FlattenRoutes(cfg), "groups": cfg.RouteGroups, "metrics": engine.Metrics()})
+func opsWorkflowVersions(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error { return writeJSON(c, fh.StatusOK, engine.WorkflowSnapshots(c.Param("id"))) }
+}
+func opsMetadata(engine *Engine, cfg *Config) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		return writeJSON(c, fh.StatusOK, map[string]any{"workflows": engine.ListWorkflowMetadata(), "chains": engine.ListChains(), "conditions": engine.ListConditions(), "schemas": engine.Schemas(), "routes": FlattenRoutes(cfg), "groups": cfg.RouteGroups, "metrics": engine.Metrics()})
 	}
 }
-func opsOpenAPI(cfg *Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, GenerateOpenAPI(cfg)) }
+func opsOpenAPI(cfg *Config) fh.HandlerFunc {
+	return func(c *fh.Ctx) error { return writeJSON(c, fh.StatusOK, GenerateOpenAPI(cfg)) }
 }
-func opsValidate(cfg *Config, engine *Engine) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func opsValidate(cfg *Config, engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
 		if err := ValidateConfig(cfg, engine); err != nil {
-			writeJSON(w, 400, map[string]any{"valid": false, "error": err.Error()})
-			return
+			return writeJSON(c, fh.StatusBadRequest, map[string]any{"valid": false, "error": err.Error()})
 		}
-		writeJSON(w, 200, map[string]any{"valid": true})
+		return writeJSON(c, fh.StatusOK, map[string]any{"valid": true})
 	}
 }
-func dlqOps(engine *Engine) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/ops/dlq/"), "/")
-		if path == "" {
-			writeJSON(w, 200, engine.Store().ListDLQ())
-			return
+func dlqGet(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		id := c.Param("id")
+		for _, it := range engine.Store().ListDLQ() {
+			if it.ID == id {
+				return writeJSON(c, fh.StatusOK, it)
+			}
 		}
-		parts := strings.Split(path, "/")
-		id := parts[0]
-		if len(parts) == 1 {
-			for _, it := range engine.Store().ListDLQ() {
-				if it.ID == id {
-					writeJSON(w, 200, it)
-					return
-				}
-			}
-			writeJSON(w, 404, map[string]any{"error": "dlq item not found"})
-			return
-		}
-		switch parts[1] {
-		case "discard":
-			err := engine.Store().DeleteDLQ(id)
-			if err != nil {
-				writeJSON(w, 404, map[string]any{"error": err.Error()})
-				return
-			}
-			writeJSON(w, 200, map[string]any{"discarded": id})
-		case "replay":
-			var body struct {
-				WorkflowID string `json:"workflow_id"`
-				Input      any    `json:"input"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			var found *DLQItem
-			for _, it := range engine.Store().ListDLQ() {
-				if it.ID == id {
-					x := it
-					found = &x
-					break
-				}
-			}
-			if found == nil {
-				writeJSON(w, 404, map[string]any{"error": "dlq item not found"})
-				return
-			}
-			input := found.Input
-			if body.Input != nil {
-				input = body.Input
-			}
-			wf := found.WorkflowID
-			if body.WorkflowID != "" {
-				wf = body.WorkflowID
-			}
-			task, err := engine.RunAsync(r.Context(), wf, input)
-			if err != nil {
-				writeJSON(w, 500, map[string]any{"error": err.Error()})
-				return
-			}
-			_ = engine.Store().DeleteDLQ(id)
-			writeJSON(w, 202, task)
-		default:
-			writeJSON(w, 404, map[string]any{"error": "unknown dlq operation"})
-		}
+		return writeJSON(c, fh.StatusNotFound, map[string]any{"error": "dlq item not found"})
 	}
 }
-func opsMetrics(engine *Engine) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, engine.Metrics()) }
+func dlqDiscard(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		id := c.Param("id")
+		err := engine.Store().DeleteDLQ(id)
+		if err != nil {
+			return writeJSON(c, fh.StatusNotFound, map[string]any{"error": err.Error()})
+		}
+		return writeJSON(c, fh.StatusOK, map[string]any{"discarded": id})
+	}
 }
-func opsOutbox(engine *Engine) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func dlqReplay(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		id := c.Param("id")
+		var body struct {
+			WorkflowID string `json:"workflow_id"`
+			Input      any    `json:"input"`
+		}
+		_ = json.Unmarshal(c.Body(), &body)
+		var found *DLQItem
+		for _, it := range engine.Store().ListDLQ() {
+			if it.ID == id {
+				x := it
+				found = &x
+				break
+			}
+		}
+		if found == nil {
+			return writeJSON(c, fh.StatusNotFound, map[string]any{"error": "dlq item not found"})
+		}
+		input := found.Input
+		if body.Input != nil {
+			input = body.Input
+		}
+		wf := found.WorkflowID
+		if body.WorkflowID != "" {
+			wf = body.WorkflowID
+		}
+		task, err := engine.RunAsync(c.Context(), wf, input)
+		if err != nil {
+			return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": err.Error()})
+		}
+		_ = engine.Store().DeleteDLQ(id)
+		return writeJSON(c, fh.StatusAccepted, task)
+	}
+}
+func opsMetrics(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error { return writeJSON(c, fh.StatusOK, engine.Metrics()) }
+}
+func opsOutbox(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
 		if s, ok := engine.Store().(ExtendedStore); ok {
-			writeJSON(w, 200, s.ListOutbox())
-			return
+			return writeJSON(c, fh.StatusOK, s.ListOutbox())
 		}
-		writeJSON(w, 200, []OutboxEvent{})
+		return writeJSON(c, fh.StatusOK, []OutboxEvent{})
 	}
 }
-func opsLeases(engine *Engine) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func opsLeases(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
 		if s, ok := engine.Store().(ExtendedStore); ok {
-			writeJSON(w, 200, s.ListLeases())
-			return
+			return writeJSON(c, fh.StatusOK, s.ListLeases())
 		}
-		writeJSON(w, 200, []WorkerLease{})
+		return writeJSON(c, fh.StatusOK, []WorkerLease{})
 	}
 }
