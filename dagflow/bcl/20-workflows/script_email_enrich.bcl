@@ -1,0 +1,13 @@
+workflow "script_email_enrich" {
+  name "Interpreter Script Email Enrichment"
+  version "1.0.0"
+  first "enrich"
+
+  node "enrich" {
+    type script
+    handler "script_enrich_email"
+    input_schema "EmailRequest"
+    output_schema "EmailResponse"
+    last true
+  }
+}

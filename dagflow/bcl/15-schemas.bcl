@@ -1,0 +1,24 @@
+schema "EmailRequest" {
+  type object
+  required ["to", "subject", "body"]
+
+  field "to" {
+    type string
+    required true
+    format "email"
+  }
+
+  field "subject" {
+    type string
+    required true
+  }
+
+  field "body" {
+    type string
+    required true
+  }
+}
+
+schema "EmailResponse" {
+  type object
+}

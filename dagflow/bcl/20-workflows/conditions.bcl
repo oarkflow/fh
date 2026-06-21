@@ -1,0 +1,12 @@
+condition "is_email_valid" {
+  all [
+    `result.valid == true`,
+    `result.request.to != ""`
+  ]
+}
+
+condition "is_email_invalid" {
+  all [
+    `result.valid == false`
+  ]
+}

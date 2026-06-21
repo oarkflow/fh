@@ -1,0 +1,6 @@
+github.com/lib/pq v1.12.3 h1:tTWxr2YLKwIvK90ZXEw8GP7UFHtcbTtty8zsI+YjrfQ=
+github.com/lib/pq v1.12.3/go.mod h1:/p+8NSbOcwzAEI7wiMXFlgydTwcgTr3OSKMsD2BitpA=
+github.com/oarkflow/bcl v0.0.25 h1:WIgfsn+w+CH+9/JV9HL3dWYFcG0qBiLyMlSirisagag=
+github.com/oarkflow/bcl v0.0.25/go.mod h1:lNYKV/E26zOcrXvA1mfyU7yy0BIGiqQFuCaVUka85oM=
+github.com/oarkflow/interpreter v0.0.12 h1:iPCGp2/RDbdQRv+Q5yW8JaCEvXkmcmZkw3UiD7dcRps=
+github.com/oarkflow/interpreter v0.0.12/go.mod h1:sCqr8DQOh7zIjAmim7WtVygk79nxmpT0l0b8F5ZUmfI=

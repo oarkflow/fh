@@ -1,0 +1,5 @@
+server {
+  address ":8080"
+}
+
+global_middlewares ["recover", "request_id", "logger"]

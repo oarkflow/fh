@@ -1,0 +1,11 @@
+script "script_enrich_email" {
+  source `
+    let req = input;
+    {
+      "to": req.to,
+      "subject": "[script] " + req.subject,
+      "body": req.body,
+      "enriched": true
+    };
+  `
+}

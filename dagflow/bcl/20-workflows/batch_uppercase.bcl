@@ -1,0 +1,31 @@
+workflow "batch_uppercase" {
+  first "items"
+
+  node "items" {
+    type function
+    handler "identity"
+  }
+
+  node "upper" {
+    type function
+    handler "uppercase"
+  }
+
+  node "done" {
+    type function
+    handler "identity"
+    last true
+  }
+
+  edge "each" {
+    from "items"
+    to "upper"
+    type iterator
+  }
+
+  edge "upper_done" {
+    from "upper"
+    to "done"
+    type simple
+  }
+}

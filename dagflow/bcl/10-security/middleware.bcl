@@ -1,0 +1,34 @@
+middleware "recover" {
+  type recover
+}
+
+middleware "request_id" {
+  type request_id
+}
+
+middleware "logger" {
+  type logger
+}
+
+middleware "cors" {
+  type cors
+}
+
+middleware "api_key" {
+  type api_key
+  header "X-API-Key"
+  value "dev-secret"
+  status 401
+  message "invalid api key"
+}
+
+middleware "small_body" {
+  type max_body
+  max_bytes 1048576
+}
+
+middleware "email_rate_limit" {
+  type rate_limit
+  limit 120
+  window "1m"
+}

@@ -1,0 +1,123 @@
+workflow "email_flow" {
+  name "Reliable Email Workflow"
+  version "1.0.0"
+  first "receive"
+  max_visits 256
+  debug true
+
+  node "receive" {
+    type function
+    handler "receive_email"
+  }
+
+  node "validate" {
+    type function
+    handler "validate_email"
+    timeout "2s"
+
+    retry_policy {
+      max_attempts 2
+      strategy "fixed"
+      initial_delay "50ms"
+      max_delay "1s"
+    }
+  }
+
+  node "send" {
+    type function
+    handler "send_email"
+    mode background
+    await true
+    timeout "3s"
+
+    retry_policy {
+      max_attempts 3
+      strategy "exponential_jitter"
+      initial_delay "100ms"
+      max_delay "2s"
+      jitter true
+    }
+  }
+
+  node "store_valid" {
+    type function
+    handler "store_message"
+    mode background
+    await true
+  }
+
+  node "store_invalid" {
+    type function
+    handler "store_message"
+    mode background
+    await true
+  }
+
+  node "audit" {
+    type function
+    handler "audit_event"
+    mode background
+    await true
+  }
+
+  node "notify_success" {
+    type function
+    handler "notify_success"
+    mode background
+    await false
+    last true
+  }
+
+  node "notify_failure" {
+    type function
+    handler "notify_failure"
+    mode background
+    await false
+    last true
+  }
+
+  edge "receive_to_validate" {
+    from "receive"
+    to "validate"
+    type simple
+  }
+
+  edge "valid_to_send" {
+    from "validate"
+    to "send"
+    type branch
+    condition "is_email_valid"
+  }
+
+  edge "invalid_to_store" {
+    from "validate"
+    to "store_invalid"
+    type branch
+    condition "is_email_invalid"
+  }
+
+  edge "send_fanout" {
+    from "send"
+    targets ["store_valid", "audit"]
+    type fanout
+  }
+
+  edge "valid_join" {
+    sources ["store_valid", "audit"]
+    to "notify_success"
+    type fanin
+    strategy "all"
+  }
+
+  edge "invalid_to_notify" {
+    from "store_invalid"
+    to "notify_failure"
+    type simple
+  }
+
+  edge "send_error" {
+    from "send"
+    to "store_invalid"
+    type error
+  }
+}
