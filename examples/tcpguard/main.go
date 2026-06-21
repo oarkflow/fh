@@ -23,6 +23,7 @@ import (
 	"github.com/oarkflow/fh/mw/authorizer"
 	"github.com/oarkflow/tcpguard"
 	"github.com/oarkflow/tcpguard/bcl"
+	_ "modernc.org/sqlite"
 )
 
 const hmacSecret = "tcpguard-demo-secret"

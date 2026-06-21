@@ -27,6 +27,21 @@ tenant team1 {
   parent org1
 }
 
+tenant demo-bank {
+  name "TCPGuard Demo Bank"
+  parent root
+}
+
+tenant locked-bank {
+  name "Locked TCPGuard Demo Bank"
+  parent root
+}
+
+tenant demo {
+  name "TCPGuard Demo Tenant"
+  parent root
+}
+
 # Define policies
 policy allow-read {
   tenant org1
@@ -123,6 +138,108 @@ policy route-admin-api {
   priority 90
 }
 
+policy demo-public-routes {
+  tenant demo-bank
+  effect allow
+  actions [GET]
+  resources [
+    route:GET:/public
+    route:GET:/geo-restricted
+  ]
+  when {
+    subject.type == "user"
+  }
+  priority 100
+}
+
+policy locked-demo-public-routes {
+  tenant locked-bank
+  effect allow
+  actions [GET]
+  resources [
+    route:GET:/public
+    route:GET:/geo-restricted
+  ]
+  when {
+    subject.type == "user"
+  }
+  priority 100
+}
+
+policy demo-login-routes {
+  tenant demo
+  effect allow
+  actions [POST]
+  resources [
+    route:POST:/api/v1/account/login
+  ]
+  when {
+    subject.type == "user"
+  }
+  priority 100
+}
+
+policy demo-bank-authenticated-routes {
+  tenant demo-bank
+  effect allow
+  actions [
+    GET
+    POST
+    PUT
+  ]
+  resources [
+    route:GET:/public
+    route:GET:/geo-restricted
+    route:POST:/api/v1/account/login
+    route:POST:/api/v1/functions/*
+    route:PUT:/api/users/*/order/*
+    route:POST:/api/v1/transfers
+  ]
+  when {
+    subject.roles contains any [
+      member
+      manager
+      admin
+      super_admin
+    ]
+  }
+  priority 95
+}
+
+policy demo-bank-manager-routes {
+  tenant demo-bank
+  effect allow
+  actions [POST]
+  resources [
+    route:POST:/api/v1/reports/export
+    route:POST:/api/v1/payments/approve
+  ]
+  when {
+    subject.roles contains any [
+      manager
+      admin
+      super_admin
+    ]
+  }
+  priority 100
+}
+
+policy demo-bank-admin-routes {
+  tenant demo-bank
+  effect allow
+  actions [POST]
+  resources [
+    route:POST:/admin/*
+  ]
+  when {
+    subject.roles contains any [
+      admin
+      super_admin
+    ]
+  }
+  priority 110
+}
+
 # Define roles
 role admin {
   tenant org1
@@ -210,7 +327,7 @@ acl acl-3 {
 }
 
 acl acl-route-public {
-  resource route:GET:/public/info
+  resource route:GET:/public
   subject guest
   actions [GET]
   effect allow

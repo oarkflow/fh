@@ -1,6 +1,6 @@
 # TCPGuard fh Server Example
 
-This example runs fh v3 with `tcpguardfh.Middleware(guard)` and a TCPGuard BCL pack that demonstrates:
+This example runs fh with `mw/authorizer.New(guard)` and a TCPGuard BCL pack that demonstrates:
 
 - request-wide `oarkflow/authz` enforcement from `tcpguard.authz` (`enforce_http true`)
 
@@ -21,7 +21,7 @@ This example runs fh v3 with `tcpguardfh.Middleware(guard)` and a TCPGuard BCL p
 Run it:
 
 ```sh
-go run ./examples/tcpguard_fh_server
+go run ./examples/tcpguard
 ```
 
 The root `tcpguard.bcl` keeps shared pack configuration, datasources, lookups, actions, intel, detectors, baselines, and triggers. Endpoint/business/security rules live in separate files under `rules/` and are loaded through:

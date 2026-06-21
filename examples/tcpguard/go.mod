@@ -4,7 +4,8 @@ go 1.26.2
 
 require (
 	github.com/oarkflow/fh v0.0.0
-	github.com/oarkflow/tcpguard v0.0.11
+	github.com/oarkflow/tcpguard v0.0.12
+	modernc.org/sqlite v1.53.0
 )
 
 require (
@@ -40,7 +41,6 @@ require (
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.53.0 // indirect
 )
 
 replace github.com/oarkflow/fh => ../..
