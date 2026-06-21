@@ -1,0 +1,4 @@
+2026/06/22 00:42:52 storage=file queue=memory; set DAGFLOW_STORE=postgres for production
+2026/06/22 00:42:52 listening on :8080
+2026/06/22 00:42:52 [fasthttp] Listening on [::]:8080
+signal: interrupt

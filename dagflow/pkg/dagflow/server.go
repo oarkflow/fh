@@ -59,7 +59,7 @@ func RunServer(ctx context.Context, opt ServerOptions) error {
 		return err
 	}
 	app := fh.New()
-	RegisterOperations(app, engine, cfg)
+	RegisterOperations(app, engine, cfg, bclPath)
 	if err := dynamic.Register(app); err != nil {
 		return err
 	}
@@ -124,10 +124,15 @@ func RunCLI(args []string, bclDefault string, register RegisterFunc) error {
 	return nil
 }
 
-func RegisterOperations(app *fh.App, engine *Engine, cfg *Config) {
+func RegisterOperations(app *fh.App, engine *Engine, cfg *Config, bclRoot ...string) {
 	app.Get("/openapi.json", opsOpenAPI(cfg))
 	app.Get("/metrics", opsMetrics(engine))
 	app.Get("/ops/metadata", opsGuard(opsMetadata(engine, cfg)))
+	root := DefaultBCLPath()
+	if len(bclRoot) > 0 && bclRoot[0] != "" {
+		root = bclRoot[0]
+	}
+	RegisterBCLAdmin(app, engine, cfg, root)
 	app.Get("/ops/validate", opsGuard(opsValidate(cfg, engine)))
 	app.Get("/ops/metrics", opsGuard(opsMetrics(engine)))
 	app.Get("/ops/outbox", opsGuard(opsOutbox(engine)))
