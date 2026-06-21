@@ -16,6 +16,22 @@ import (
 
 type Map map[string]any
 
+// ErrorHandler handles errors returned from route handlers and middleware.
+type ErrorHandler func(*Ctx, error)
+
+// NotFoundHandler handles requests that do not match any route.
+type NotFoundHandler func(*Ctx) error
+
+// MethodNotAllowedHandler handles requests whose path matches one or more
+// routes but whose method is not allowed. allowed is already ordered for the
+// Allow header.
+type MethodNotAllowedHandler func(*Ctx, []string) error
+
+// OptionsHandler handles automatic OPTIONS responses for matched routes and
+// server-wide OPTIONS * requests. allowed is already ordered for the Allow
+// header.
+type OptionsHandler func(*Ctx, []string) error
+
 // ── Lifecycle events ───────────────────────────────────────────────────────
 
 // HookFunc is a lifecycle hook with optional error propagation.
@@ -44,7 +60,10 @@ type Config struct {
 	MaxConcurrentStreams uint32
 	DisableKeepAlive     bool
 	DisableHTTP2         bool
-	ErrorHandler         func(*Ctx, error)
+	ErrorHandler         ErrorHandler
+	NotFoundHandler      NotFoundHandler
+	MethodNotAllowed     MethodNotAllowedHandler
+	OptionsHandler       OptionsHandler
 	Logger               *log.Logger
 	TemplateEngine       TemplateEngine
 	// Debug exposes private error causes in 500 responses. Keep disabled in production.
@@ -125,12 +144,24 @@ func New(config ...Config) *App {
 		cfg.DisableKeepAlive = c.DisableKeepAlive
 		cfg.DisableHTTP2 = c.DisableHTTP2
 		cfg.ErrorHandler = c.ErrorHandler
+		cfg.NotFoundHandler = c.NotFoundHandler
+		cfg.MethodNotAllowed = c.MethodNotAllowed
+		cfg.OptionsHandler = c.OptionsHandler
 		cfg.Logger = c.Logger
 		cfg.TemplateEngine = c.TemplateEngine
 		cfg.Debug = c.Debug
 	}
 	if cfg.ErrorHandler == nil {
 		cfg.ErrorHandler = defaultErrorHandler
+	}
+	if cfg.NotFoundHandler == nil {
+		cfg.NotFoundHandler = defaultNotFoundHandler
+	}
+	if cfg.MethodNotAllowed == nil {
+		cfg.MethodNotAllowed = defaultMethodNotAllowedHandler
+	}
+	if cfg.OptionsHandler == nil {
+		cfg.OptionsHandler = defaultOptionsHandler
 	}
 
 	logger := cfg.Logger
@@ -807,13 +838,13 @@ func (a *App) dispatch(ctx *Ctx) {
 			}
 			fallback := func(ctx *Ctx) error {
 				if len(allowed) == 0 {
-					return ctx.Status(404).SendString("404 Not Found")
+					return a.cfg.NotFoundHandler(ctx)
 				}
 				ctx.Set("Allow", strings.Join(allowed, ", "))
 				if bytesEqualFold(ctx.Header.Method, MethodOPTIONSBytes) {
-					return ctx.SendStatus(204)
+					return a.cfg.OptionsHandler(ctx, allowed)
 				}
-				return ctx.Status(405).SendString("405 Method Not Allowed")
+				return a.cfg.MethodNotAllowed(ctx, allowed)
 			}
 			if len(a.middleware) > 0 {
 				handler = a.chain([]HandlerFunc{fallback})
@@ -931,6 +962,20 @@ func defaultErrorHandler(ctx *Ctx, err error) {
 		ctx.server.logger.Printf("[fasthttp] request error: %v", err)
 	}
 	_ = ctx.ErrorResponse(err)
+}
+
+func defaultNotFoundHandler(ctx *Ctx) error {
+	return ctx.Status(StatusNotFound).SendString("404 Not Found")
+}
+
+func defaultMethodNotAllowedHandler(ctx *Ctx, allowed []string) error {
+	ctx.Set("Allow", strings.Join(allowed, ", "))
+	return ctx.Status(StatusMethodNotAllowed).SendString("405 Method Not Allowed")
+}
+
+func defaultOptionsHandler(ctx *Ctx, allowed []string) error {
+	ctx.Set("Allow", strings.Join(allowed, ", "))
+	return ctx.SendStatus(StatusNoContent)
 }
 
 func (a *App) recordError(code string) {

@@ -313,35 +313,48 @@ c.Render("content", data, "layouts/main")
 
 ```go
 // Return typed HTTP errors
-return fh.ErrNotFound
-return fh.ErrUnauthorized
-return fh.NewHTTPError(fh.StatusConflict, "User already exists")
+return fh.NotFound("User not found")
+return fh.Unauthorized("Sign in required")
+return fh.NewHTTPError(fh.StatusConflict, "USER_EXISTS", "User already exists")
 
-// Custom error handler
-app.ErrorHandler = func(c *fh.Ctx, err error) error {
-    if he, ok := err.(*fh.HTTPError); ok {
-        return c.Status(he.Status).JSON(he)
-    }
-    return c.Status(500).JSON(fh.Map{"error": err.Error()})
-}
+// Custom server fallbacks and error responses
+app := fh.New(fh.Config{
+    ErrorHandler: func(c *fh.Ctx, err error) {
+        _ = c.ErrorResponse(err)
+    },
+    NotFoundHandler: func(c *fh.Ctx) error {
+        return c.Status(fh.StatusNotFound).JSON(fh.Map{"error": "missing"})
+    },
+    MethodNotAllowed: func(c *fh.Ctx, allowed []string) error {
+        return c.Status(fh.StatusMethodNotAllowed).JSON(fh.Map{"allowed": allowed})
+    },
+    OptionsHandler: func(c *fh.Ctx, allowed []string) error {
+        return c.SendStatus(fh.StatusNoContent)
+    },
+})
 ```
 
 ## Configuration
 
 ```go
 app := fh.New(fh.Config{
-    BodyLimit:          4 * 1024 * 1024,  // 4MB
-    Concurrency:        256 * 1000,
-    DisableKeepalive:   false,
-    ReadTimeout:        10 * time.Second,
-    WriteTimeout:       10 * time.Second,
-    IdleTimeout:        120 * time.Second,
-    ReadBufferSize:     4096,
-    WriteBufferSize:    4096,
-    ReduceMemoryUsage:  false,
-    UnsafeParams:       false,  // skip param copying for speed
-    ErrorHandler:       customErrorHandler,
-    TemplateEngine:     myEngine,
+    ReadTimeout:          10 * time.Second,
+    WriteTimeout:         10 * time.Second,
+    IdleTimeout:          120 * time.Second,
+    ReadBufferSize:       4096,
+    MaxConnections:       256 * 1000,
+    MaxRequestBodySize:   4 * 1024 * 1024, // 4MB
+    MaxHeaderListSize:    64 << 10,
+    MaxConcurrentStreams: 128,
+    DisableKeepAlive:     false,
+    DisableHTTP2:         false,
+    ErrorHandler:         customErrorHandler,
+    NotFoundHandler:      customNotFoundHandler,
+    MethodNotAllowed:     customMethodNotAllowedHandler,
+    OptionsHandler:       customOptionsHandler,
+    TemplateEngine:       myEngine,
+    Logger:               logger,
+    Debug:                false,
 })
 ```
 

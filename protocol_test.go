@@ -732,3 +732,65 @@ func TestAutomaticHEADOptionsAndMethodNotAllowed(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigurableFallbackHandlers(t *testing.T) {
+	makeApp := func() *App {
+		app := New(Config{
+			NotFoundHandler: func(c *Ctx) error {
+				return c.Status(StatusTeapot).SendString("custom missing")
+			},
+			MethodNotAllowed: func(c *Ctx, allowed []string) error {
+				return c.Status(StatusMethodNotAllowed).SendString("custom methods: " + strings.Join(allowed, "|"))
+			},
+			OptionsHandler: func(c *Ctx, allowed []string) error {
+				c.Set("X-Allowed-Count", strconv.Itoa(len(allowed)))
+				return c.Status(StatusOK).SendString("custom options")
+			},
+		})
+		app.Get("/resource", func(c *Ctx) error { return c.SendString("payload") })
+		return app
+	}
+
+	tests := []struct {
+		name, method, path string
+		want               []string
+	}{
+		{
+			name:   "custom not found",
+			method: "GET",
+			path:   "/missing",
+			want:   []string{"418 I'm a teapot", "custom missing"},
+		},
+		{
+			name:   "custom method not allowed",
+			method: "POST",
+			path:   "/resource",
+			want:   []string{"405 Method Not Allowed", "Allow: GET", "custom methods: GET|HEAD|OPTIONS"},
+		},
+		{
+			name:   "custom options",
+			method: "OPTIONS",
+			path:   "/resource",
+			want:   []string{"200 OK", "Allow: GET", "X-Allowed-Count: 3", "custom options"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := runPipeApp(t, makeApp())
+			go func() {
+				_, _ = io.WriteString(client, tt.method+" "+tt.path+" HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
+			}()
+			resp, err := io.ReadAll(client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := string(resp)
+			for _, want := range tt.want {
+				if !strings.Contains(s, want) {
+					t.Fatalf("response missing %q: %q", want, s)
+				}
+			}
+		})
+	}
+}

@@ -1,13 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"log"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,12 +16,12 @@ import (
 )
 
 type splEngine struct {
-	engine        *spl.Engine
-	dir           string
-	ext           string
-	ssr           bool
-	globals       map[string]any
-	assets        map[string]string
+	engine  *spl.Engine
+	dir     string
+	ext     string
+	ssr     bool
+	globals map[string]any
+	assets  map[string]string
 }
 
 func newSPLEngine(dir string) *splEngine {
@@ -45,7 +45,10 @@ func (e *splEngine) SetGlobals(g map[string]any) {
 }
 
 func (e *splEngine) RuntimeJS() string {
-	return e.engine.RuntimeJS()
+	// SPL v0.0.7 serializes compatibility-mode @handler bodies as strings, but
+	// its runtime does not mark the evaluator as enabled before booting them.
+	// Seed the flag in the served runtime itself; no page-level script is needed.
+	return `window.__SPL__=window.__SPL__||{};window.__SPL__.compiledWithUnsafeEval=true;` + e.engine.RuntimeJS()
 }
 
 func (e *splEngine) HydrationAsset(name string) (string, bool) {
@@ -66,7 +69,8 @@ func (e *splEngine) HydrationAssets(prefix string) {
 }
 
 func runtimeAssetVersion(src string) string {
-	return fmt.Sprintf("%x", []byte(src)[:8])
+	sum := sha256.Sum256([]byte(src))
+	return fmt.Sprintf("%x", sum[:8])
 }
 
 func (e *splEngine) Render(w io.Writer, name string, data any, layout ...string) error {
@@ -136,7 +140,9 @@ func main() {
 	splEngine := newSPLEngine("views")
 	splEngine.ssr = true
 	splEngine.SetGlobals(map[string]any{"siteName": "SPL File Upload Demo"})
-	splEngine.engine.HydrationRuntimeURL = "/static/spl-runtime.min.js"
+	runtimeJS := splEngine.RuntimeJS()
+	runtimeName := "spl-runtime." + runtimeAssetVersion(runtimeJS) + ".js"
+	splEngine.engine.HydrationRuntimeURL = "/static/" + runtimeName
 	splEngine.HydrationAssets("/static/hydration")
 
 	app := fh.New(fh.Config{
@@ -146,10 +152,10 @@ func main() {
 		TemplateEngine:     splEngine,
 	})
 
-	app.Get("/static/spl-runtime.min.js", func(c *fh.Ctx) error {
+	app.Get("/static/"+runtimeName, func(c *fh.Ctx) error {
 		c.Set("Content-Type", "application/javascript")
 		c.Set("Cache-Control", "public, max-age=31536000, immutable")
-		return c.SendString(splEngine.RuntimeJS())
+		return c.SendString(runtimeJS)
 	})
 	app.Get("/static/hydration/:asset", func(c *fh.Ctx) error {
 		asset, ok := splEngine.HydrationAsset(c.Param("asset"))
@@ -164,47 +170,45 @@ func main() {
 	app.Static("/uploads", "./uploads", fh.StaticConfig{})
 
 	app.Get("/", func(c *fh.Ctx) error {
-		data := map[string]any{"title": "File Upload with Reactivity"}
-
-		if savedName := c.Query("file"); savedName != "" {
-			sz, _ := strconv.ParseInt(c.Query("size"), 10, 64)
-			data["uploadResult"] = map[string]any{
-				"success":      true,
-				"originalName": c.Query("name"),
-				"savedName":    savedName,
-				"size":         sz,
-				"mimeType":     c.Query("mime"),
-				"url":          "/uploads/" + savedName,
-				"uploadedAt":   time.Now().Format(time.RFC3339),
-			}
-		} else if errMsg := c.Query("error"); errMsg != "" {
-			data["uploadResult"] = map[string]any{
-				"success": false,
-				"error":   errMsg,
-			}
-		} else {
-			data["uploadResult"] = nil
-		}
-
-		return c.Render("upload", data)
+		return c.Render("upload", map[string]any{"title": "File Upload with Reactivity"})
 	})
 
 	app.Post("/upload", func(c *fh.Ctx) error {
 		file, err := c.FormFile("file")
 		if err != nil {
-			return c.Redirect("/?error=" + url.QueryEscape(err.Error()))
+			return c.Status(400).JSON(map[string]any{
+				"submitted": true,
+				"success":   false,
+				"error":     "Select a file before uploading",
+			})
 		}
 
 		if err := os.MkdirAll("uploads", 0755); err != nil {
-			return c.Redirect("/?error=" + url.QueryEscape(err.Error()))
+			return c.Status(500).JSON(map[string]any{
+				"submitted": true,
+				"success":   false,
+				"error":     "Could not prepare the upload directory",
+			})
 		}
 
+		originalName := filepath.Base(file.FileName)
+		if originalName == "." || originalName == string(filepath.Separator) {
+			return c.Status(400).JSON(map[string]any{
+				"submitted": true,
+				"success":   false,
+				"error":     "Invalid file name",
+			})
+		}
 		timestamp := time.Now().UnixMilli()
-		savedName := fmt.Sprintf("%d_%s", timestamp, file.FileName)
+		savedName := fmt.Sprintf("%d_%s", timestamp, originalName)
 		dstPath := filepath.Join("uploads", savedName)
 
 		if err := c.SaveFile(file, dstPath); err != nil {
-			return c.Redirect("/?error=" + url.QueryEscape(err.Error()))
+			return c.Status(500).JSON(map[string]any{
+				"submitted": true,
+				"success":   false,
+				"error":     "Could not save the uploaded file",
+			})
 		}
 
 		contentType := file.Header.Get("Content-Type")
@@ -212,12 +216,16 @@ func main() {
 			contentType = "application/octet-stream"
 		}
 
-		q := url.Values{}
-		q.Set("file", savedName)
-		q.Set("name", file.FileName)
-		q.Set("size", strconv.FormatInt(file.Size, 10))
-		q.Set("mime", contentType)
-		return c.Redirect("/?" + q.Encode())
+		return c.JSON(map[string]any{
+			"submitted":    true,
+			"success":      true,
+			"originalName": originalName,
+			"savedName":    savedName,
+			"size":         file.Size,
+			"mimeType":     contentType,
+			"url":          "/uploads/" + url.PathEscape(savedName),
+			"uploadedAt":   time.Now().Format(time.RFC3339),
+		})
 	})
 
 	addr := ":8082"
