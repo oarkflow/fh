@@ -590,3 +590,35 @@ Reliability model:
 - If a process crashes with jobs in `processing`, they are moved back to `pending` on restart.
 - `queue/events.jsonl` records enqueue, claim, retry, completion, failure, and recovery events so queue activity remains visible even when workers process jobs immediately.
 - If a client times out after the server completed a request, retrying with the same `Idempotency-Key` returns the stored response instead of duplicating the operation.
+
+## Advanced server/runtime capabilities
+
+This version adds an extension layer for modern HTTP server and application-runtime features while preserving the existing route method API. All route behavior changes can be applied through middleware/handlers.
+
+Added capabilities include:
+
+- `Reliable(policy)` per-route reliability middleware.
+- `ReliableEndpoint[Req, Res]` typed reliable endpoint abstraction.
+- Built-in metrics with `app.EnableMetrics("/_fh/metrics")`.
+- Reverse proxy and API gateway handlers with `ReverseProxy` and `APIGateway`.
+- Circuit breaker middleware with `CircuitBreakerMiddleware`.
+- Native SSE using `ctx.SSE`.
+- Advanced static file handler through `StaticAdvanced` / `StaticFilesAdvanced`.
+- First-class access logs using `AccessLog` with JSON/common modes.
+- Transactional reliability API through `Reliability.BeginTx`.
+- Outbox and inbox helpers for reliable event publishing and webhook dedupe.
+- Dead-letter queue retry/discard helpers for file-backed queue storage.
+- Queue priority, delayed jobs, and concurrency keys.
+- Signed request middleware using HMAC-SHA256.
+- Secret redaction and security event stream.
+- Request lifecycle state machine and compensation hooks.
+- Data sensitivity policies and secure data envelopes.
+- Deterministic idempotency helper.
+- Request-to-job atomic handoff helper.
+- Policy-based route behavior and API contract firewall.
+- Actor-per-key middleware for stateful serialized route handling.
+- Simple HTTP-native workflow engine.
+- Queue/journal repair and compaction hooks.
+- API evolution/version compatibility middleware.
+
+See `examples/advanced-platform` for a runnable end-to-end example.

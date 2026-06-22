@@ -3,3 +3,4 @@ _spl
 dagflow/data/*
 *.log
 .fh-data
+.idea

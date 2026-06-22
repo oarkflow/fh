@@ -51,11 +51,12 @@ type ReliabilityConfig struct {
 	IdempotencyProcessingStatus  int
 	IdempotencyReplayHeaderValue string
 
-	QueueDir          string
-	QueueWorkers      int
-	QueueMaxAttempts  int
-	QueuePollInterval time.Duration
-	QueueBackoff      time.Duration
+	QueueDir                   string
+	QueueWorkers               int
+	QueueMaxAttempts           int
+	QueuePollInterval          time.Duration
+	QueueBackoff               time.Duration
+	QueueConcurrencyLimitByKey bool
 }
 
 // RequestJournalStore is the durable append-only request lifecycle store.
@@ -144,7 +145,7 @@ func NewReliability(cfg ReliabilityConfig) (*Reliability, error) {
 				return nil, err
 			}
 		}
-		r.queue = NewDurableQueue(DurableQueueConfig{Workers: cfg.QueueWorkers, MaxAttempts: cfg.QueueMaxAttempts, PollInterval: cfg.QueuePollInterval, Backoff: cfg.QueueBackoff}, storage)
+		r.queue = NewDurableQueue(DurableQueueConfig{Workers: cfg.QueueWorkers, MaxAttempts: cfg.QueueMaxAttempts, PollInterval: cfg.QueuePollInterval, Backoff: cfg.QueueBackoff, ConcurrencyLimitByKey: cfg.QueueConcurrencyLimitByKey}, storage)
 		if err := r.queue.Recover(); err != nil {
 			r.Close()
 			return nil, err
@@ -561,23 +562,27 @@ func (s *IdempotencyStore) Path() string {
 }
 
 type DurableQueueConfig struct {
-	Dir          string
-	Workers      int
-	MaxAttempts  int
-	PollInterval time.Duration
-	Backoff      time.Duration
+	Dir                   string
+	Workers               int
+	MaxAttempts           int
+	PollInterval          time.Duration
+	Backoff               time.Duration
+	ConcurrencyLimitByKey bool
 }
 type QueueJob struct {
-	ID          string            `json:"id"`
-	Type        string            `json:"type"`
-	Payload     json.RawMessage   `json:"payload,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Attempts    int               `json:"attempts"`
-	MaxAttempts int               `json:"max_attempts"`
-	VisibleAt   time.Time         `json:"visible_at"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
-	LastError   string            `json:"last_error,omitempty"`
+	ID             string            `json:"id"`
+	Type           string            `json:"type"`
+	Payload        json.RawMessage   `json:"payload,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	Attempts       int               `json:"attempts"`
+	MaxAttempts    int               `json:"max_attempts"`
+	VisibleAt      time.Time         `json:"visible_at"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+	LastError      string            `json:"last_error,omitempty"`
+	Priority       int               `json:"priority,omitempty"`
+	RunAt          time.Time         `json:"run_at,omitempty"`
+	ConcurrencyKey string            `json:"concurrency_key,omitempty"`
 }
 type QueueHandler func(context.Context, *QueueJob) error
 type QueueEvent struct {
@@ -593,14 +598,15 @@ type QueueEvent struct {
 type QueueStats struct{ Pending, Processing, Done, Failed int }
 
 type DurableQueue struct {
-	cfg      DurableQueueConfig
-	store    QueueStorage
-	mu       sync.RWMutex
-	handlers map[string]QueueHandler
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	started  bool
+	cfg        DurableQueueConfig
+	store      QueueStorage
+	mu         sync.RWMutex
+	handlers   map[string]QueueHandler
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	started    bool
+	activeKeys map[string]struct{}
 }
 
 func OpenDurableQueue(cfg DurableQueueConfig) (*DurableQueue, error) {
@@ -630,7 +636,7 @@ func NewDurableQueue(cfg DurableQueueConfig, storage QueueStorage) *DurableQueue
 	if storage == nil {
 		panic("fh: durable queue requires storage")
 	}
-	return &DurableQueue{cfg: cfg, store: storage, handlers: make(map[string]QueueHandler)}
+	return &DurableQueue{cfg: cfg, store: storage, handlers: make(map[string]QueueHandler), activeKeys: make(map[string]struct{})}
 }
 func (q *DurableQueue) Storage() QueueStorage {
 	if q == nil {
@@ -653,6 +659,22 @@ func (q *DurableQueue) Register(jobType string, handler QueueHandler) {
 	q.mu.Unlock()
 }
 func (q *DurableQueue) Enqueue(jobType string, payload any, headers ...map[string]string) (string, error) {
+	return q.EnqueueJob(QueueJob{Type: jobType}, payload, headers...)
+}
+
+func (q *DurableQueue) EnqueueDelayed(jobType string, payload any, runAt time.Time, headers ...map[string]string) (string, error) {
+	return q.EnqueueJob(QueueJob{Type: jobType, RunAt: runAt, VisibleAt: runAt}, payload, headers...)
+}
+
+func (q *DurableQueue) EnqueuePriority(jobType string, payload any, priority int, headers ...map[string]string) (string, error) {
+	return q.EnqueueJob(QueueJob{Type: jobType, Priority: priority}, payload, headers...)
+}
+
+func (q *DurableQueue) EnqueueWithKey(jobType string, payload any, concurrencyKey string, headers ...map[string]string) (string, error) {
+	return q.EnqueueJob(QueueJob{Type: jobType, ConcurrencyKey: concurrencyKey}, payload, headers...)
+}
+
+func (q *DurableQueue) EnqueueJob(spec QueueJob, payload any, headers ...map[string]string) (string, error) {
 	if q == nil {
 		return "", errors.New("fh: durable queue is nil")
 	}
@@ -672,7 +694,23 @@ func (q *DurableQueue) Enqueue(jobType string, payload any, headers ...map[strin
 		}
 	}
 	now := time.Now().UTC()
-	job := &QueueJob{ID: newQueueID(), Type: jobType, Payload: raw, Attempts: 0, MaxAttempts: q.cfg.MaxAttempts, CreatedAt: now, UpdatedAt: now, VisibleAt: now}
+	if spec.Type == "" {
+		return "", errors.New("fh: queue job type is required")
+	}
+	vis := spec.VisibleAt
+	if vis.IsZero() {
+		vis = spec.RunAt
+	}
+	if vis.IsZero() {
+		vis = now
+	}
+	job := &QueueJob{ID: spec.ID, Type: spec.Type, Payload: raw, Attempts: spec.Attempts, MaxAttempts: spec.MaxAttempts, CreatedAt: now, UpdatedAt: now, VisibleAt: vis, RunAt: spec.RunAt, Priority: spec.Priority, ConcurrencyKey: spec.ConcurrencyKey}
+	if job.ID == "" {
+		job.ID = newQueueID()
+	}
+	if job.MaxAttempts <= 0 {
+		job.MaxAttempts = q.cfg.MaxAttempts
+	}
 	if len(headers) > 0 {
 		job.Headers = headers[0]
 	}
@@ -730,6 +768,17 @@ func (q *DurableQueue) processOne() bool {
 	job, err := q.store.Claim(q.ctx, time.Now().UTC())
 	if err != nil {
 		return false
+	}
+	if q.cfg.ConcurrencyLimitByKey && job.ConcurrencyKey != "" {
+		q.mu.Lock()
+		if _, ok := q.activeKeys[job.ConcurrencyKey]; ok {
+			q.mu.Unlock()
+			_ = q.store.Retry(q.ctx, job, errors.New("concurrency key is busy"), q.cfg.Backoff)
+			return true
+		}
+		q.activeKeys[job.ConcurrencyKey] = struct{}{}
+		q.mu.Unlock()
+		defer func() { q.mu.Lock(); delete(q.activeKeys, job.ConcurrencyKey); q.mu.Unlock() }()
 	}
 	q.mu.RLock()
 	handler := q.handlers[job.Type]
@@ -795,7 +844,12 @@ func (s *FileQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJob,
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
+	// file order is only a fallback; eligible jobs are sorted by priority/run time below
+	type cand struct {
+		name string
+		job  *QueueJob
+	}
+	candidates := make([]cand, 0, len(files))
 	for _, ent := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -809,13 +863,26 @@ func (s *FileQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJob,
 			_ = os.Remove(pending)
 			continue
 		}
+		if job.VisibleAt.IsZero() && !job.RunAt.IsZero() {
+			job.VisibleAt = job.RunAt
+		}
 		if job.VisibleAt.After(now) {
 			continue
 		}
-		processing := filepath.Join(s.dir, "processing", ent.Name())
+		candidates = append(candidates, cand{ent.Name(), job})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].job.Priority != candidates[j].job.Priority {
+			return candidates[i].job.Priority > candidates[j].job.Priority
+		}
+		return candidates[i].job.VisibleAt.Before(candidates[j].job.VisibleAt)
+	})
+	for _, item := range candidates {
+		pending := filepath.Join(s.dir, "pending", item.name)
+		processing := filepath.Join(s.dir, "processing", item.name)
 		if os.Rename(pending, processing) == nil {
-			_ = s.appendEvent("claimed", "processing", job, "")
-			return job, nil
+			_ = s.appendEvent("claimed", "processing", item.job, "")
+			return item.job, nil
 		}
 	}
 	return nil, ErrQueueEmpty
@@ -989,4 +1056,344 @@ func newQueueID() string {
 }
 func newQueueEventID() string {
 	return "qev_" + strconv.FormatInt(time.Now().UnixNano(), 36) + "_" + strings.TrimPrefix(newRequestID(), "req_")
+}
+
+type ReliabilityPolicy struct {
+	Enabled                bool
+	RequireIdempotency     bool
+	Journal                bool
+	ReplayResponse         bool
+	ConflictOnBodyDrift    bool
+	IdempotencyKey         func(*Ctx) string
+	IdempotencyFingerprint func(*Ctx) string
+	Data                   DataPolicy
+	Queue                  bool
+	QueueType              string
+	QueuePriority          int
+	QueueDelay             time.Duration
+	ConcurrencyKey         func(*Ctx) string
+}
+
+func Reliable(p ReliabilityPolicy) HandlerFunc {
+	return func(c *Ctx) error {
+		if !p.Enabled {
+			return c.Next()
+		}
+		r := c.server.Reliability()
+		if r == nil {
+			return c.Next()
+		}
+		if p.Data.Sensitivity != "" {
+			c.Locals("fh.data_policy", p.Data)
+		}
+		requestID, _ := c.Locals("request_id").(string)
+		if requestID == "" {
+			requestID = newRequestID()
+			c.Set(HeaderRequestID, requestID)
+			c.Locals("request_id", requestID)
+		}
+		if p.Journal && r.journal != nil {
+			_ = r.journal.Append(RequestJournalEntry{RequestID: requestID, Event: "policy.received", Method: c.Method(), Path: c.Path(), BodyHash: hashBody(c.Body()), RemoteIP: c.IP(), Time: time.Now().UTC()})
+		}
+		if r.idem != nil && isUnsafeMethod(c.Header.Method) {
+			key := ""
+			if p.IdempotencyKey != nil {
+				key = p.IdempotencyKey(c)
+			}
+			if key == "" {
+				key = c.Get(r.cfg.IdempotencyHeader)
+			}
+			if key == "" && p.IdempotencyFingerprint != nil {
+				key = p.IdempotencyFingerprint(c)
+				c.Set(r.cfg.IdempotencyHeader, key)
+			}
+			if key == "" && p.RequireIdempotency {
+				return c.Status(StatusBadRequest).JSON(Map{"error": "missing_idempotency_key", "request_id": requestID})
+			}
+			if key != "" {
+				if !validExternalID(key) {
+					return c.Status(StatusBadRequest).JSON(Map{"error": "invalid_idempotency_key", "request_id": requestID})
+				}
+				reqHash := hashRequest(c.Header.Method, c.path(), c.Body())
+				if p.IdempotencyFingerprint != nil {
+					reqHash = p.IdempotencyFingerprint(c)
+				}
+				decision, rec, err := r.idem.Begin(key, reqHash, c.Method(), c.Path())
+				if err != nil {
+					return err
+				}
+				switch decision {
+				case IdempotencyReplay:
+					c.Set(HeaderReplayed, r.cfg.IdempotencyReplayHeaderValue)
+					if p.ReplayResponse {
+						for k, vals := range rec.Headers {
+							for _, v := range vals {
+								setReplayHeader(c, k, v)
+							}
+						}
+						if rec.ContentType != "" {
+							c.Type(rec.ContentType)
+						}
+						return c.Status(rec.StatusCode).SendBytes(rec.Response)
+					}
+				case IdempotencyConflict:
+					return c.Status(StatusConflict).JSON(Map{"error": "idempotency_key_reused_with_different_payload", "request_id": requestID})
+				case IdempotencyProcessing:
+					return c.Status(r.cfg.IdempotencyProcessingStatus).JSON(Map{"error": "idempotency_key_processing", "request_id": requestID})
+				}
+				c.OnBeforeResponse(func(ctx *Ctx) error {
+					return r.idem.Complete(key, reqHash, ctx.StatusCode(), string(ctx.contentType), ctx.GetRespHeaders(), ctx.ResponseBody())
+				})
+			}
+		}
+		return c.Next()
+	}
+}
+
+type ReliabilityTx interface {
+	Journal() RequestJournalStore
+	Idempotency() IdempotencyRepository
+	Queue() QueueStorage
+	Commit() error
+	Rollback() error
+}
+type memoryReliabilityTx struct {
+	r         *Reliability
+	journal   []RequestJournalEntry
+	jobs      []*QueueJob
+	committed bool
+}
+
+func (r *Reliability) BeginTx(ctx context.Context) (ReliabilityTx, error) {
+	if r == nil {
+		return nil, errors.New("fh: reliability disabled")
+	}
+	return &memoryReliabilityTx{r: r}, nil
+}
+func (tx *memoryReliabilityTx) Journal() RequestJournalStore       { return tx }
+func (tx *memoryReliabilityTx) Idempotency() IdempotencyRepository { return tx.r.idem }
+func (tx *memoryReliabilityTx) Queue() QueueStorage                { return tx }
+func (tx *memoryReliabilityTx) Append(e RequestJournalEntry) error {
+	tx.journal = append(tx.journal, e)
+	return nil
+}
+func (tx *memoryReliabilityTx) Close() error { return nil }
+func (tx *memoryReliabilityTx) Enqueue(ctx context.Context, j *QueueJob) error {
+	cp := *j
+	cp.Payload = append([]byte(nil), j.Payload...)
+	tx.jobs = append(tx.jobs, &cp)
+	return nil
+}
+func (tx *memoryReliabilityTx) Claim(context.Context, time.Time) (*QueueJob, error) {
+	return nil, ErrQueueEmpty
+}
+func (tx *memoryReliabilityTx) Complete(context.Context, *QueueJob) error { return nil }
+func (tx *memoryReliabilityTx) Retry(context.Context, *QueueJob, error, time.Duration) error {
+	return nil
+}
+func (tx *memoryReliabilityTx) Fail(context.Context, *QueueJob, error) error { return nil }
+func (tx *memoryReliabilityTx) Recover(context.Context) error                { return nil }
+func (tx *memoryReliabilityTx) Stats(context.Context) (QueueStats, error)    { return QueueStats{}, nil }
+func (tx *memoryReliabilityTx) Commit() error {
+	if tx.committed {
+		return nil
+	}
+	tx.committed = true
+	for _, e := range tx.journal {
+		if tx.r.journal != nil {
+			if err := tx.r.journal.Append(e); err != nil {
+				return err
+			}
+		}
+	}
+	if tx.r.queue != nil {
+		for _, j := range tx.jobs {
+			if err := tx.r.queue.store.Enqueue(context.Background(), j); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+func (tx *memoryReliabilityTx) Rollback() error { tx.journal = nil; tx.jobs = nil; return nil }
+
+type OutboxEvent struct {
+	ID, Topic, Key string
+	Payload        json.RawMessage
+	Headers        map[string]string
+	CreatedAt      time.Time
+}
+type InboxEvent struct {
+	ID, Source, EventID string
+	Payload             json.RawMessage
+	Headers             map[string]string
+	CreatedAt           time.Time
+}
+type Outbox struct{ q *DurableQueue }
+type Inbox struct {
+	idem IdempotencyRepository
+	q    *DurableQueue
+}
+
+func (r *Reliability) Outbox() *Outbox {
+	if r == nil {
+		return nil
+	}
+	return &Outbox{q: r.queue}
+}
+func (r *Reliability) Inbox() *Inbox {
+	if r == nil {
+		return nil
+	}
+	return &Inbox{idem: r.idem, q: r.queue}
+}
+func (o *Outbox) Publish(ctx context.Context, ev OutboxEvent) (string, error) {
+	if o == nil || o.q == nil {
+		return "", errors.New("fh: outbox queue disabled")
+	}
+	if ev.ID == "" {
+		ev.ID = newQueueID()
+	}
+	if ev.CreatedAt.IsZero() {
+		ev.CreatedAt = time.Now().UTC()
+	}
+	return o.q.Enqueue("outbox."+ev.Topic, ev, ev.Headers)
+}
+func (i *Inbox) Accept(ctx context.Context, ev InboxEvent, queueType string) (string, error) {
+	if i == nil || i.q == nil {
+		return "", errors.New("fh: inbox queue disabled")
+	}
+	if ev.EventID == "" {
+		return "", errors.New("fh: inbox event id required")
+	}
+	b, _ := json.Marshal(ev)
+	key := ev.Source + ":" + ev.EventID
+	if i.idem != nil {
+		dec, _, err := i.idem.Begin(key, hashBody(b), "INBOX", ev.Source)
+		if err != nil {
+			return "", err
+		}
+		if dec != IdempotencyNew {
+			return "", nil
+		}
+		defer i.idem.Complete(key, hashBody(b), 202, "application/json", nil, []byte(`{"status":"accepted"}`))
+	}
+	if queueType == "" {
+		queueType = "inbox." + ev.Source
+	}
+	return i.q.Enqueue(queueType, ev)
+}
+
+type ReliableEndpointOptions[Req any, Res any] struct {
+	Policy    ReliabilityPolicy
+	Validate  func(*Ctx, *Req) error
+	Handle    func(context.Context, *Ctx, Req) (Res, error)
+	QueueType string
+	Async     bool
+}
+
+func ReliableEndpoint[Req any, Res any](opt ReliableEndpointOptions[Req, Res]) HandlerFunc {
+	endpoint := func(c *Ctx) error {
+		var req Req
+		if err := c.BodyParser(&req); err != nil {
+			return err
+		}
+		if opt.Validate != nil {
+			if err := opt.Validate(c, &req); err != nil {
+				return err
+			}
+		}
+		if opt.Async {
+			if c.server.Queue() == nil {
+				return errors.New("fh: queue disabled")
+			}
+			id, err := c.server.Queue().Enqueue(opt.QueueType, req)
+			if err != nil {
+				return err
+			}
+			c.Lifecycle().Mark(c, LifecycleQueued)
+			return c.Status(StatusAccepted).JSON(Map{"job_id": id, "status": "accepted"})
+		}
+		if opt.Handle == nil {
+			var zero Res
+			return c.JSON(zero)
+		}
+		res, err := opt.Handle(c.Context(), c, req)
+		if err != nil {
+			return err
+		}
+		c.Lifecycle().Mark(c, LifecycleCompleted)
+		return c.JSON(res)
+	}
+	return func(c *Ctx) error {
+		if !opt.Policy.Enabled {
+			return endpoint(c)
+		}
+		origHandlers, origIndex := c.handlers, c.handlerIndex
+		remaining := append([]HandlerFunc{endpoint}, origHandlers[origIndex:]...)
+		c.handlers, c.handlerIndex = remaining, 0
+		err := Reliable(opt.Policy)(c)
+		c.handlers, c.handlerIndex = origHandlers, origIndex
+		return err
+	}
+}
+
+func (a *App) Outbox() *Outbox {
+	if a == nil || a.reliability == nil {
+		return nil
+	}
+	return a.reliability.Outbox()
+}
+func (a *App) Inbox() *Inbox {
+	if a == nil || a.reliability == nil {
+		return nil
+	}
+	return a.reliability.Inbox()
+}
+
+func AtomicHandoff(c *Ctx, jobType string, payload any, opts ...QueueJob) (string, error) {
+	q := c.server.Queue()
+	if q == nil {
+		return "", errors.New("fh: queue disabled")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	spec := QueueJob{Type: jobType, Payload: raw}
+	if len(opts) > 0 {
+		spec = opts[0]
+		spec.Type = jobType
+		spec.Payload = raw
+	}
+	return q.EnqueueJob(spec, json.RawMessage(raw))
+}
+
+func (q *DurableQueue) RetryFailed(ctx context.Context, id string) error {
+	if fs, ok := q.store.(*FileQueueStorage); ok {
+		return fs.RequeueFailed(ctx, id)
+	}
+	return errors.New("fh: retry failed unsupported by storage")
+}
+func (q *DurableQueue) DiscardFailed(ctx context.Context, id string) error {
+	if fs, ok := q.store.(*FileQueueStorage); ok {
+		return fs.DiscardFailed(ctx, id)
+	}
+	return errors.New("fh: discard failed unsupported by storage")
+}
+func (s *FileQueueStorage) RequeueFailed(ctx context.Context, id string) error {
+	path := filepath.Join(s.dir, "failed", id+".json")
+	j, err := readJob(path)
+	if err != nil {
+		return err
+	}
+	j.VisibleAt = time.Now().UTC()
+	if err := s.writeJobAtomic("pending", j); err != nil {
+		return err
+	}
+	_ = s.appendEvent("requeued", "pending", j, "")
+	return os.Remove(path)
+}
+func (s *FileQueueStorage) DiscardFailed(ctx context.Context, id string) error {
+	return os.Remove(filepath.Join(s.dir, "failed", id+".json"))
 }

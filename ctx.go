@@ -772,6 +772,25 @@ func (c *Ctx) Flash(key string, value ...any) any {
 	return store.Flash(key, value...)
 }
 
+// App returns the owning application instance for advanced integrations.
+func (c *Ctx) App() *App { return c.server }
+
+// ServerOutbox returns the reliability outbox for the current app.
+func (c *Ctx) ServerOutbox() *Outbox {
+	if c == nil || c.server == nil {
+		return nil
+	}
+	return c.server.Outbox()
+}
+
+// ServerInbox returns the reliability inbox for the current app.
+func (c *Ctx) ServerInbox() *Inbox {
+	if c == nil || c.server == nil {
+		return nil
+	}
+	return c.server.Inbox()
+}
+
 // writeResponseString writes a response with a string body — zero alloc.
 func (c *Ctx) writeResponseString(s string) error {
 	c.responseBody = append(c.responseBody[:0], s...)
