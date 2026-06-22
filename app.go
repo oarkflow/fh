@@ -67,7 +67,7 @@ type Config struct {
 	OptionsHandler       OptionsHandler
 	Logger               *log.Logger
 	TemplateEngine       TemplateEngine
-	// Reliability enables the built-in request journal, idempotency store, and durable async queue.
+	// Reliability enables request journal, idempotency, and durable async queue.
 	Reliability ReliabilityConfig
 	// Debug exposes private error causes in 500 responses. Keep disabled in production.
 	Debug bool
@@ -184,6 +184,7 @@ func New(config ...Config) *App {
 		logger: logger,
 		conns:  make(map[net.Conn]*connState),
 	}
+
 	if cfg.Reliability.Enabled {
 		reliability, err := NewReliability(cfg.Reliability)
 		if err != nil {
@@ -391,16 +392,15 @@ func (a *App) Serve(ln net.Listener) error {
 	a.connMu.Unlock()
 	a.closed.Store(false)
 	a.draining.Store(false)
-	// Freeze routes once the server starts. This removes router RWMutex
-	// traffic from every request while preserving build-time safety.
-	a.router.Freeze()
-
 	if a.reliability != nil {
 		if err := a.reliability.Start(); err != nil {
 			_ = ln.Close()
 			return err
 		}
 	}
+	// Freeze routes once the server starts. This removes router RWMutex
+	// traffic from every request while preserving build-time safety.
+	a.router.Freeze()
 
 	for _, fn := range a.hooks.onListen {
 		if err := fn(); err != nil {
@@ -456,6 +456,11 @@ func (a *App) Serve(ln net.Listener) error {
 	a.activeConn.Wait()
 
 	a.runShutdownHooks()
+	if a.reliability != nil {
+		if err := a.reliability.Close(); err != nil && acceptErr == nil {
+			acceptErr = err
+		}
+	}
 
 	return acceptErr
 }
@@ -470,6 +475,11 @@ func (a *App) Shutdown() error {
 	err := a.beginShutdown()
 	a.activeConn.Wait()
 	a.runShutdownHooks()
+	if a.reliability != nil {
+		if closeErr := a.reliability.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
 	return err
 }
 
@@ -485,6 +495,9 @@ func (a *App) ShutdownWithTimeout(d time.Duration) error {
 	select {
 	case <-done:
 		a.runShutdownHooks()
+		if a.reliability != nil {
+			return a.reliability.Close()
+		}
 		return nil
 	case <-time.After(d):
 		a.closeAllConnections()
@@ -1054,17 +1067,6 @@ func (a *App) ErrorCount(code string) uint64 {
 	return v.(*atomic.Uint64).Load()
 }
 
-// Pre-allocated 400 error response
-var serverError400 = []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError408 = []byte("HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError413 = []byte("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError417 = []byte("HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError431 = []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError501 = []byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError503 = []byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError505 = []byte("HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var plainTextCT = []byte("text/plain; charset=utf-8")
-
 // Reliability returns the configured reliability runtime, if enabled.
 func (a *App) Reliability() *Reliability { return a.reliability }
 
@@ -1075,3 +1077,14 @@ func (a *App) Queue() *DurableQueue {
 	}
 	return a.reliability.Queue()
 }
+
+// Pre-allocated 400 error response
+var serverError400 = []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError408 = []byte("HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError413 = []byte("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError417 = []byte("HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError431 = []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError501 = []byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError503 = []byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError505 = []byte("HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var plainTextCT = []byte("text/plain; charset=utf-8")

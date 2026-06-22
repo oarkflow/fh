@@ -25,6 +25,8 @@ const (
 	HeaderReplayed       = "X-Idempotency-Replayed"
 )
 
+var ErrQueueEmpty = errors.New("fh: queue empty")
+
 type ReliabilityConfig struct {
 	Enabled bool
 	DataDir string
@@ -32,6 +34,14 @@ type ReliabilityConfig struct {
 	JournalEnabled     bool
 	IdempotencyEnabled bool
 	QueueEnabled       bool
+
+	// JournalStore, IdempotencyRepository and QueueStorage allow applications to
+	// replace the default file-backed persistence with SQLite, PostgreSQL, Redis,
+	// cloud storage, or any other durable backend. When nil, fh uses the built-in
+	// file/directory backend under DataDir.
+	JournalStore          RequestJournalStore
+	IdempotencyRepository IdempotencyRepository
+	QueueStorage          QueueStorage
 
 	RequestIDHeader string
 
@@ -48,10 +58,48 @@ type ReliabilityConfig struct {
 	QueueBackoff      time.Duration
 }
 
+// RequestJournalStore is the durable append-only request lifecycle store.
+// Implement this interface for DBMS-backed audit tables.
+type RequestJournalStore interface {
+	Append(RequestJournalEntry) error
+	Close() error
+}
+
+// IdempotencyRepository stores request hashes and completed response snapshots.
+// Implementations must make Begin atomic for a given key.
+type IdempotencyRepository interface {
+	Begin(key, reqHash, method, path string) (IdempotencyDecision, *IdempotencyRecord, error)
+	Complete(key, reqHash string, status int, contentType string, headers map[string][]string, response []byte) error
+	Close() error
+}
+
+// QueueStorage is the persistence contract used by DurableQueue. A DBMS backend
+// should implement Claim atomically, for example using SELECT ... FOR UPDATE SKIP
+// LOCKED or an UPDATE ... RETURNING lease pattern.
+type QueueStorage interface {
+	Enqueue(context.Context, *QueueJob) error
+	Claim(context.Context, time.Time) (*QueueJob, error)
+	Complete(context.Context, *QueueJob) error
+	Retry(context.Context, *QueueJob, error, time.Duration) error
+	Fail(context.Context, *QueueJob, error) error
+	Recover(context.Context) error
+	Stats(context.Context) (QueueStats, error)
+	Close() error
+}
+
+// Queue is the application-facing async job queue contract.
+type Queue interface {
+	Register(jobType string, handler QueueHandler)
+	Enqueue(jobType string, payload any, headers ...map[string]string) (string, error)
+	Start() error
+	Close() error
+	Stats() (QueueStats, error)
+}
+
 type Reliability struct {
 	cfg     ReliabilityConfig
-	journal *RequestJournal
-	idem    *IdempotencyStore
+	journal RequestJournalStore
+	idem    IdempotencyRepository
 	queue   *DurableQueue
 }
 
@@ -63,25 +111,41 @@ func NewReliability(cfg ReliabilityConfig) (*Reliability, error) {
 	r := &Reliability{cfg: cfg}
 	var err error
 	if cfg.JournalEnabled {
-		r.journal, err = OpenRequestJournal(filepath.Join(cfg.DataDir, "request-journal.jsonl"))
-		if err != nil {
-			return nil, err
+		if cfg.JournalStore != nil {
+			r.journal = cfg.JournalStore
+		} else {
+			r.journal, err = OpenRequestJournal(filepath.Join(cfg.DataDir, "request-journal.jsonl"))
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	if cfg.IdempotencyEnabled {
-		r.idem, err = OpenIdempotencyStore(filepath.Join(cfg.DataDir, "idempotency.jsonl"), cfg.IdempotencyTTL)
-		if err != nil {
-			r.Close()
-			return nil, err
+		if cfg.IdempotencyRepository != nil {
+			r.idem = cfg.IdempotencyRepository
+		} else {
+			r.idem, err = OpenIdempotencyStore(filepath.Join(cfg.DataDir, "idempotency.jsonl"), cfg.IdempotencyTTL)
+			if err != nil {
+				r.Close()
+				return nil, err
+			}
 		}
 	}
 	if cfg.QueueEnabled {
-		qdir := cfg.QueueDir
-		if qdir == "" {
-			qdir = filepath.Join(cfg.DataDir, "queue")
+		storage := cfg.QueueStorage
+		if storage == nil {
+			qdir := cfg.QueueDir
+			if qdir == "" {
+				qdir = filepath.Join(cfg.DataDir, "queue")
+			}
+			storage, err = OpenFileQueueStorage(FileQueueStorageConfig{Dir: qdir})
+			if err != nil {
+				r.Close()
+				return nil, err
+			}
 		}
-		r.queue, err = OpenDurableQueue(DurableQueueConfig{Dir: qdir, Workers: cfg.QueueWorkers, MaxAttempts: cfg.QueueMaxAttempts, PollInterval: cfg.QueuePollInterval, Backoff: cfg.QueueBackoff})
-		if err != nil {
+		r.queue = NewDurableQueue(DurableQueueConfig{Workers: cfg.QueueWorkers, MaxAttempts: cfg.QueueMaxAttempts, PollInterval: cfg.QueuePollInterval, Backoff: cfg.QueueBackoff}, storage)
+		if err := r.queue.Recover(); err != nil {
 			r.Close()
 			return nil, err
 		}
@@ -134,7 +198,6 @@ func (r *Reliability) Start() error {
 	}
 	return r.queue.Start()
 }
-
 func (r *Reliability) Close() error {
 	if r == nil {
 		return nil
@@ -157,22 +220,19 @@ func (r *Reliability) Close() error {
 	}
 	return first
 }
-
 func (r *Reliability) Queue() *DurableQueue {
 	if r == nil {
 		return nil
 	}
 	return r.queue
 }
-
-func (r *Reliability) Journal() *RequestJournal {
+func (r *Reliability) Journal() RequestJournalStore {
 	if r == nil {
 		return nil
 	}
 	return r.journal
 }
-
-func (r *Reliability) IdempotencyStore() *IdempotencyStore {
+func (r *Reliability) IdempotencyStore() IdempotencyRepository {
 	if r == nil {
 		return nil
 	}
@@ -240,7 +300,6 @@ func (r *Reliability) Middleware() HandlerFunc {
 func isUnsafeMethod(m []byte) bool {
 	return bytesEqualFold(m, MethodPOSTBytes) || bytesEqualFold(m, MethodPUTBytes) || bytesEqualFold(m, MethodPATCHBytes) || bytesEqualFold(m, MethodDELETEBytes)
 }
-
 func setReplayHeader(c *Ctx, k, v string) {
 	if strings.EqualFold(k, HeaderContentLength) || strings.EqualFold(k, HeaderConnection) || strings.EqualFold(k, HeaderTransferEncoding) || strings.EqualFold(k, HeaderDate) || strings.EqualFold(k, "Trailer") {
 		return
@@ -251,9 +310,7 @@ func setReplayHeader(c *Ctx, k, v string) {
 	}
 	c.Set(k, v)
 }
-
 func hashBody(body []byte) string { sum := sha256.Sum256(body); return hex.EncodeToString(sum[:]) }
-
 func hashRequest(method, path, body []byte) string {
 	h := sha256.New()
 	h.Write(method)
@@ -263,7 +320,6 @@ func hashRequest(method, path, body []byte) string {
 	h.Write(body)
 	return hex.EncodeToString(h.Sum(nil))
 }
-
 func validExternalID(s string) bool {
 	if s == "" || len(s) > 128 {
 		return false
@@ -277,7 +333,6 @@ func validExternalID(s string) bool {
 	}
 	return true
 }
-
 func newRequestID() string {
 	var b [16]byte
 	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
@@ -313,7 +368,6 @@ func OpenRequestJournal(path string) (*RequestJournal, error) {
 	}
 	return &RequestJournal{file: f, path: path}, nil
 }
-
 func (j *RequestJournal) Append(e RequestJournalEntry) error {
 	if j == nil {
 		return nil
@@ -332,14 +386,12 @@ func (j *RequestJournal) Append(e RequestJournalEntry) error {
 	}
 	return j.file.Sync()
 }
-
 func (j *RequestJournal) Close() error {
 	if j == nil || j.file == nil {
 		return nil
 	}
 	return j.file.Close()
 }
-
 func (j *RequestJournal) Path() string {
 	if j == nil {
 		return ""
@@ -347,13 +399,20 @@ func (j *RequestJournal) Path() string {
 	return j.path
 }
 
-type idemDecision uint8
+// IdempotencyDecision describes how an idempotency repository resolved a request.
+type IdempotencyDecision uint8
 
 const (
-	idemNew idemDecision = iota
-	idemReplay
-	idemConflict
-	idemProcessing
+	IdempotencyNew IdempotencyDecision = iota
+	IdempotencyReplay
+	IdempotencyConflict
+	IdempotencyProcessing
+
+	// Backward-compatible package-internal aliases.
+	idemNew        = IdempotencyNew
+	idemReplay     = IdempotencyReplay
+	idemConflict   = IdempotencyConflict
+	idemProcessing = IdempotencyProcessing
 )
 
 type IdempotencyRecord struct {
@@ -395,7 +454,6 @@ func OpenIdempotencyStore(path string, ttl time.Duration) (*IdempotencyStore, er
 	s.file = f
 	return s, nil
 }
-
 func (s *IdempotencyStore) load() error {
 	f, err := os.Open(s.path)
 	if err != nil {
@@ -415,8 +473,7 @@ func (s *IdempotencyStore) load() error {
 	}
 	return sc.Err()
 }
-
-func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (idemDecision, *IdempotencyRecord, error) {
+func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (IdempotencyDecision, *IdempotencyRecord, error) {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -437,7 +494,6 @@ func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (idemDecisio
 	s.records[key] = rec
 	return idemNew, cloneIdem(rec), s.appendLocked(rec)
 }
-
 func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType string, headers map[string][]string, response []byte) error {
 	now := time.Now().UTC()
 	s.mu.Lock()
@@ -457,7 +513,6 @@ func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType
 	rec.UpdatedAt = now
 	return s.appendLocked(rec)
 }
-
 func cleanReplayHeaders(in map[string][]string) map[string][]string {
 	if len(in) == 0 {
 		return nil
@@ -471,7 +526,6 @@ func cleanReplayHeaders(in map[string][]string) map[string][]string {
 	}
 	return out
 }
-
 func (s *IdempotencyStore) appendLocked(rec *IdempotencyRecord) error {
 	b, err := json.Marshal(rec)
 	if err != nil {
@@ -482,7 +536,6 @@ func (s *IdempotencyStore) appendLocked(rec *IdempotencyRecord) error {
 	}
 	return s.file.Sync()
 }
-
 func cloneIdem(r *IdempotencyRecord) *IdempotencyRecord {
 	if r == nil {
 		return nil
@@ -494,7 +547,6 @@ func cloneIdem(r *IdempotencyRecord) *IdempotencyRecord {
 	}
 	return &cp
 }
-
 func (s *IdempotencyStore) Close() error {
 	if s == nil || s.file == nil {
 		return nil
@@ -515,7 +567,6 @@ type DurableQueueConfig struct {
 	PollInterval time.Duration
 	Backoff      time.Duration
 }
-
 type QueueJob struct {
 	ID          string            `json:"id"`
 	Type        string            `json:"type"`
@@ -528,9 +579,7 @@ type QueueJob struct {
 	UpdatedAt   time.Time         `json:"updated_at"`
 	LastError   string            `json:"last_error,omitempty"`
 }
-
 type QueueHandler func(context.Context, *QueueJob) error
-
 type QueueEvent struct {
 	ID        string    `json:"id"`
 	JobID     string    `json:"job_id"`
@@ -541,13 +590,13 @@ type QueueEvent struct {
 	Error     string    `json:"error,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
+type QueueStats struct{ Pending, Processing, Done, Failed int }
 
 type DurableQueue struct {
 	cfg      DurableQueueConfig
+	store    QueueStorage
 	mu       sync.RWMutex
 	handlers map[string]QueueHandler
-	eventMu  sync.Mutex
-	events   *os.File
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
@@ -558,6 +607,14 @@ func OpenDurableQueue(cfg DurableQueueConfig) (*DurableQueue, error) {
 	if cfg.Dir == "" {
 		cfg.Dir = ".fh-reliability/queue"
 	}
+	storage, err := OpenFileQueueStorage(FileQueueStorageConfig{Dir: cfg.Dir})
+	if err != nil {
+		return nil, err
+	}
+	q := NewDurableQueue(cfg, storage)
+	return q, q.Recover()
+}
+func NewDurableQueue(cfg DurableQueueConfig, storage QueueStorage) *DurableQueue {
 	if cfg.Workers <= 0 {
 		cfg.Workers = 1
 	}
@@ -570,23 +627,23 @@ func OpenDurableQueue(cfg DurableQueueConfig) (*DurableQueue, error) {
 	if cfg.Backoff <= 0 {
 		cfg.Backoff = time.Second
 	}
-	for _, d := range []string{"pending", "processing", "done", "failed"} {
-		if err := os.MkdirAll(filepath.Join(cfg.Dir, d), 0o700); err != nil {
-			return nil, err
-		}
+	if storage == nil {
+		panic("fh: durable queue requires storage")
 	}
-	events, err := os.OpenFile(filepath.Join(cfg.Dir, "events.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	q := &DurableQueue{cfg: cfg, handlers: make(map[string]QueueHandler), events: events}
-	if err := q.recoverProcessing(); err != nil {
-		_ = events.Close()
-		return nil, err
-	}
-	return q, nil
+	return &DurableQueue{cfg: cfg, store: storage, handlers: make(map[string]QueueHandler)}
 }
-
+func (q *DurableQueue) Storage() QueueStorage {
+	if q == nil {
+		return nil
+	}
+	return q.store
+}
+func (q *DurableQueue) Recover() error {
+	if q == nil || q.store == nil {
+		return nil
+	}
+	return q.store.Recover(context.Background())
+}
 func (q *DurableQueue) Register(jobType string, handler QueueHandler) {
 	if jobType == "" || handler == nil {
 		panic("fh: queue handler requires type and handler")
@@ -595,7 +652,6 @@ func (q *DurableQueue) Register(jobType string, handler QueueHandler) {
 	q.handlers[jobType] = handler
 	q.mu.Unlock()
 }
-
 func (q *DurableQueue) Enqueue(jobType string, payload any, headers ...map[string]string) (string, error) {
 	if q == nil {
 		return "", errors.New("fh: durable queue is nil")
@@ -620,13 +676,8 @@ func (q *DurableQueue) Enqueue(jobType string, payload any, headers ...map[strin
 	if len(headers) > 0 {
 		job.Headers = headers[0]
 	}
-	if err := q.writeJobAtomic("pending", job); err != nil {
-		return "", err
-	}
-	_ = q.appendEvent("enqueued", "pending", job, "")
-	return job.ID, nil
+	return job.ID, q.store.Enqueue(context.Background(), job)
 }
-
 func (q *DurableQueue) Start() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -641,7 +692,6 @@ func (q *DurableQueue) Start() error {
 	}
 	return nil
 }
-
 func (q *DurableQueue) Close() error {
 	if q == nil {
 		return nil
@@ -653,16 +703,11 @@ func (q *DurableQueue) Close() error {
 		cancel()
 	}
 	q.wg.Wait()
-	q.eventMu.Lock()
-	events := q.events
-	q.events = nil
-	q.eventMu.Unlock()
-	if events != nil {
-		return events.Close()
+	if q.store != nil {
+		return q.store.Close()
 	}
 	return nil
 }
-
 func (q *DurableQueue) worker() {
 	defer q.wg.Done()
 	ticker := time.NewTicker(q.cfg.PollInterval)
@@ -681,44 +726,84 @@ func (q *DurableQueue) worker() {
 		}
 	}
 }
-
 func (q *DurableQueue) processOne() bool {
-	path, job, ok := q.claimOne()
-	if !ok {
+	job, err := q.store.Claim(q.ctx, time.Now().UTC())
+	if err != nil {
 		return false
 	}
 	q.mu.RLock()
 	handler := q.handlers[job.Type]
 	q.mu.RUnlock()
 	if handler == nil {
-		q.failOrRetry(path, job, fmt.Errorf("no handler registered for job type %q", job.Type))
+		_ = q.store.Retry(q.ctx, job, fmt.Errorf("no handler registered for job type %q", job.Type), q.cfg.Backoff)
 		return true
 	}
-	err := handler(q.ctx, job)
-	if err != nil {
-		q.failOrRetry(path, job, err)
+	if err := handler(q.ctx, job); err != nil {
+		_ = q.store.Retry(q.ctx, job, err, q.cfg.Backoff)
 		return true
 	}
-	job.UpdatedAt = time.Now().UTC()
-	job.LastError = ""
-	_ = q.writeJobAtomic("done", job)
-	_ = q.appendEvent("completed", "done", job, "")
-	_ = os.Remove(path)
+	_ = q.store.Complete(q.ctx, job)
 	return true
 }
+func (q *DurableQueue) Stats() (QueueStats, error) {
+	if q == nil || q.store == nil {
+		return QueueStats{}, nil
+	}
+	return q.store.Stats(context.Background())
+}
 
-func (q *DurableQueue) claimOne() (string, *QueueJob, bool) {
-	files, err := os.ReadDir(filepath.Join(q.cfg.Dir, "pending"))
+// FileQueueStorage is the default file/directory based QueueStorage.
+type FileQueueStorageConfig struct{ Dir string }
+type FileQueueStorage struct {
+	dir     string
+	eventMu sync.Mutex
+	events  *os.File
+}
+
+func OpenFileQueueStorage(cfg FileQueueStorageConfig) (*FileQueueStorage, error) {
+	if cfg.Dir == "" {
+		cfg.Dir = ".fh-reliability/queue"
+	}
+	for _, d := range []string{"pending", "processing", "done", "failed"} {
+		if err := os.MkdirAll(filepath.Join(cfg.Dir, d), 0o700); err != nil {
+			return nil, err
+		}
+	}
+	events, err := os.OpenFile(filepath.Join(cfg.Dir, "events.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", nil, false
+		return nil, err
+	}
+	return &FileQueueStorage{dir: cfg.Dir, events: events}, nil
+}
+func (s *FileQueueStorage) Dir() string {
+	if s == nil {
+		return ""
+	}
+	return s.dir
+}
+func (s *FileQueueStorage) Enqueue(ctx context.Context, job *QueueJob) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.writeJobAtomic("pending", job); err != nil {
+		return err
+	}
+	return s.appendEvent("enqueued", "pending", job, "")
+}
+func (s *FileQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJob, error) {
+	files, err := os.ReadDir(filepath.Join(s.dir, "pending"))
+	if err != nil {
+		return nil, err
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
-	now := time.Now().UTC()
 	for _, ent := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
 			continue
 		}
-		pending := filepath.Join(q.cfg.Dir, "pending", ent.Name())
+		pending := filepath.Join(s.dir, "pending", ent.Name())
 		job, err := readJob(pending)
 		if err != nil {
 			_ = os.Remove(pending)
@@ -727,57 +812,115 @@ func (q *DurableQueue) claimOne() (string, *QueueJob, bool) {
 		if job.VisibleAt.After(now) {
 			continue
 		}
-		processing := filepath.Join(q.cfg.Dir, "processing", ent.Name())
+		processing := filepath.Join(s.dir, "processing", ent.Name())
 		if os.Rename(pending, processing) == nil {
-			_ = q.appendEvent("claimed", "processing", job, "")
-			return processing, job, true
+			_ = s.appendEvent("claimed", "processing", job, "")
+			return job, nil
 		}
 	}
-	return "", nil, false
+	return nil, ErrQueueEmpty
 }
-
-func (q *DurableQueue) failOrRetry(processingPath string, job *QueueJob, err error) {
+func (s *FileQueueStorage) Complete(ctx context.Context, job *QueueJob) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	job.UpdatedAt = time.Now().UTC()
+	job.LastError = ""
+	if err := s.writeJobAtomic("done", job); err != nil {
+		return err
+	}
+	_ = s.appendEvent("completed", "done", job, "")
+	return os.Remove(filepath.Join(s.dir, "processing", job.ID+".json"))
+}
+func (s *FileQueueStorage) Retry(ctx context.Context, job *QueueJob, cause error, backoff time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	job.Attempts++
 	job.UpdatedAt = now
-	job.LastError = err.Error()
+	if cause != nil {
+		job.LastError = cause.Error()
+	}
 	if job.MaxAttempts <= 0 {
-		job.MaxAttempts = q.cfg.MaxAttempts
+		job.MaxAttempts = 5
 	}
 	if job.Attempts >= job.MaxAttempts {
-		_ = q.writeJobAtomic("failed", job)
-		_ = q.appendEvent("failed", "failed", job, err.Error())
-		_ = os.Remove(processingPath)
-		return
+		return s.Fail(ctx, job, cause)
 	}
-	job.VisibleAt = now.Add(q.cfg.Backoff * time.Duration(job.Attempts))
-	_ = q.writeJobAtomic("pending", job)
-	_ = q.appendEvent("retry_scheduled", "pending", job, err.Error())
-	_ = os.Remove(processingPath)
+	job.VisibleAt = now.Add(backoff * time.Duration(job.Attempts))
+	if err := s.writeJobAtomic("pending", job); err != nil {
+		return err
+	}
+	_ = s.appendEvent("retry_scheduled", "pending", job, job.LastError)
+	return os.Remove(filepath.Join(s.dir, "processing", job.ID+".json"))
 }
-
-func (q *DurableQueue) recoverProcessing() error {
-	files, err := os.ReadDir(filepath.Join(q.cfg.Dir, "processing"))
+func (s *FileQueueStorage) Fail(ctx context.Context, job *QueueJob, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if cause != nil {
+		job.LastError = cause.Error()
+	}
+	job.UpdatedAt = time.Now().UTC()
+	if err := s.writeJobAtomic("failed", job); err != nil {
+		return err
+	}
+	_ = s.appendEvent("failed", "failed", job, job.LastError)
+	return os.Remove(filepath.Join(s.dir, "processing", job.ID+".json"))
+}
+func (s *FileQueueStorage) Recover(ctx context.Context) error {
+	files, err := os.ReadDir(filepath.Join(s.dir, "processing"))
 	if err != nil {
 		return err
 	}
 	for _, ent := range files {
-		if !ent.IsDir() {
-			from := filepath.Join(q.cfg.Dir, "processing", ent.Name())
-			to := filepath.Join(q.cfg.Dir, "pending", ent.Name())
-			if job, err := readJob(from); err == nil {
-				if os.Rename(from, to) == nil {
-					_ = q.appendEvent("recovered", "pending", job, "")
-				}
-			} else {
-				_ = os.Rename(from, to)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if ent.IsDir() {
+			continue
+		}
+		from := filepath.Join(s.dir, "processing", ent.Name())
+		to := filepath.Join(s.dir, "pending", ent.Name())
+		if job, err := readJob(from); err == nil {
+			if os.Rename(from, to) == nil {
+				_ = s.appendEvent("recovered", "pending", job, "")
 			}
+		} else {
+			_ = os.Rename(from, to)
 		}
 	}
 	return nil
 }
-
-func (q *DurableQueue) writeJobAtomic(state string, job *QueueJob) error {
+func (s *FileQueueStorage) Stats(ctx context.Context) (QueueStats, error) {
+	var st QueueStats
+	for _, item := range []struct {
+		name string
+		dst  *int
+	}{{"pending", &st.Pending}, {"processing", &st.Processing}, {"done", &st.Done}, {"failed", &st.Failed}} {
+		if err := ctx.Err(); err != nil {
+			return st, err
+		}
+		ents, err := os.ReadDir(filepath.Join(s.dir, item.name))
+		if err != nil {
+			return st, err
+		}
+		for _, e := range ents {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+				*item.dst++
+			}
+		}
+	}
+	return st, nil
+}
+func (s *FileQueueStorage) Close() error {
+	if s == nil || s.events == nil {
+		return nil
+	}
+	return s.events.Close()
+}
+func (s *FileQueueStorage) writeJobAtomic(state string, job *QueueJob) error {
 	if job.ID == "" {
 		job.ID = newQueueID()
 	}
@@ -786,7 +929,7 @@ func (q *DurableQueue) writeJobAtomic(state string, job *QueueJob) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(q.cfg.Dir, state)
+	dir := filepath.Join(s.dir, state)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -810,14 +953,13 @@ func (q *DurableQueue) writeJobAtomic(state string, job *QueueJob) error {
 	}
 	return os.Rename(tmp, final)
 }
-
-func (q *DurableQueue) appendEvent(event, state string, job *QueueJob, errText string) error {
-	if q == nil || job == nil {
+func (s *FileQueueStorage) appendEvent(event, state string, job *QueueJob, errText string) error {
+	if s == nil || job == nil {
 		return nil
 	}
-	q.eventMu.Lock()
-	defer q.eventMu.Unlock()
-	if q.events == nil {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if s.events == nil {
 		return nil
 	}
 	e := QueueEvent{ID: newQueueEventID(), JobID: job.ID, Type: job.Type, State: state, Event: event, Attempts: job.Attempts, Error: errText, CreatedAt: time.Now().UTC()}
@@ -825,10 +967,10 @@ func (q *DurableQueue) appendEvent(event, state string, job *QueueJob, errText s
 	if err != nil {
 		return err
 	}
-	if _, err = q.events.Write(append(b, '\n')); err != nil {
+	if _, err = s.events.Write(append(b, '\n')); err != nil {
 		return err
 	}
-	return q.events.Sync()
+	return s.events.Sync()
 }
 
 func readJob(path string) (*QueueJob, error) {
@@ -842,32 +984,9 @@ func readJob(path string) (*QueueJob, error) {
 	}
 	return &j, nil
 }
-
 func newQueueID() string {
 	return "job_" + strconv.FormatInt(time.Now().UnixNano(), 36) + "_" + strings.TrimPrefix(newRequestID(), "req_")
 }
-
 func newQueueEventID() string {
 	return "qev_" + strconv.FormatInt(time.Now().UnixNano(), 36) + "_" + strings.TrimPrefix(newRequestID(), "req_")
 }
-
-func (q *DurableQueue) Stats() (QueueStats, error) {
-	var st QueueStats
-	for _, item := range []struct {
-		name string
-		dst  *int
-	}{{"pending", &st.Pending}, {"processing", &st.Processing}, {"done", &st.Done}, {"failed", &st.Failed}} {
-		ents, err := os.ReadDir(filepath.Join(q.cfg.Dir, item.name))
-		if err != nil {
-			return st, err
-		}
-		for _, e := range ents {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-				*item.dst++
-			}
-		}
-	}
-	return st, nil
-}
-
-type QueueStats struct{ Pending, Processing, Done, Failed int }

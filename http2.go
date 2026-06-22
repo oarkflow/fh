@@ -1019,8 +1019,12 @@ func lowerHeaderName(b []byte) string {
 }
 
 func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
+	c.responseBody = append(c.responseBody[:0], body...)
 	if c.responded || r.ended.Load() {
 		return nil
+	}
+	if err := c.runBeforeResponse(); err != nil {
+		return err
 	}
 	if c.bodyTransform != nil {
 		var err error
@@ -1028,10 +1032,6 @@ func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
 		if err != nil {
 			return err
 		}
-	}
-	c.responseSnapshot = append(c.responseSnapshot[:0], body...)
-	if err := c.runBeforeResponse(); err != nil {
-		return err
 	}
 	c.responded = true
 	r.trailers = append([]Header(nil), c.responseTrailers...)
