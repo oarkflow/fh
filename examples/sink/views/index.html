@@ -1,0 +1,8 @@
+@extends("layouts/main.html")
+@define("content") {
+    <h2 style="font-size:1.1rem;margin-bottom:0.3rem;">${title}</h2>
+    <p style="margin-bottom:0.85rem;color:#64748b;font-size:0.82rem;">Demonstrates SPL hydration: ${"@"}signal, ${"@"}reactive, ${"@"}component, ${"@"}for, ${"@"}match, ${"@"}let, ${"@"}computed, ${"@"}watch, data-spl-model, data-spl-api-*, filters, ${"@"}extends, ${"@"}include, ${"@"}import, ${"@"}click, ${"@"}bind, ${"@"}effect, ${"@"}switch, ${"@"}lazy, ${"@"}slot.</p>
+    @import("components/card.html")
+    @import("components/field.html")
+    @include("app.html")
+}

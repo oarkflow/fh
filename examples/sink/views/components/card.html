@@ -1,0 +1,7 @@
+@component("Card", heading, bg = "white", border = "#e2e8f0", sectionLabel = "") {
+    <div class="card" style="background:${bg};border-color:${border};">
+        @if(sectionLabel){<div class="section-label">${sectionLabel}</div>}
+        @if(heading){<h3>${heading}</h3>}
+        @slot
+    </div>
+}

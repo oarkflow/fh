@@ -1,0 +1,305 @@
+@signal(personal = {"firstName":"","lastName":"","email":"","password":"","age":25,"phone":"","website":"","bio":""})
+@signal(prefs = {"country":"us","role":"developer","gender":"other","priority":"medium","newsletter":true,"notifications":true,"terms":false,"search":"","tags":""})
+@signal(sliders = {"experience":50,"satisfaction":75,"volume":30})
+@signal(rating = 3)
+@signal(extras = {"birthDate":"1995-06-15","startTime":"09:00","favColor":"#3b82f6"})
+@signal(submitted = false)
+@signal(apiResult = "")
+@signal(quote = {"text":"Click to load a quote","author":""})
+@signal(tabForms = true)
+@signal(tabInteractive = false)
+@signal(tabShowcase = false)
+@signal(showcaseCounter = 0)
+@signal(showcasePanel = false)
+@signal(todoDraft = "")
+@signal(todoResult = "Click Refresh or create a TODO...")
+@let(totalCountries = len(countries))
+@let(bioLimit = config.MaxBioLength)
+@computed(priorityCount = len(priorities))
+
+@handler(resetAll) {
+    personal.firstName='';personal.lastName='';personal.email='';personal.password='';personal.age=25;personal.phone='';personal.website='';personal.bio='';
+    prefs.country='us';prefs.role='developer';prefs.gender='other';prefs.priority='medium';prefs.newsletter=true;prefs.notifications=true;prefs.terms=false;prefs.search='';prefs.tags='';
+    sliders.experience=50;sliders.satisfaction=75;sliders.volume=30;rating=3;
+    extras.birthDate='1995-06-15';extras.startTime='09:00';extras.favColor='#3b82f6';
+    submitted=false;apiResult='';quote.text='Click to load a quote';quote.author='';
+    showcaseCounter=0;showcasePanel=false;todoDraft='';todoResult='Click Refresh or create a TODO...';
+    tabForms=true;tabInteractive=false;tabShowcase=false;
+}
+
+@// === Server Stats ===
+<div class="card" style="background:#f0f9ff;border-color:#bae6fd;">
+  <div class="section-label">Data (${"@"}let, ${"@"}computed, ${"@"}for)</div>
+  <div style="display:flex;gap:0.75rem;flex-wrap:wrap;font-size:0.8rem;">
+    <span class="badge badge-blue">${totalCountries} Countries</span>
+    <span class="badge badge-amber">${priorityCount} Priority Levels</span>
+    <span class="badge badge-green">Bio: ${bioLimit} chars</span>
+    @for(c in countries) {
+      <span class="badge" style="background:#f1f5f9;font-size:0.7rem;">${c.Code|upper}: ${c.Region}</span>
+    }
+  </div>
+</div>
+
+@// === Quote API (data-spl-api-* GET) ===
+<div class="card" style="background:#fefce8;border-color:#fde68a;">
+  <div class="section-label">Declarative API (data-spl-api-*)</div>
+  <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
+    <button data-spl-api-url="/api/quote" data-spl-api-method="GET" data-spl-api-target="quote" data-spl-api-parse="json" data-spl-api-event="click" style="padding:0.5rem 1.25rem;border-radius:0.375rem;border:1px solid #d97706;background:#fef3c7;color:#92400e;cursor:pointer;font-weight:600;">Load Quote</button>
+    @reactive(quote) {
+      <blockquote style="flex:1;margin:0;padding:0.75rem 1rem;border-left:3px solid #d97706;font-style:italic;color:#78350f;font-size:0.8rem;">&ldquo;${quote.text}&rdquo;@if(quote.author){<span style="display:block;font-style:normal;color:#a16207;margin-top:0.25rem;">&mdash; ${quote.author}</span>}</blockquote>
+    }
+  </div>
+</div>
+
+@// === Tab Navigation ===
+<div class="card" style="padding:0;overflow:hidden;">
+  <div style="display:flex;border-bottom:2px solid #e2e8f0;background:#f8fafc;">
+    @if(tabForms){<button on:click="tabForms=true;tabInteractive=false;tabShowcase=false" style="flex:1;padding:0.55rem;border:none;background:none;cursor:pointer;font-size:0.8rem;font-weight:600;color:#1e40af;border-bottom:2px solid #3b82f6;">Forms</button>}
+    @else{<button on:click="tabForms=true;tabInteractive=false;tabShowcase=false" style="flex:1;padding:0.55rem;border:none;background:none;cursor:pointer;font-size:0.8rem;font-weight:600;color:#64748b;border-bottom:2px solid transparent;">Forms</button>}
+    @if(tabInteractive){<button on:click="tabForms=false;tabInteractive=true;tabShowcase=false" style="flex:1;padding:0.55rem;border:none;background:none;cursor:pointer;font-size:0.8rem;font-weight:600;color:#1e40af;border-bottom:2px solid #3b82f6;">Interactive</button>}
+    @else{<button on:click="tabForms=false;tabInteractive=true;tabShowcase=false" style="flex:1;padding:0.55rem;border:none;background:none;cursor:pointer;font-size:0.8rem;font-weight:600;color:#64748b;border-bottom:2px solid transparent;">Interactive</button>}
+    @if(tabShowcase){<button on:click="tabForms=false;tabInteractive=false;tabShowcase=true" style="flex:1;padding:0.55rem;border:none;background:none;cursor:pointer;font-size:0.8rem;font-weight:600;color:#1e40af;border-bottom:2px solid #3b82f6;">Showcase</button>}
+    @else{<button on:click="tabForms=false;tabInteractive=false;tabShowcase=true" style="flex:1;padding:0.55rem;border:none;background:none;cursor:pointer;font-size:0.8rem;font-weight:600;color:#64748b;border-bottom:2px solid transparent;">Showcase</button>}
+  </div>
+</div>
+
+@// === TAB 1: Forms (data-spl-model, @for, @match, @if/@else) ===
+<div data-spl-if="tabForms">
+  @render("Card",{"heading":"Personal Info","sectionLabel":"Form Fields & @component"}) {
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;">
+      @render("Field",{"label":"First Name"}){<input type="text" data-spl-ref="firstNameInput" data-spl-model="personal.firstName" placeholder="First name" style="width:100%;padding:0.35rem 0.6rem;border-radius:0.3rem;border:1px solid #d1d5db;font-size:0.8rem;" />}
+      @render("Field",{"label":"Last Name"}){<input type="text" data-spl-model="personal.lastName" placeholder="Last name" style="width:100%;padding:0.35rem 0.6rem;border-radius:0.3rem;border:1px solid #d1d5db;font-size:0.8rem;" />}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-top:0.5rem;">
+      @render("Field",{"label":"Email"}){<input type="email" data-spl-model="personal.email" placeholder="you@example.com" style="width:100%;padding:0.35rem 0.6rem;border-radius:0.3rem;border:1px solid #d1d5db;font-size:0.8rem;" />}
+      @render("Field",{"label":"Password"}){<input type="password" data-spl-model="personal.password" placeholder="Enter password" style="width:100%;padding:0.35rem 0.6rem;border-radius:0.3rem;border:1px solid #d1d5db;font-size:0.8rem;" />}
+    </div>
+    <div style="margin-top:0.5rem;">
+      @render("Field",{"label":"Bio"}){<textarea data-spl-model="personal.bio" rows="2" placeholder="About you..." style="width:100%;padding:0.35rem 0.6rem;border-radius:0.3rem;border:1px solid #d1d5db;font-size:0.8rem;resize:vertical;font-family:inherit;"></textarea>}
+    </div>
+  }
+
+  @render("Card",{"heading":"Preferences","sectionLabel":"@for, @match, data-spl-model"}) {
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
+      @render("Field",{"label":"Country ("+totalCountries+" available)"}){
+        <select data-spl-model="prefs.country" style="width:100%;padding:0.35rem 0.6rem;border-radius:0.3rem;border:1px solid #d1d5db;font-size:0.8rem;background:white;">
+          @for(c in countries) { <option value="${c.Code}">${c.Name} (${c.Region})</option> }
+        </select>
+      }
+      @render("Field",{"label":"Role"}){
+        <select data-spl-model="prefs.role" style="width:100%;padding:0.35rem 0.6rem;border-radius:0.3rem;border:1px solid #d1d5db;font-size:0.8rem;background:white;">
+          @for(r in roles) { <option value="${r.Value}">${r.Label}</option> }
+        </select>
+      }
+    </div>
+      <div style="margin-top:0.75rem;">
+        <label style="font-size:0.8rem;font-weight:600;color:#475569;">Priority</label>
+        <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:0.5rem;">
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
+            <input type="radio" name="priority" value="low" data-spl-model="prefs.priority" />
+            <span class="badge badge-green">Low</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
+            <input type="radio" name="priority" value="medium" data-spl-model="prefs.priority" checked />
+            <span class="badge badge-amber">Medium</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
+            <input type="radio" name="priority" value="high" data-spl-model="prefs.priority" />
+            <span class="badge badge-red">High</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
+            <input type="radio" name="priority" value="critical" data-spl-model="prefs.priority" />
+            <span class="badge badge-purple">CRITICAL</span>
+          </label>
+        </div>
+      </div>
+    <div style="margin-top:0.75rem;">
+      <div style="display:flex;gap:1.5rem;flex-wrap:wrap;">
+        <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;"><input type="checkbox" data-spl-model="prefs.newsletter" checked /> Newsletter</label>
+        <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;"><input type="checkbox" data-spl-model="prefs.notifications" checked /> Notifications</label>
+        <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;"><input type="checkbox" data-spl-model="prefs.terms" /> Accept terms</label>
+      </div>
+    </div>
+    <button on:click="submitted=true" style="margin-top:0.75rem;padding:0.45rem 1.25rem;border-radius:0.375rem;border:none;background:#3b82f6;color:white;font-weight:600;cursor:pointer;">Submit</button>
+    <button on:click="resetAll" style="margin-top:0.75rem;margin-left:0.5rem;padding:0.45rem 1.25rem;border-radius:0.375rem;border:1px solid #d1d5db;background:white;cursor:pointer;">Reset</button>
+  }
+
+  @// Live preview
+  <div class="card" style="background:#eff6ff;border-color:#bfdbfe;">
+    <div class="section-label">Live Preview (${"@"}reactive + filters)</div>
+    @reactive(personal,prefs){<div style="display:grid;grid-template-columns:auto 1fr;gap:0.35rem 1.25rem;font-size:0.8rem;">
+      <strong>Name:</strong><span>${personal.firstName} <span style="text-transform:capitalize">${personal.lastName}</span></span>
+      <strong>Email:</strong><span>${personal.email}</span>
+      <strong>Role:</strong><span>${prefs.role}</span>
+      <strong>Priority:</strong><span style="text-transform:uppercase">${prefs.priority}</span>
+      <strong>Notifications:</strong>
+	  	<span style="text-transform:uppercase">Newsletter => ${prefs.newsletter}</span>
+	  	<span style="text-transform:uppercase">Notifications => ${prefs.notifications}</span>
+	  	<span style="text-transform:uppercase">Terms => ${prefs.terms}</span>
+    </div>}
+  </div>
+</div>
+
+@// === TAB 2: Interactive (sliders, rating, colors, @reactive, @switch/@case, API POST) ===
+<div data-spl-if="tabInteractive">
+  @render("Card",{"heading":"Sliders & Rating","sectionLabel":"@reactive, @switch/@case"}) {
+    @for(slider in [{"key":"experience","label":"Experience","color":"#3b82f6"},{"key":"satisfaction","label":"Satisfaction","color":"#22c55e"},{"key":"volume","label":"Volume","color":"#f59e0b"}]) {
+      <div style="margin-bottom:0.75rem;">
+        <div style="display:flex;justify-content:space-between;">
+          <label style="font-size:0.8rem;font-weight:600;color:#475569;">${slider.label}</label>
+          @reactive(sliders){<span style="font-size:0.8rem;font-weight:700;color:${slider.color};">@switch(slider.key){@case("experience"){${sliders.experience}%}@case("satisfaction"){${sliders.satisfaction}%}@case("volume"){${sliders.volume}%}}</span>}
+        </div>
+        <input type="range" data-spl-model="sliders.${slider.key}" min="0" max="100" style="width:100%;accent-color:${slider.color};" />
+      </div>
+    }
+    <div>
+      <label style="font-size:0.8rem;font-weight:600;color:#475569;">Rating</label>
+      <div style="display:flex;gap:0.75rem;align-items:center;">
+        <input type="range" data-spl-model="rating" min="1" max="5" step="1" style="flex:1;accent-color:#f59e0b;" />
+        @reactive(rating){<span style="font-size:0.8rem;font-weight:700;">${rating}/5</span>}
+      </div>
+      <div style="margin-top:0.35rem;">@reactive(rating){<span style="font-size:1.25rem;">Rating: <strong>${rating}/5</strong></span>}</div>
+    </div>
+  }
+
+  @render("Card",{"heading":"Color & Date Picker","sectionLabel":"@reactive + @component"}) {
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
+      @render("Field",{"label":"Birth Date"}){<input type="date" data-spl-model="extras.birthDate" style="width:100%;padding:0.35rem 0.6rem;border-radius:0.3rem;border:1px solid #d1d5db;font-size:0.8rem;" />}
+      @render("Field",{"label":"Start Time"}){<input type="time" data-spl-model="extras.startTime" style="width:100%;padding:0.35rem 0.6rem;border-radius:0.3rem;border:1px solid #d1d5db;font-size:0.8rem;" />}
+    </div>
+    @render("Field",{"label":"Favorite Color"}) {
+      <div style="display:flex;align-items:center;gap:0.75rem;">
+        <input type="color" data-spl-model="extras.favColor" style="width:3rem;height:2.5rem;border:1px solid #d1d5db;border-radius:0.375rem;cursor:pointer;padding:0.15rem;" />
+        @reactive(extras){<span style="font-family:monospace;font-size:0.8rem;">${extras.favColor}</span>}
+      </div>
+    }
+  }
+
+  @// API POST example
+  @render("Card",{"heading":"API POST (data-spl-api-*)","sectionLabel":"Declarative HTTP"}) {
+    <p style="font-size:0.8rem;color:#64748b;margin-bottom:0.5rem;">Posts form signals to <code>/api/submit</code> via declarative attributes.</p>
+    <button data-spl-api-url="/api/submit" data-spl-api-method="POST" data-spl-api-target="apiResult" data-spl-api-parse="json" data-spl-api-body='{"personal":{{personal}},"prefs":{{prefs}},"sliders":{{sliders}},"rating":{{rating}},"extras":{{extras}}}' data-spl-api-event="click" style="padding:0.45rem 1.25rem;border-radius:0.375rem;border:none;background:#8b5cf6;color:white;font-weight:600;cursor:pointer;">POST Form Data</button>
+    @reactive(apiResult){<pre style="margin-top:0.5rem;font-size:0.8rem;white-space:pre-wrap;word-break:break-word;">${apiResult}</pre>}
+  }
+</div>
+
+@// === TAB 3: Showcase (counter, TODO CRUD, filters, @switch, @lazy, @slot, props) ===
+<div data-spl-if="tabShowcase">
+  @// Counter & Toggle (@click, @bind, @effect)
+  @render("Card",{"heading":"Counter & Toggle","sectionLabel":"@click, @bind, @effect"}) {
+    <p>Counter: <strong>@bind(showcaseCounter)</strong></p>
+    <div style="display:flex;gap:0.35rem;margin-bottom:0.5rem;">
+      @click("+1",showcaseCounter,"inc","1")
+      <button on:click="showcaseCounter-=1">-1</button>
+      @click("Toggle Panel",showcasePanel,"toggle")
+    </div>
+    @effect(showcaseCounter){<div style="padding:0.35rem 0.75rem;background:#f0f9ff;border-radius:6px;font-size:0.85rem;">Effect: counter is <strong>${showcaseCounter}</strong></div>}
+    @reactive(showcaseCounter,showcasePanel){<div style="margin-top:0.5rem;padding:0.75rem;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;"><strong>Count:</strong> ${showcaseCounter} @if(showcasePanel){<div style="margin-top:0.5rem;padding:0.5rem;background:#ecfdf5;border-radius:6px;color:#059669;"><strong>Panel is open!</strong></div>}@else{<span style="color:#64748b;">Panel is closed</span>}</div>}
+  }
+
+  @// TODO CRUD (data-spl-api-form)
+  @render("Card",{"heading":"TODO CRUD","sectionLabel":"data-spl-api-form"}) {
+    <form style="display:flex;gap:0.5rem;align-items:center;">
+      <input type="text" name="title" data-spl-model="todoDraft" placeholder="New todo" style="flex:1;padding:0.4rem 0.6rem;border:1px solid #d1d5db;border-radius:6px;font-size:0.85rem;" />
+      <input type="hidden" name="priority" value="medium" /><input type="hidden" name="notes" value="from showcase" />
+      <button type="submit" data-spl-api-method="POST" data-spl-api-url="/api/todos" data-spl-api-form="closest" data-spl-api-target="todoResult" data-spl-api-reset="todoDraft" style="padding:0.4rem 1rem;border-radius:6px;border:none;background:#2563eb;color:white;font-weight:600;cursor:pointer;">Create</button>
+    </form>
+    <div style="margin-top:0.5rem;"><button type="button" data-spl-api-method="GET" data-spl-api-url="/api/todos" data-spl-api-target="todoResult" style="padding:0.35rem 0.75rem;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;cursor:pointer;font-size:0.85rem;">Refresh TODOs</button></div>
+    <pre data-spl-bind="todoResult" data-spl-attr="textContent" style="margin-top:0.5rem;font-size:0.8rem;white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:0.75rem;border-radius:6px;border:1px solid #e2e8f0;">${todoResult}</pre>
+  }
+
+  @// Filters (@switch/@case)
+  @render("Card",{"heading":"Filters","sectionLabel":"Built-in Pipes"}) {
+    <table style="width:100%;font-size:0.85rem;">
+      <thead><tr><th>Filter</th><th>Input</th><th>Output</th></tr></thead>
+      <tbody>
+        <tr><td><code>upper</code></td><td>hello world</td><td>${"hello world"|upper}</td></tr>
+        <tr><td><code>title</code></td><td>hello world</td><td>${"hello world"|title}</td></tr>
+        <tr><td><code>slug</code></td><td>Hello World!</td><td>${"Hello World!"|slug}</td></tr>
+        <tr><td><code>truncate</code></td><td>A long sentence</td><td>${"A long sentence that gets cut off after 10 chars"|truncate 10 "..."}</td></tr>
+        <tr><td><code>urlencode</code></td><td>spl template</td><td>${"spl template"|urlencode}</td></tr>
+        <tr><td><code>length</code></td><td>list length</td><td>${priorities|length}</td></tr>
+        <tr><td><code>replace</code></td><td>foo-bar</td><td>${"foo-bar"|replace "-" " "}</td></tr>
+      </tbody>
+    </table>
+  }
+
+  @// @switch/@case
+  @render("Card",{"heading":"@switch/@case","sectionLabel":"Multi-way Branching"}) {
+    @let(status="shipped")
+    <p>Order status: <code>${status}</code></p>
+    @switch(status){@case("pending"){<span class="badge" style="background:#f59e0b;color:white;">Pending</span>}@case("shipped","in_transit"){<span class="badge" style="background:#3b82f6;color:white;">In Transit</span>}@case("delivered"){<span class="badge" style="background:#22c55e;color:white;">Delivered</span>}@default{<span class="badge">Unknown</span>}}
+  }
+
+  @// @watch — change detection
+  @render("Card",{"heading":"@watch","sectionLabel":"Change Detection (Group List)"}) {
+    @let(team = [{"dept":"Engineering","name":"Alice"},{"dept":"Engineering","name":"Bob"},{"dept":"Design","name":"Carol"},{"dept":"Design","name":"Dave"},{"dept":"QA","name":"Eve"}])
+    <p style="font-size:0.8rem;color:#64748b;margin-bottom:0.5rem;">${"@"}watch renders only when the watched value changes — ideal for group headers in sorted lists:</p>
+    @for(m in team) {
+      @watch(m.dept) { <div style="font-size:0.7rem;font-weight:700;color:#3b82f6;text-transform:uppercase;letter-spacing:0.08em;margin:0.5rem 0 0.25rem;padding:0.15rem 0.4rem;background:#eff6ff;border-radius:4px;">${m.dept}</div> }
+      <span style="display:inline-block;padding:0.2rem 0.6rem;background:#f8fafc;border-radius:4px;margin:0.1rem;font-size:0.85rem;">${m.name}</span>
+    }
+  }
+
+  @// @for with @empty
+  @render("Card",{"heading":"@for with @empty","sectionLabel":"Loop Fallback"}) {
+    <strong>Items:</strong>
+    <ul>@for(i,item in ["apples","bread","cheese"]){<li>#${i+1}: ${item|title} (first=${loop.first}, last=${loop.last})</li>}</ul>
+    <strong>Empty list:</strong>
+    @for(x in []){<li>${x}</li>}@empty{<p style="color:#64748b;font-style:italic;">This list is empty.</p>}
+  }
+
+  @// @lazy/@fallback
+  @render("Card",{"heading":"@lazy/@fallback","sectionLabel":"Conditional Rendering"}) {
+    @for(item in [{"name":"Signals","ready":true},{"name":"Streaming","ready":false},{"name":"Hot reload","ready":true}]) {
+      <div style="display:flex;align-items:center;gap:0.5rem;padding:0.25rem 0;font-size:0.85rem;"><span>${item.name}:</span>@lazy(item.ready){<span class="badge" style="background:#22c55e;color:white;">Ready</span>}@fallback{<span class="badge" style="background:#94a3b8;color:white;">Pending</span>}</div>
+    }
+  }
+
+  @// Auto-escaping
+  @render("Card",{"heading":"Auto-Escaping","sectionLabel":"XSS Prevention"}) {
+    @let(dangerous = "<strong>unsafe markup</strong>")
+    <p style="font-size:0.85rem;">Escaped (safe): <code>${dangerous}</code></p>
+  }
+
+  @// Named slots (@slot/@fill)
+  @component("Panel"){<div style="border:1px solid #d1d5db;border-radius:8px;overflow:hidden;margin:0.5rem 0;"><div style="background:#f1f5f9;padding:0.5rem 0.75rem;font-weight:600;border-bottom:1px solid #d1d5db;font-size:0.85rem;">@slot("header")</div><div style="padding:0.75rem;font-size:0.85rem;">@slot</div><div style="background:#f8fafc;padding:0.4rem 0.75rem;font-size:0.75rem;color:#64748b;border-top:1px solid #e2e8f0;">@slot("footer")</div></div>}
+  @render("Card",{"heading":"Named Slots","sectionLabel":"@slot/@fill"}) {
+    @render("Panel"){@fill("header"){User Profile}<p><strong>Name:</strong> Alice &mdash; <strong>Role:</strong> Admin</p>@fill("footer"){Last login: 2 hours ago}}
+    @render("Panel"){@fill("header"){System Status}<p style="color:#059669;">All systems operational.</p>@fill("footer"){Updated just now}}
+  }
+
+  @// Prop aliases & defaults
+  @component("InfoCard",title as heading="Untitled",subtitle="No description",color="#3b82f6"){<div style="border:2px solid ${color};border-radius:8px;padding:0.75rem;margin:0.35rem 0;"><h4 style="margin:0 0 0.25rem;color:${color};font-size:0.9rem;">${heading}</h4><p style="margin:0;color:#64748b;font-size:0.85rem;">${subtitle}</p></div>}
+  @render("Card",{"heading":"Prop Aliases & Defaults","sectionLabel":"title as heading = \"Untitled\""}) {
+    @render("InfoCard",{"title":"Custom Card","subtitle":"All props set","color":"#ef4444"})
+    @render("InfoCard",{"title":"Partial Props"})
+    @render("InfoCard")
+  }
+</div>
+
+@// === Submission Summary ===
+@if(submitted) {
+  <div class="card" style="background:#f0fdf4;border-color:#86efac;margin-top:0.35rem;">
+    <div class="section-label" style="color:#166534;">Submission Summary</div>
+    @reactive(personal,prefs,sliders,rating,extras) {
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:0.3rem 1.25rem;font-size:0.8rem;">
+        <strong>Name:</strong><span>${personal.firstName} ${personal.lastName}</span>
+        <strong>Email:</strong><span>${personal.email}</span>
+        <strong>Age:</strong><span>${personal.age}</span>
+        <strong>Phone:</strong><span>${personal.phone}</span>
+        <strong>Role:</strong><span>${prefs.role}</span>
+        <strong>Priority:</strong><span style="text-transform:uppercase">${prefs.priority}</span>
+        <strong>Rating:</strong><span>${rating}/5</span>
+        <strong>Experience:</strong><span>${sliders.experience}%</span>
+        <strong>Favorite Color:</strong><span style="display:flex;align-items:center;gap:0.4rem;"><span style="width:0.85rem;height:0.85rem;border-radius:50%;display:inline-block;background:${extras.favColor};border:1px solid #d1d5db;"></span>${extras.favColor}</span>
+      </div>
+    }
+    <button on:click="submitted=false" style="margin-top:0.5rem;padding:0.5rem 1.25rem;border-radius:0.375rem;border:1px solid #86efac;background:white;color:#166534;cursor:pointer;">Dismiss</button>
+  </div>
+} @else {
+  <div class="card" style="margin-top:0.35rem;">
+    <div class="section-label">Submission Summary</div>
+    <p style="font-size:0.8rem;color:#64748b;">Fill out the forms and click Submit to see a summary.</p>
+  </div>
+}

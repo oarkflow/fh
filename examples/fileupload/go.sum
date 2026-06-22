@@ -1,0 +1,4 @@
+github.com/oarkflow/interpreter v0.0.12 h1:iPCGp2/RDbdQRv+Q5yW8JaCEvXkmcmZkw3UiD7dcRps=
+github.com/oarkflow/interpreter v0.0.12/go.mod h1:sCqr8DQOh7zIjAmim7WtVygk79nxmpT0l0b8F5ZUmfI=
+github.com/oarkflow/spl v0.0.7 h1:zxwqtkReZ3vqsfp1tBCD7wu5/kIYsO/inMcObW5rCKI=
+github.com/oarkflow/spl v0.0.7/go.mod h1:af4auQeIB36unk6aDHf0txCvj2TCb2xRmly7faIsqg8=

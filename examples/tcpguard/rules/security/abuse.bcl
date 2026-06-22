@@ -1,0 +1,334 @@
+rule "account-takeover-abuse" {
+  name "Challenge account takeover abuse signals"
+  status active
+  priority 940
+
+  trigger {
+    on request.received
+    on auth.login_success
+  }
+
+  when {
+    abuse.signals.account_takeover_score greater_or_equal 2
+  }
+
+  risk {
+    base 85
+    max 95
+  }
+
+  severity {
+    high when risk.score greater_or_equal 75
+  }
+
+  actions {
+    high {
+      run mfa_challenge
+      run notify_soc
+    }
+  }
+}
+
+rule "auth-abuse-velocity" {
+  name "Block credential stuffing and password spray"
+  status active
+  priority 930
+
+  trigger {
+    on auth.login_failed
+  }
+
+  when {
+    any {
+      abuse.auth.ip_failures greater_or_equal 3
+      abuse.auth.user_failures greater_or_equal 3
+      abuse.auth.distinct_users greater_or_equal 3
+      abuse.enumeration.distinct_users greater_or_equal 3
+    }
+  }
+
+  risk {
+    base 92
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 90
+  }
+
+  actions {
+    critical {
+      run block
+      run create_incident
+      run notify_soc
+    }
+  }
+}
+
+rule "application-attack-probe" {
+  name "Block application attack probes"
+  status active
+  priority 925
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    any {
+      abuse.application.path_traversal equals true
+      abuse.application.injection_probe equals true
+      abuse.application.ssrf_probe equals true
+    }
+  }
+
+  risk {
+    base 90
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 90
+  }
+
+  actions {
+    critical {
+      run block
+      run create_incident
+      run notify_soc
+    }
+  }
+}
+
+rule "api-key-sharing-abuse" {
+  name "Challenge API key use from many IPs"
+  status active
+  priority 720
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    any {
+      abuse.api_key.distinct_ips greater_or_equal 2
+      abuse.api_key.distinct_users greater_or_equal 2
+    }
+  }
+
+  risk {
+    base 78
+    max 89
+  }
+
+  severity {
+    high when risk.score greater_or_equal 75
+  }
+
+  actions {
+    high {
+      run mfa_challenge
+      run notify_soc
+    }
+  }
+}
+
+rule "api-client-rotation-abuse" {
+  name "Throttle API client rotation and tenant fan-out"
+  status active
+  priority 715
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    any {
+      abuse.client.distinct_user_agents greater_or_equal 3
+      abuse.tenant.distinct_users greater_or_equal 4
+    }
+  }
+
+  risk {
+    base 72
+    max 85
+  }
+
+  severity {
+    medium when risk.score greater_or_equal 50
+  }
+
+  actions {
+    medium {
+      run throttle
+      run notify_soc
+    }
+  }
+}
+
+rule "endpoint-scanning-abuse" {
+  name "Throttle endpoint scanning"
+  status active
+  priority 710
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    abuse.scan.distinct_paths greater_or_equal 4
+  }
+
+  risk {
+    base 70
+    max 80
+  }
+
+  severity {
+    medium when risk.score greater_or_equal 50
+  }
+
+  actions {
+    medium {
+      run throttle
+      run notify_soc
+    }
+  }
+}
+
+rule "function-invocation-abuse" {
+  name "Throttle function invocation abuse"
+  status active
+  priority 705
+
+  trigger {
+    on request.received
+    on function.invoked
+  }
+
+  when {
+    any {
+      abuse.fn.invocations greater_or_equal 3
+      abuse.fn.errors greater_or_equal 3
+    }
+  }
+
+  risk {
+    base 72
+    max 90
+  }
+
+  severity {
+    medium when risk.score greater_or_equal 50
+    high when risk.score greater_or_equal 75
+  }
+
+  actions {
+    medium {
+      run throttle
+      run notify_soc
+    }
+    high {
+      run mfa_challenge
+      run notify_soc
+    }
+  }
+}
+
+rule "data-export-abuse" {
+  name "Block repeated data exports"
+  status active
+  priority 700
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    any {
+      abuse.data_export.count greater_or_equal 2
+      abuse.data_export.large_body equals true
+    }
+  }
+
+  risk {
+    base 90
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 90
+  }
+
+  actions {
+    critical {
+      run block
+      run create_incident
+      run notify_soc
+    }
+  }
+}
+
+rule "destructive-admin-abuse" {
+  name "Challenge destructive admin abuse"
+  status active
+  priority 695
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    abuse.admin.destructive equals true
+  }
+
+  risk {
+    base 86
+    max 95
+  }
+
+  severity {
+    high when risk.score greater_or_equal 75
+  }
+
+  actions {
+    high {
+      run mfa_challenge
+      run notify_soc
+    }
+  }
+}
+
+rule "payment-velocity-abuse" {
+  name "Block payment velocity abuse"
+  status active
+  priority 690
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    any {
+      abuse.payment.user_amount greater_or_equal 200000
+      abuse.payment.tenant_amount greater_or_equal 500000
+    }
+  }
+
+  risk {
+    base 92
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 90
+  }
+
+  actions {
+    critical {
+      run block
+      run create_incident
+      run notify_soc
+    }
+  }
+}

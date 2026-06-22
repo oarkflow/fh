@@ -1,0 +1,122 @@
+rule "admin-after-hours-department-check" {
+  name "Challenge after-hours admin activity outside the security department"
+  status active
+  priority 800
+  authz_policy "allow-admin-routes"
+
+  scope {
+    roles ["admin", "super_admin"]
+    paths ["/admin/*"]
+  }
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    any {
+      business.outside_hours equals true
+      user.department not_equals "security"
+    }
+  }
+
+  risk {
+    base 75
+    add 15 when session.device.new equals true
+    max 89
+  }
+
+  severity {
+    high when risk.score greater_or_equal 75
+  }
+
+  actions {
+    high {
+      run mfa_challenge
+      run notify_admin
+    }
+  }
+
+  approval {
+    required true
+    approvers ["security-admin", "platform-owner"]
+  }
+}
+
+rule "sensitive-export" {
+  name "Challenge high-sensitivity report exports"
+  status active
+  priority 750
+  authz_policy "allow-export-routes"
+
+  scope {
+    paths ["/api/v1/reports/export"]
+  }
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    all {
+      business.action equals "report.export"
+      business.sensitivity equals "high"
+    }
+  }
+
+  risk {
+    base 80
+    max 89
+  }
+
+  severity {
+    high when risk.score greater_or_equal 75
+  }
+
+  actions {
+    high {
+      run mfa_challenge
+      run notify_admin
+    }
+  }
+}
+
+rule "dynamic-order-change" {
+  name "Challenge sensitive order changes with dynamic route parameters"
+  status active
+  priority 700
+  authz_policy "allow-own-order-route-or-admin"
+
+  scope {
+    roles ["member", "admin"]
+    paths ["/api/users/:id/order/:order_id"]
+  }
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    all {
+      request.path matches "/api/users/:id/order/:order_id"
+      request.method in ["PUT", "PATCH", "DELETE"]
+      user.id not_equals request.params.id
+    }
+  }
+
+  risk {
+    base 78
+    max 89
+  }
+
+  severity {
+    high when risk.score greater_or_equal 75
+  }
+
+  actions {
+    high {
+      run mfa_challenge
+      run notify_admin
+    }
+  }
+}

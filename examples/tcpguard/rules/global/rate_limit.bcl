@@ -1,0 +1,34 @@
+rule "demo-rate-limit" {
+  name "Demo per-IP rate limit"
+  status active
+  priority 900
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    rate.ip.requests greater_than 3
+  }
+
+  risk {
+    base 55
+    max 70
+  }
+
+  severity {
+    medium when risk.score greater_or_equal 50
+  }
+
+  actions {
+    medium {
+      run throttle
+      run audit
+    }
+  }
+
+  cooldown {
+    key network.ip
+    duration 5s
+  }
+}
