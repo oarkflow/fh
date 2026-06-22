@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -55,6 +56,37 @@ type JobResult struct {
 	FinishedAt time.Time `json:"finished_at"`
 }
 
+type BrokerEvent struct {
+	ID         string         `json:"id"`
+	At         time.Time      `json:"at"`
+	Component  string         `json:"component"`
+	Event      string         `json:"event"`
+	Queue      string         `json:"queue,omitempty"`
+	ConsumerID string         `json:"consumer_id,omitempty"`
+	JobID      string         `json:"job_id,omitempty"`
+	TaskID     string         `json:"task_id,omitempty"`
+	WorkflowID string         `json:"workflow_id,omitempty"`
+	NodeID     string         `json:"node_id,omitempty"`
+	Attempt    int            `json:"attempt,omitempty"`
+	Status     string         `json:"status,omitempty"`
+	Message    string         `json:"message,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	Data       map[string]any `json:"data,omitempty"`
+}
+
+type BrokerDiagnostics struct {
+	Kind          string              `json:"kind"`
+	Queues        []QueueInfo         `json:"queues"`
+	Consumers     []QueueConsumerInfo `json:"consumers"`
+	RecentEvents  []BrokerEvent       `json:"recent_events"`
+	ConsumerCount int                 `json:"consumer_count"`
+	QueueCount    int                 `json:"queue_count"`
+}
+
+type ObservableBroker interface {
+	BrokerEvents(limit int) []BrokerEvent
+}
+
 type Broker interface {
 	Publish(context.Context, Job) error
 	Subscribe(context.Context, string) (<-chan Job, error)
@@ -94,28 +126,39 @@ type QueueConsumerConfig struct {
 }
 
 type QueueInfo struct {
-	ID          string `json:"id"`
-	Capacity    int    `json:"capacity"`
-	Depth       int    `json:"depth"`
-	Published   int64  `json:"published"`
-	Acked       int64  `json:"acked"`
-	Nacked      int64  `json:"nacked"`
-	Completed   int64  `json:"completed"`
-	Consumers   int    `json:"consumers"`
-	MaxAttempts int    `json:"max_attempts,omitempty"`
-	DLQ         string `json:"dlq,omitempty"`
+	ID          string        `json:"id"`
+	Capacity    int           `json:"capacity"`
+	Depth       int           `json:"depth"`
+	Published   int64         `json:"published"`
+	Acked       int64         `json:"acked"`
+	Nacked      int64         `json:"nacked"`
+	Completed   int64         `json:"completed"`
+	Consumers   int           `json:"consumers"`
+	InFlight    int64         `json:"in_flight,omitempty"`
+	Retried     int64         `json:"retried,omitempty"`
+	Dead        int64         `json:"dead,omitempty"`
+	OldestAge   time.Duration `json:"oldest_age,omitempty"`
+	MaxAttempts int           `json:"max_attempts,omitempty"`
+	DLQ         string        `json:"dlq,omitempty"`
 }
 
 type QueueConsumerInfo struct {
-	ID          string         `json:"id"`
-	Queue       string         `json:"queue"`
-	Workflow    string         `json:"workflow,omitempty"`
-	Concurrency int            `json:"concurrency"`
-	Status      ConsumerStatus `json:"status"`
-	StartedAt   time.Time      `json:"started_at,omitempty"`
-	UpdatedAt   time.Time      `json:"updated_at,omitempty"`
-	Processed   int64          `json:"processed"`
-	Failed      int64          `json:"failed"`
+	ID            string         `json:"id"`
+	Queue         string         `json:"queue"`
+	Workflow      string         `json:"workflow,omitempty"`
+	Concurrency   int            `json:"concurrency"`
+	Status        ConsumerStatus `json:"status"`
+	StartedAt     time.Time      `json:"started_at,omitempty"`
+	UpdatedAt     time.Time      `json:"updated_at,omitempty"`
+	LastHeartbeat time.Time      `json:"last_heartbeat,omitempty"`
+	LastJobAt     time.Time      `json:"last_job_at,omitempty"`
+	Processed     int64          `json:"processed"`
+	Failed        int64          `json:"failed"`
+	InFlight      int64          `json:"in_flight"`
+	Workers       int            `json:"workers"`
+	LastJobID     string         `json:"last_job_id,omitempty"`
+	LastError     string         `json:"last_error,omitempty"`
+	LastEvent     string         `json:"last_event,omitempty"`
 }
 
 type memoryQueue struct {
@@ -125,6 +168,8 @@ type memoryQueue struct {
 	acked     int64
 	nacked    int64
 	completed int64
+	retried   int64
+	dead      int64
 }
 
 type memoryConsumer struct {
@@ -139,10 +184,50 @@ type MemoryBroker struct {
 	results   map[string]JobResult
 	consumers map[string]*memoryConsumer
 	jobQueues map[string]string
+	events    []BrokerEvent
+	eventSeq  int64
 }
 
 func NewMemoryBroker() *MemoryBroker {
 	return &MemoryBroker{queues: map[string]*memoryQueue{}, waiters: map[string][]chan JobResult{}, results: map[string]JobResult{}, consumers: map[string]*memoryConsumer{}, jobQueues: map[string]string{}}
+}
+
+func (b *MemoryBroker) record(event BrokerEvent) {
+	if event.At.IsZero() {
+		event.At = time.Now()
+	}
+	if event.ID == "" {
+		b.eventSeq++
+		event.ID = fmt.Sprintf("broker_evt_%d", b.eventSeq)
+	}
+	if event.Component == "" {
+		event.Component = "memory_broker"
+	}
+	b.events = append(b.events, event)
+	if len(b.events) > 1000 {
+		copy(b.events, b.events[len(b.events)-1000:])
+		b.events = b.events[:1000]
+	}
+	if event.Error != "" {
+		log.Printf("dagflow broker component=%s event=%s queue=%s consumer=%s job=%s task=%s workflow=%s node=%s attempt=%d error=%q message=%q", event.Component, event.Event, event.Queue, event.ConsumerID, event.JobID, event.TaskID, event.WorkflowID, event.NodeID, event.Attempt, event.Error, event.Message)
+		return
+	}
+	log.Printf("dagflow broker component=%s event=%s queue=%s consumer=%s job=%s task=%s workflow=%s node=%s attempt=%d status=%s message=%q", event.Component, event.Event, event.Queue, event.ConsumerID, event.JobID, event.TaskID, event.WorkflowID, event.NodeID, event.Attempt, event.Status, event.Message)
+}
+
+func (b *MemoryBroker) BrokerEvents(limit int) []BrokerEvent {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if limit <= 0 || limit > len(b.events) {
+		limit = len(b.events)
+	}
+	out := make([]BrokerEvent, 0, limit)
+	for i := len(b.events) - limit; i < len(b.events); i++ {
+		if i >= 0 {
+			out = append(out, b.events[i])
+		}
+	}
+	return out
 }
 
 func (b *MemoryBroker) EnsureQueue(cfg QueueConfig) error {
@@ -168,6 +253,7 @@ func (b *MemoryBroker) EnsureQueue(cfg QueueConfig) error {
 		capv = 4096
 	}
 	b.queues[cfg.ID] = &memoryQueue{cfg: QueueConfig{ID: cfg.ID, Capacity: capv, MaxAttempts: cfg.MaxAttempts, VisibilityTimeout: cfg.VisibilityTimeout, DLQ: cfg.DLQ}, jobs: make(chan Job, capv)}
+	b.record(BrokerEvent{Event: "queue.ensure", Queue: cfg.ID, Message: "queue ready", Data: map[string]any{"capacity": capv, "max_attempts": cfg.MaxAttempts, "dlq": cfg.DLQ}})
 	return nil
 }
 
@@ -213,6 +299,7 @@ func (b *MemoryBroker) PublishToQueue(ctx context.Context, queue string, j Job) 
 		b.mu.Lock()
 		q.published++
 		b.jobQueues[j.ID] = queue
+		b.record(BrokerEvent{Event: "job.published", Queue: queue, JobID: j.ID, TaskID: j.TaskID, WorkflowID: j.WorkflowID, NodeID: j.NodeID, Attempt: j.Attempt, Status: "queued", Message: "job published"})
 		b.mu.Unlock()
 		return nil
 	case <-ctx.Done():
@@ -225,7 +312,11 @@ func (b *MemoryBroker) Subscribe(ctx context.Context, workflowID string) (<-chan
 }
 
 func (b *MemoryBroker) SubscribeQueue(ctx context.Context, queue string) (<-chan Job, error) {
-	return b.getQueue(queue).jobs, nil
+	ch := b.getQueue(queue).jobs
+	b.mu.Lock()
+	b.record(BrokerEvent{Event: "queue.subscribe", Queue: queue, Message: "subscription opened"})
+	b.mu.Unlock()
+	return ch, nil
 }
 
 func (b *MemoryBroker) Ack(ctx context.Context, jobID string) error {
@@ -234,6 +325,7 @@ func (b *MemoryBroker) Ack(ctx context.Context, jobID string) error {
 	if queue := b.jobQueues[jobID]; queue != "" {
 		if q := b.queues[queue]; q != nil {
 			q.acked++
+			b.record(BrokerEvent{Event: "job.acked", Queue: queue, JobID: jobID, Status: "acked", Message: "job acknowledged"})
 		}
 	}
 	return nil
@@ -245,6 +337,7 @@ func (b *MemoryBroker) Nack(ctx context.Context, jobID string, err error) error 
 	if queue := b.jobQueues[jobID]; queue != "" {
 		if q := b.queues[queue]; q != nil {
 			q.nacked++
+			b.record(BrokerEvent{Event: "job.nacked", Queue: queue, JobID: jobID, Status: "nacked", Error: fmt.Sprint(err), Message: "job negatively acknowledged"})
 		}
 	}
 	return nil
@@ -259,6 +352,7 @@ func (b *MemoryBroker) Complete(ctx context.Context, r JobResult) error {
 	if r.Queue != "" {
 		if q := b.queues[r.Queue]; q != nil {
 			q.completed++
+			b.record(BrokerEvent{Event: "job.completed", Queue: r.Queue, JobID: r.JobID, TaskID: r.TaskID, WorkflowID: r.WorkflowID, NodeID: r.NodeID, Status: "completed", Error: r.Error, Message: "job result completed"})
 		}
 	}
 	b.mu.Unlock()
@@ -317,8 +411,10 @@ func (b *MemoryBroker) StartConsumer(ctx context.Context, cfg QueueConsumerConfi
 		return fmt.Errorf("consumer %s already running", cfg.ID)
 	}
 	cctx, cancel := context.WithCancel(ctx)
-	mc := &memoryConsumer{info: QueueConsumerInfo{ID: cfg.ID, Queue: cfg.Queue, Workflow: cfg.Workflow, Concurrency: cfg.Concurrency, Status: ConsumerRunning, StartedAt: time.Now(), UpdatedAt: time.Now()}, cancel: cancel}
+	now := time.Now()
+	mc := &memoryConsumer{info: QueueConsumerInfo{ID: cfg.ID, Queue: cfg.Queue, Workflow: cfg.Workflow, Concurrency: cfg.Concurrency, Status: ConsumerRunning, StartedAt: now, UpdatedAt: now, LastHeartbeat: now, Workers: cfg.Concurrency, LastEvent: "started"}, cancel: cancel}
 	b.consumers[cfg.ID] = mc
+	b.record(BrokerEvent{Event: "consumer.started", Queue: cfg.Queue, ConsumerID: cfg.ID, WorkflowID: cfg.Workflow, Status: string(ConsumerRunning), Message: "consumer started", Data: map[string]any{"concurrency": cfg.Concurrency}})
 	jobs := queue.jobs
 	b.mu.Unlock()
 	for i := 0; i < cfg.Concurrency; i++ {
@@ -328,10 +424,15 @@ func (b *MemoryBroker) StartConsumer(ctx context.Context, cfg QueueConsumerConfi
 }
 
 func (b *MemoryBroker) consumerLoop(ctx context.Context, id string, jobs <-chan Job, handler QueueConsumerHandler) {
+	b.consumerEvent(id, "consumer.worker.started", "worker loop started", nil)
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 	defer func() {
 		if r := recover(); r != nil {
 			b.bumpConsumer(id, false)
+			b.consumerEvent(id, "consumer.worker.panic", "worker loop panic", fmt.Errorf("%v", r))
 		}
+		b.consumerEvent(id, "consumer.worker.stopped", "worker loop stopped", nil)
 	}()
 	for {
 		select {
@@ -357,10 +458,14 @@ func (b *MemoryBroker) consumerLoop(ctx context.Context, id string, jobs <-chan 
 			}
 		}
 		select {
+		case <-heartbeat.C:
+			b.consumerHeartbeat(id)
 		case job, ok := <-jobs:
 			if !ok {
+				b.consumerEvent(id, "consumer.queue.closed", "job channel closed", nil)
 				return
 			}
+			b.consumerJobStarted(id, job)
 			jr := safeHandleJob(ctx, handler, job)
 			if jr.Queue == "" {
 				jr.Queue = job.Queue
@@ -368,6 +473,7 @@ func (b *MemoryBroker) consumerLoop(ctx context.Context, id string, jobs <-chan 
 			if jr.Error != "" {
 				terminal := b.nackJob(ctx, job, errors.New(jr.Error))
 				b.bumpConsumer(id, false)
+				b.consumerJobFinished(id, job, jr)
 				if terminal {
 					_ = b.Complete(ctx, jr)
 				}
@@ -375,6 +481,7 @@ func (b *MemoryBroker) consumerLoop(ctx context.Context, id string, jobs <-chan 
 			}
 			_ = b.Ack(ctx, job.ID)
 			b.bumpConsumer(id, true)
+			b.consumerJobFinished(id, job, jr)
 			_ = b.Complete(ctx, jr)
 		case <-ctx.Done():
 			return
@@ -452,16 +559,25 @@ func (b *MemoryBroker) nackJob(ctx context.Context, job Job, err error) bool {
 		go func() {
 			t := time.NewTimer(time.Until(retry.AvailableAt))
 			defer t.Stop()
-			select {
-			case <-t.C:
-				_ = b.PublishToQueue(context.Background(), retry.Queue, retry)
-			case <-ctx.Done():
-			}
+			<-t.C
+			_ = b.PublishToQueue(context.Background(), retry.Queue, retry)
 		}()
+		b.mu.Lock()
+		if q := b.queues[job.Queue]; q != nil {
+			q.retried++
+		}
+		b.record(BrokerEvent{Event: "job.retry.scheduled", Queue: job.Queue, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: retry.Attempt, Status: "retry", Error: fmt.Sprint(err), Message: "job retry scheduled", Data: map[string]any{"available_at": retry.AvailableAt}})
+		b.mu.Unlock()
 		_ = b.Nack(ctx, job.ID, err)
 		return false
 	}
 	_ = b.Nack(ctx, job.ID, err)
+	b.mu.Lock()
+	if q := b.queues[job.Queue]; q != nil {
+		q.dead++
+	}
+	b.record(BrokerEvent{Event: "job.dead", Queue: job.Queue, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: "dead", Error: fmt.Sprint(err), Message: "job reached terminal failure"})
+	b.mu.Unlock()
 	if cfg.DLQ != "" {
 		dlq := job
 		dlq.ID = newID("job")
@@ -482,6 +598,79 @@ func (b *MemoryBroker) bumpConsumer(id string, ok bool) {
 			c.info.Failed++
 		}
 		c.info.UpdatedAt = time.Now()
+		c.info.LastHeartbeat = c.info.UpdatedAt
+	}
+}
+
+func (b *MemoryBroker) consumerHeartbeat(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if c := b.consumers[id]; c != nil {
+		c.info.LastHeartbeat = time.Now()
+		c.info.UpdatedAt = c.info.LastHeartbeat
+		c.info.LastEvent = "heartbeat"
+		b.record(BrokerEvent{Event: "consumer.heartbeat", Queue: c.info.Queue, ConsumerID: id, WorkflowID: c.info.Workflow, Status: string(c.info.Status), Message: "consumer heartbeat"})
+	}
+}
+
+func (b *MemoryBroker) consumerEvent(id, event, message string, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var be BrokerEvent
+	be.Event = event
+	be.ConsumerID = id
+	be.Message = message
+	if err != nil {
+		be.Error = err.Error()
+	}
+	if c := b.consumers[id]; c != nil {
+		c.info.LastHeartbeat = time.Now()
+		c.info.UpdatedAt = c.info.LastHeartbeat
+		c.info.LastEvent = event
+		if err != nil {
+			c.info.LastError = err.Error()
+		}
+		be.Queue = c.info.Queue
+		be.WorkflowID = c.info.Workflow
+		be.Status = string(c.info.Status)
+	}
+	b.record(be)
+}
+
+func (b *MemoryBroker) consumerJobStarted(id string, job Job) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if c := b.consumers[id]; c != nil {
+		now := time.Now()
+		c.info.InFlight++
+		c.info.LastHeartbeat = now
+		c.info.UpdatedAt = now
+		c.info.LastJobAt = now
+		c.info.LastJobID = job.ID
+		c.info.LastEvent = "job.started"
+		b.record(BrokerEvent{Event: "consumer.job.started", Queue: c.info.Queue, ConsumerID: id, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: "running", Message: "consumer picked job"})
+	}
+}
+
+func (b *MemoryBroker) consumerJobFinished(id string, job Job, jr JobResult) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if c := b.consumers[id]; c != nil {
+		now := time.Now()
+		if c.info.InFlight > 0 {
+			c.info.InFlight--
+		}
+		c.info.LastHeartbeat = now
+		c.info.UpdatedAt = now
+		c.info.LastJobAt = now
+		c.info.LastJobID = job.ID
+		c.info.LastEvent = "job.finished"
+		status := "succeeded"
+		if jr.Error != "" {
+			status = "failed"
+			c.info.LastError = jr.Error
+		}
+		b.record(BrokerEvent{Event: "consumer.job.finished", Queue: c.info.Queue, ConsumerID: id, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: status, Error: jr.Error, Message: "consumer finished job"})
 	}
 }
 
@@ -497,6 +686,8 @@ func (b *MemoryBroker) PauseConsumer(id string) error {
 	}
 	c.info.Status = ConsumerPaused
 	c.info.UpdatedAt = time.Now()
+	c.info.LastEvent = "paused"
+	b.record(BrokerEvent{Event: "consumer.paused", Queue: c.info.Queue, ConsumerID: id, WorkflowID: c.info.Workflow, Status: string(c.info.Status), Message: "consumer paused"})
 	return nil
 }
 
@@ -512,6 +703,8 @@ func (b *MemoryBroker) ResumeConsumer(id string) error {
 	}
 	c.info.Status = ConsumerRunning
 	c.info.UpdatedAt = time.Now()
+	c.info.LastEvent = "resumed"
+	b.record(BrokerEvent{Event: "consumer.resumed", Queue: c.info.Queue, ConsumerID: id, WorkflowID: c.info.Workflow, Status: string(c.info.Status), Message: "consumer resumed"})
 	return nil
 }
 
@@ -527,6 +720,8 @@ func (b *MemoryBroker) StopConsumer(id string) error {
 	}
 	c.info.Status = ConsumerStopped
 	c.info.UpdatedAt = time.Now()
+	c.info.LastEvent = "stopped"
+	b.record(BrokerEvent{Event: "consumer.stopped", Queue: c.info.Queue, ConsumerID: id, WorkflowID: c.info.Workflow, Status: string(c.info.Status), Message: "consumer stopped"})
 	return nil
 }
 
@@ -551,7 +746,7 @@ func (b *MemoryBroker) ListQueues() []QueueInfo {
 				consumers++
 			}
 		}
-		out = append(out, QueueInfo{ID: q.cfg.ID, Capacity: cap(q.jobs), Depth: len(q.jobs), Published: q.published, Acked: q.acked, Nacked: q.nacked, Completed: q.completed, Consumers: consumers, MaxAttempts: q.cfg.MaxAttempts, DLQ: q.cfg.DLQ})
+		out = append(out, QueueInfo{ID: q.cfg.ID, Capacity: cap(q.jobs), Depth: len(q.jobs), Published: q.published, Acked: q.acked, Nacked: q.nacked, Completed: q.completed, Consumers: consumers, Retried: q.retried, Dead: q.dead, MaxAttempts: q.cfg.MaxAttempts, DLQ: q.cfg.DLQ})
 	}
 	return out
 }
@@ -658,6 +853,9 @@ func (e *Engine) executeJob(ctx context.Context, job Job) JobResult {
 	jr := JobResult{JobID: job.ID, Queue: job.Queue, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Result: res, StartedAt: started, FinishedAt: time.Now()}
 	if err != nil {
 		jr.Error = err.Error()
+		log.Printf("dagflow queue node job failed queue=%s job=%s task=%s workflow=%s node=%s error=%v", job.Queue, job.ID, job.TaskID, job.WorkflowID, job.NodeID, err)
+	} else {
+		log.Printf("dagflow queue node job completed queue=%s job=%s task=%s workflow=%s node=%s", job.Queue, job.ID, job.TaskID, job.WorkflowID, job.NodeID)
 	}
 	if s, ok := e.store.(ExtendedStore); ok && leaseID != "" {
 		_ = s.DeleteLease(leaseID)
@@ -666,6 +864,7 @@ func (e *Engine) executeJob(ctx context.Context, job Job) JobResult {
 }
 
 func (e *Engine) executeWorkflowQueueJob(ctx context.Context, job Job) JobResult {
+	log.Printf("dagflow queue workflow job starting queue=%s job=%s task=%s workflow=%s attempt=%d", job.Queue, job.ID, job.TaskID, job.WorkflowID, job.Attempt)
 	unlock := e.lockTask(job.TaskID)
 	defer unlock()
 	started := time.Now()
@@ -694,6 +893,9 @@ func (e *Engine) executeWorkflowQueueJob(ctx context.Context, job Job) JobResult
 	e.finishTask(task, err)
 	if err != nil {
 		jr.Error = err.Error()
+		log.Printf("dagflow queue workflow job failed queue=%s job=%s task=%s workflow=%s error=%v", job.Queue, job.ID, job.TaskID, job.WorkflowID, err)
+	} else {
+		log.Printf("dagflow queue workflow job completed queue=%s job=%s task=%s workflow=%s status=%s", job.Queue, job.ID, job.TaskID, job.WorkflowID, task.Status)
 	}
 	jr.Result = task.Result
 	jr.FinishedAt = time.Now()

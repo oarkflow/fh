@@ -135,6 +135,9 @@ func RegisterOperations(app *fh.App, engine *Engine, cfg *Config, bclRoot ...str
 	app.Get("/openapi.json", opsOpenAPI(cfg))
 	app.Get("/metrics", opsMetrics(engine))
 	app.Get("/ops/metadata", opsGuard(opsMetadata(engine, cfg)))
+	app.Get("/ops/diagnostics", opsGuard(opsDiagnostics(engine)))
+	app.Get("/ops/broker", opsGuard(opsBrokerDiagnostics(engine)))
+	app.Get("/ops/broker/events", opsGuard(opsBrokerEvents(engine)))
 	root := DefaultBCLPath()
 	if len(bclRoot) > 0 && bclRoot[0] != "" {
 		root = bclRoot[0]
@@ -394,6 +397,47 @@ func ExitOnCLIError(err error) {
 		log.Fatal(err)
 	}
 	_ = os.Stdout
+}
+
+func opsDiagnostics(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		limit := atoiDefault(c.Query("events"), 200)
+		return writeJSON(c, fh.StatusOK, engine.Diagnostics(c.Context(), limit))
+	}
+}
+
+func opsBrokerDiagnostics(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		limit := atoiDefault(c.Query("events"), 200)
+		return writeJSON(c, fh.StatusOK, engine.BrokerDiagnostics(limit))
+	}
+}
+
+func opsBrokerEvents(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		limit := atoiDefault(c.Query("limit"), 200)
+		return writeJSON(c, fh.StatusOK, engine.BrokerEvents(limit))
+	}
+}
+
+func atoiDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	var n int
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return def
+		}
+		n = n*10 + int(s[i]-'0')
+		if n > 10000 {
+			return def
+		}
+	}
+	if n <= 0 {
+		return def
+	}
+	return n
 }
 
 func opsQueues(engine *Engine) fh.HandlerFunc {

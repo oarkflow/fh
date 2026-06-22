@@ -2269,3 +2269,39 @@ curl -X POST http://localhost:8080/ops/consumers/email_jobs_consumer/pause
 curl -X POST http://localhost:8080/ops/consumers/email_jobs_consumer/resume
 curl -X POST http://localhost:8080/ops/consumers/email_jobs_consumer/stop
 ```
+
+## Queue and background transparency
+
+The runtime now exposes queue, broker, consumer, and workflow-processing transparency by default. Every queue and consumer lifecycle transition is logged with a `dagflow broker` prefix, including queue creation, subscription, consumer start/stop/pause/resume, heartbeat, job publish, job pickup, job retry, job ack/nack, terminal failure, DLQ copy, and result completion.
+
+Useful operations endpoints:
+
+```bash
+# Full runtime picture: workflows, tasks by status, queues, consumers, metrics, health, warnings, recent broker events
+curl -H "X-API-Key: dev-secret" http://localhost:8080/ops/diagnostics
+
+# Broker-focused picture: queue stats, consumers, recent broker events
+curl -H "X-API-Key: dev-secret" http://localhost:8080/ops/broker
+
+# Recent queue/consumer/job timeline
+curl -H "X-API-Key: dev-secret" 'http://localhost:8080/ops/broker/events?limit=200'
+
+# Queue and consumer summaries
+curl -H "X-API-Key: dev-secret" http://localhost:8080/ops/queues
+curl -H "X-API-Key: dev-secret" http://localhost:8080/ops/consumers
+```
+
+When an enqueued task is not moving, check `/ops/diagnostics` first. It reports warnings such as `queue email_jobs has depth 3 but no running consumer` and stale consumer heartbeats. `/ops/broker/events` shows the exact timeline: publish → subscribe → consumer heartbeat → job picked → workflow started → job completed or retry scheduled.
+
+Expected log examples:
+
+```text
+dagflow engine starting workflows=... queues=... consumers=...
+dagflow queue configured id=email_jobs capacity=4096 max_attempts=3 dlq=email_jobs_dlq
+dagflow consumer starting id=email_jobs_consumer queue=email_jobs workflow=notification_approval_demo concurrency=4
+dagflow broker component=memory_broker event=consumer.started queue=email_jobs consumer=email_jobs_consumer ...
+dagflow queue enqueue accepted workflow=notification_approval_demo queue=email_jobs task=... job=...
+dagflow broker component=memory_broker event=consumer.job.started queue=email_jobs consumer=email_jobs_consumer job=...
+dagflow queue workflow job starting queue=email_jobs job=... task=... workflow=notification_approval_demo attempt=1
+dagflow queue workflow job completed queue=email_jobs job=... task=... workflow=notification_approval_demo status=completed
+```

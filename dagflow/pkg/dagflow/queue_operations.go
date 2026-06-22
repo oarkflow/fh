@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -33,6 +34,7 @@ func (e *Engine) EnqueueWorkflow(ctx context.Context, workflowID string, input a
 	task.WorkflowVersion = wf.Version
 	task.DefinitionHash = wf.Hash
 	e.metrics.Inc("workflow_enqueued_total")
+	log.Printf("dagflow queue enqueue requested workflow=%s queue=%s await=%v", workflowID, queue, opts.Await)
 	e.audit(task, "queue.task.enqueued", "workflow task enqueued", map[string]any{"queue": queue, "input": Redact(input)})
 	if err := e.applyTaskRules(ctx, wf, task, nil, "task.created", input); err != nil {
 		e.finishTask(task, err)
@@ -49,14 +51,18 @@ func (e *Engine) EnqueueWorkflow(ctx context.Context, workflowID string, input a
 	}
 	if mb, ok := e.broker.(ManagedBroker); ok {
 		if err := mb.PublishToQueue(ctx, queue, job); err != nil {
+			log.Printf("dagflow queue enqueue failed workflow=%s queue=%s task=%s job=%s error=%v", workflowID, queue, task.ID, job.ID, err)
 			return task, err
 		}
 	} else if err := e.broker.Publish(ctx, job); err != nil {
+		log.Printf("dagflow queue enqueue failed workflow=%s queue=%s task=%s job=%s error=%v", workflowID, queue, task.ID, job.ID, err)
 		return task, err
 	}
+	log.Printf("dagflow queue enqueue accepted workflow=%s queue=%s task=%s job=%s await=%v", workflowID, queue, task.ID, job.ID, opts.Await)
 	if !opts.Await {
 		return task, nil
 	}
+	log.Printf("dagflow queue await result workflow=%s queue=%s task=%s job=%s", workflowID, queue, task.ID, job.ID)
 	jr, err := e.broker.WaitResult(ctx, job.ID)
 	if err != nil {
 		return task, err
@@ -76,6 +82,7 @@ func (e *Engine) EnqueueWorkflow(ctx context.Context, workflowID string, input a
 }
 
 func (e *Engine) StartWorkflowQueueConsumer(ctx context.Context, cfg QueueConsumerConfig) error {
+	log.Printf("dagflow consumer configure requested id=%s queue=%s workflow=%s concurrency=%d", cfg.ID, cfg.Queue, cfg.Workflow, cfg.Concurrency)
 	if cfg.Workflow == "" {
 		return fmt.Errorf("consumer %s requires workflow", cfg.ID)
 	}
@@ -92,7 +99,13 @@ func (e *Engine) StartWorkflowQueueConsumer(ctx context.Context, cfg QueueConsum
 	if !ok {
 		return fmt.Errorf("broker does not support managed consumers")
 	}
-	return mb.StartConsumer(ctx, cfg, e.executeJob)
+	err := mb.StartConsumer(ctx, cfg, e.executeJob)
+	if err != nil {
+		log.Printf("dagflow consumer configure failed id=%s queue=%s workflow=%s error=%v", cfg.ID, cfg.Queue, cfg.Workflow, err)
+		return err
+	}
+	log.Printf("dagflow consumer configured id=%s queue=%s workflow=%s", cfg.ID, cfg.Queue, cfg.Workflow)
+	return nil
 }
 
 func (e *Engine) QueueInfo() []QueueInfo {

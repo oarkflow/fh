@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -27,6 +28,8 @@ type PostgresBroker struct {
 	mu          sync.RWMutex
 	consumers   map[string]*memoryConsumer
 	queues      map[string]QueueConfig
+	events      []BrokerEvent
+	eventSeq    int64
 }
 
 func NewPostgresBroker(store DurableQueueStore, workerID string) *PostgresBroker {
@@ -36,6 +39,44 @@ func NewPostgresBroker(store DurableQueueStore, workerID string) *PostgresBroker
 	return &PostgresBroker{store: store, workerID: workerID, lease: 45 * time.Second, maxAttempts: 5, consumers: map[string]*memoryConsumer{}, queues: map[string]QueueConfig{}}
 }
 
+func (b *PostgresBroker) record(event BrokerEvent) {
+	if event.At.IsZero() {
+		event.At = time.Now()
+	}
+	if event.ID == "" {
+		b.eventSeq++
+		event.ID = fmt.Sprintf("broker_evt_%d", b.eventSeq)
+	}
+	if event.Component == "" {
+		event.Component = "postgres_broker"
+	}
+	b.events = append(b.events, event)
+	if len(b.events) > 1000 {
+		copy(b.events, b.events[len(b.events)-1000:])
+		b.events = b.events[:1000]
+	}
+	if event.Error != "" {
+		log.Printf("dagflow broker component=%s event=%s queue=%s consumer=%s job=%s task=%s workflow=%s node=%s attempt=%d error=%q message=%q", event.Component, event.Event, event.Queue, event.ConsumerID, event.JobID, event.TaskID, event.WorkflowID, event.NodeID, event.Attempt, event.Error, event.Message)
+		return
+	}
+	log.Printf("dagflow broker component=%s event=%s queue=%s consumer=%s job=%s task=%s workflow=%s node=%s attempt=%d status=%s message=%q", event.Component, event.Event, event.Queue, event.ConsumerID, event.JobID, event.TaskID, event.WorkflowID, event.NodeID, event.Attempt, event.Status, event.Message)
+}
+
+func (b *PostgresBroker) BrokerEvents(limit int) []BrokerEvent {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if limit <= 0 || limit > len(b.events) {
+		limit = len(b.events)
+	}
+	out := make([]BrokerEvent, 0, limit)
+	for i := len(b.events) - limit; i < len(b.events); i++ {
+		if i >= 0 {
+			out = append(out, b.events[i])
+		}
+	}
+	return out
+}
+
 func (b *PostgresBroker) EnsureQueue(cfg QueueConfig) error {
 	if cfg.ID == "" {
 		return errors.New("queue id is required")
@@ -43,6 +84,7 @@ func (b *PostgresBroker) EnsureQueue(cfg QueueConfig) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.queues[cfg.ID] = cfg
+	b.record(BrokerEvent{Event: "queue.ensure", Queue: cfg.ID, Message: "queue ready", Data: map[string]any{"capacity": cfg.Capacity, "max_attempts": cfg.MaxAttempts, "dlq": cfg.DLQ}})
 	return nil
 }
 
@@ -71,6 +113,7 @@ func (b *PostgresBroker) PublishToQueue(ctx context.Context, queue string, j Job
 	if _, ok := b.queues[queue]; !ok {
 		b.queues[queue] = QueueConfig{ID: queue}
 	}
+	b.record(BrokerEvent{Event: "job.published", Queue: queue, JobID: j.ID, TaskID: j.TaskID, WorkflowID: j.WorkflowID, NodeID: j.NodeID, Attempt: j.Attempt, Status: "queued", Message: "job published"})
 	b.mu.Unlock()
 	return b.store.EnqueueJob(ctx, j)
 }
@@ -78,6 +121,9 @@ func (b *PostgresBroker) Subscribe(ctx context.Context, workflowID string) (<-ch
 	return b.SubscribeQueue(ctx, workflowID)
 }
 func (b *PostgresBroker) SubscribeQueue(ctx context.Context, queue string) (<-chan Job, error) {
+	b.mu.Lock()
+	b.record(BrokerEvent{Event: "queue.subscribe", Queue: queue, Message: "subscription opened"})
+	b.mu.Unlock()
 	ch := make(chan Job)
 	go func() {
 		defer close(ch)
@@ -87,6 +133,9 @@ func (b *PostgresBroker) SubscribeQueue(ctx context.Context, queue string) (<-ch
 			_ = b.store.RecoverExpiredJobs(ctx)
 			job, err := b.store.ClaimJob(ctx, queue, b.workerID, b.lease)
 			if err == nil {
+				b.mu.Lock()
+				b.record(BrokerEvent{Event: "job.claimed", Queue: queue, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: "running", Message: "job claimed"})
+				b.mu.Unlock()
 				if job.Queue == "" {
 					job.Queue = queue
 				}
@@ -110,9 +159,15 @@ func (b *PostgresBroker) SubscribeQueue(ctx context.Context, queue string) (<-ch
 	return ch, nil
 }
 func (b *PostgresBroker) Ack(ctx context.Context, jobID string) error {
+	b.mu.Lock()
+	b.record(BrokerEvent{Event: "job.acked", JobID: jobID, Status: "acked", Message: "job acknowledged"})
+	b.mu.Unlock()
 	return b.store.AckJob(ctx, jobID)
 }
 func (b *PostgresBroker) Nack(ctx context.Context, jobID string, err error) error {
+	b.mu.Lock()
+	b.record(BrokerEvent{Event: "job.nacked", JobID: jobID, Status: "nacked", Error: fmt.Sprint(err), Message: "job negatively acknowledged"})
+	b.mu.Unlock()
 	return b.store.NackJob(ctx, jobID, err, 2*time.Second, b.maxAttempts)
 }
 
@@ -123,9 +178,15 @@ func (b *PostgresBroker) nackJob(ctx context.Context, job Job, err error) bool {
 	maxAttempts := queueMaxAttempts(job, cfg, b.maxAttempts)
 	terminal := job.Attempt >= maxAttempts
 	if delay := queueRetryDelay(job.Attempt); !terminal {
+		b.mu.Lock()
+		b.record(BrokerEvent{Event: "job.retry.scheduled", Queue: job.Queue, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt + 1, Status: "retry", Error: fmt.Sprint(err), Message: "job retry scheduled", Data: map[string]any{"delay": delay.String()}})
+		b.mu.Unlock()
 		_ = b.store.NackJob(ctx, job.ID, err, delay, maxAttempts)
 		return false
 	}
+	b.mu.Lock()
+	b.record(BrokerEvent{Event: "job.dead", Queue: job.Queue, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: "dead", Error: fmt.Sprint(err), Message: "job reached terminal failure"})
+	b.mu.Unlock()
 	_ = b.store.NackJob(ctx, job.ID, err, 0, maxAttempts)
 	if cfg.DLQ != "" {
 		dlq := job
@@ -139,6 +200,9 @@ func (b *PostgresBroker) nackJob(ctx context.Context, job Job, err error) bool {
 	return true
 }
 func (b *PostgresBroker) Complete(ctx context.Context, r JobResult) error {
+	b.mu.Lock()
+	b.record(BrokerEvent{Event: "job.completed", Queue: r.Queue, JobID: r.JobID, TaskID: r.TaskID, WorkflowID: r.WorkflowID, NodeID: r.NodeID, Status: "completed", Error: r.Error, Message: "job result completed"})
+	b.mu.Unlock()
 	return b.store.CompleteJob(ctx, r)
 }
 func (b *PostgresBroker) WaitResult(ctx context.Context, jobID string) (JobResult, error) {
@@ -169,8 +233,10 @@ func (b *PostgresBroker) StartConsumer(ctx context.Context, cfg QueueConsumerCon
 		b.queues[cfg.Queue] = QueueConfig{ID: cfg.Queue}
 	}
 	cctx, cancel := context.WithCancel(ctx)
-	mc := &memoryConsumer{info: QueueConsumerInfo{ID: cfg.ID, Queue: cfg.Queue, Workflow: cfg.Workflow, Concurrency: cfg.Concurrency, Status: ConsumerRunning, StartedAt: time.Now(), UpdatedAt: time.Now()}, cancel: cancel}
+	now := time.Now()
+	mc := &memoryConsumer{info: QueueConsumerInfo{ID: cfg.ID, Queue: cfg.Queue, Workflow: cfg.Workflow, Concurrency: cfg.Concurrency, Status: ConsumerRunning, StartedAt: now, UpdatedAt: now, LastHeartbeat: now, Workers: cfg.Concurrency, LastEvent: "started"}, cancel: cancel}
 	b.consumers[cfg.ID] = mc
+	b.record(BrokerEvent{Event: "consumer.started", Queue: cfg.Queue, ConsumerID: cfg.ID, WorkflowID: cfg.Workflow, Status: string(ConsumerRunning), Message: "consumer started", Data: map[string]any{"concurrency": cfg.Concurrency, "worker_id": b.workerID}})
 	b.mu.Unlock()
 	jobs, err := b.SubscribeQueue(cctx, cfg.Queue)
 	if err != nil {
@@ -182,6 +248,10 @@ func (b *PostgresBroker) StartConsumer(ctx context.Context, cfg QueueConsumerCon
 	return nil
 }
 func (b *PostgresBroker) consumerLoop(ctx context.Context, id string, jobs <-chan Job, handler QueueConsumerHandler) {
+	b.consumerEvent(id, "consumer.worker.started", "worker loop started", nil)
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	defer b.consumerEvent(id, "consumer.worker.stopped", "worker loop stopped", nil)
 	for {
 		select {
 		case <-ctx.Done():
@@ -206,10 +276,14 @@ func (b *PostgresBroker) consumerLoop(ctx context.Context, id string, jobs <-cha
 			}
 		}
 		select {
+		case <-heartbeat.C:
+			b.consumerHeartbeat(id)
 		case job, ok := <-jobs:
 			if !ok {
+				b.consumerEvent(id, "consumer.queue.closed", "job channel closed", nil)
 				return
 			}
+			b.consumerJobStarted(id, job)
 			jr := safeHandleJob(ctx, handler, job)
 			if jr.Queue == "" {
 				jr.Queue = job.Queue
@@ -217,6 +291,7 @@ func (b *PostgresBroker) consumerLoop(ctx context.Context, id string, jobs <-cha
 			if jr.Error != "" {
 				terminal := b.nackJob(ctx, job, errors.New(jr.Error))
 				b.bumpConsumer(id, false)
+				b.consumerJobFinished(id, job, jr)
 				if terminal {
 					_ = b.Complete(ctx, jr)
 				}
@@ -224,12 +299,86 @@ func (b *PostgresBroker) consumerLoop(ctx context.Context, id string, jobs <-cha
 			}
 			_ = b.Ack(ctx, job.ID)
 			b.bumpConsumer(id, true)
+			b.consumerJobFinished(id, job, jr)
 			_ = b.Complete(ctx, jr)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
+
+func (b *PostgresBroker) consumerHeartbeat(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if c := b.consumers[id]; c != nil {
+		c.info.LastHeartbeat = time.Now()
+		c.info.UpdatedAt = c.info.LastHeartbeat
+		c.info.LastEvent = "heartbeat"
+		b.record(BrokerEvent{Event: "consumer.heartbeat", Queue: c.info.Queue, ConsumerID: id, WorkflowID: c.info.Workflow, Status: string(c.info.Status), Message: "consumer heartbeat"})
+	}
+}
+
+func (b *PostgresBroker) consumerEvent(id, event, message string, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var be BrokerEvent
+	be.Event = event
+	be.ConsumerID = id
+	be.Message = message
+	if err != nil {
+		be.Error = err.Error()
+	}
+	if c := b.consumers[id]; c != nil {
+		c.info.LastHeartbeat = time.Now()
+		c.info.UpdatedAt = c.info.LastHeartbeat
+		c.info.LastEvent = event
+		if err != nil {
+			c.info.LastError = err.Error()
+		}
+		be.Queue = c.info.Queue
+		be.WorkflowID = c.info.Workflow
+		be.Status = string(c.info.Status)
+	}
+	b.record(be)
+}
+
+func (b *PostgresBroker) consumerJobStarted(id string, job Job) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if c := b.consumers[id]; c != nil {
+		now := time.Now()
+		c.info.InFlight++
+		c.info.LastHeartbeat = now
+		c.info.UpdatedAt = now
+		c.info.LastJobAt = now
+		c.info.LastJobID = job.ID
+		c.info.LastEvent = "job.started"
+		b.record(BrokerEvent{Event: "consumer.job.started", Queue: c.info.Queue, ConsumerID: id, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: "running", Message: "consumer picked job"})
+	}
+}
+
+func (b *PostgresBroker) consumerJobFinished(id string, job Job, jr JobResult) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if c := b.consumers[id]; c != nil {
+		now := time.Now()
+		if c.info.InFlight > 0 {
+			c.info.InFlight--
+		}
+		c.info.LastHeartbeat = now
+		c.info.UpdatedAt = now
+		c.info.LastJobAt = now
+		c.info.LastJobID = job.ID
+		c.info.LastEvent = "job.finished"
+		status := "succeeded"
+		if jr.Error != "" {
+			status = "failed"
+			c.info.LastError = jr.Error
+		}
+		b.record(BrokerEvent{Event: "consumer.job.finished", Queue: c.info.Queue, ConsumerID: id, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: status, Error: jr.Error, Message: "consumer finished job"})
+	}
+}
+
 func (b *PostgresBroker) bumpConsumer(id string, ok bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -240,6 +389,7 @@ func (b *PostgresBroker) bumpConsumer(id string, ok bool) {
 			c.info.Failed++
 		}
 		c.info.UpdatedAt = time.Now()
+		c.info.LastHeartbeat = c.info.UpdatedAt
 	}
 }
 func (b *PostgresBroker) PauseConsumer(id string) error {
@@ -254,6 +404,8 @@ func (b *PostgresBroker) PauseConsumer(id string) error {
 	}
 	c.info.Status = ConsumerPaused
 	c.info.UpdatedAt = time.Now()
+	c.info.LastEvent = "paused"
+	b.record(BrokerEvent{Event: "consumer.paused", Queue: c.info.Queue, ConsumerID: id, WorkflowID: c.info.Workflow, Status: string(c.info.Status), Message: "consumer paused"})
 	return nil
 }
 func (b *PostgresBroker) ResumeConsumer(id string) error {
@@ -268,6 +420,8 @@ func (b *PostgresBroker) ResumeConsumer(id string) error {
 	}
 	c.info.Status = ConsumerRunning
 	c.info.UpdatedAt = time.Now()
+	c.info.LastEvent = "resumed"
+	b.record(BrokerEvent{Event: "consumer.resumed", Queue: c.info.Queue, ConsumerID: id, WorkflowID: c.info.Workflow, Status: string(c.info.Status), Message: "consumer resumed"})
 	return nil
 }
 func (b *PostgresBroker) StopConsumer(id string) error {
@@ -282,6 +436,8 @@ func (b *PostgresBroker) StopConsumer(id string) error {
 	}
 	c.info.Status = ConsumerStopped
 	c.info.UpdatedAt = time.Now()
+	c.info.LastEvent = "stopped"
+	b.record(BrokerEvent{Event: "consumer.stopped", Queue: c.info.Queue, ConsumerID: id, WorkflowID: c.info.Workflow, Status: string(c.info.Status), Message: "consumer stopped"})
 	return nil
 }
 func (b *PostgresBroker) ListConsumers() []QueueConsumerInfo {

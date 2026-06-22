@@ -32,6 +32,7 @@ type Engine struct {
 	queueConfigs    []QueueConfig
 	consumerConfigs []QueueConsumerConfig
 	runtimeCancel   context.CancelFunc
+	startedAt       time.Time
 	wg              sync.WaitGroup
 	taskLocks       sync.Map
 }
@@ -107,11 +108,26 @@ func (e *Engine) LoadConfig(cfg *Config) error {
 	if cfg != nil {
 		e.queueConfigs = append([]QueueConfig(nil), cfg.Queues...)
 		e.consumerConfigs = append([]QueueConsumerConfig(nil), cfg.Consumers...)
+
 		if qb, ok := e.broker.(interface{ EnsureQueue(QueueConfig) error }); ok {
 			for _, qc := range cfg.Queues {
 				if err := qb.EnsureQueue(qc); err != nil {
+					log.Printf(
+						"dagflow queue ensure failed id=%s error=%v",
+						qc.ID,
+						err,
+					)
 					return err
 				}
+
+				log.Printf(
+					"dagflow queue ensured id=%s capacity=%d max_attempts=%d visibility_timeout=%s dlq=%s",
+					qc.ID,
+					qc.Capacity,
+					qc.MaxAttempts,
+					qc.VisibilityTimeout,
+					qc.DLQ,
+				)
 			}
 		}
 	}
@@ -152,15 +168,21 @@ func (e *Engine) LoadConfig(cfg *Config) error {
 }
 
 func (e *Engine) Start(ctx context.Context) error {
+	log.Printf("dagflow engine starting workflows=%d queues=%d consumers=%d", len(e.flows), len(e.queueConfigs), len(e.consumerConfigs))
+	e.startedAt = time.Now()
 	runCtx, cancel := context.WithCancel(ctx)
 	e.runtimeCancel = cancel
 	e.local.Start(runCtx)
 	if mb, ok := e.broker.(ManagedBroker); ok {
+		for _, qc := range e.queueConfigs {
+			log.Printf("dagflow queue configured id=%s capacity=%d max_attempts=%d dlq=%s", qc.ID, qc.Capacity, qc.MaxAttempts, qc.DLQ)
+		}
 		for _, cc := range e.consumerConfigs {
 			if cc.ID == "" {
 				cc.ID = "workflow-consumer:" + cc.Queue + ":" + cc.Workflow
 			}
 			if cc.Workflow != "" {
+				log.Printf("dagflow consumer starting id=%s queue=%s workflow=%s concurrency=%d", cc.ID, cc.Queue, cc.Workflow, cc.Concurrency)
 				if err := mb.StartConsumer(runCtx, cc, e.executeJob); err != nil {
 					return err
 				}
@@ -176,8 +198,10 @@ func (e *Engine) Start(ctx context.Context) error {
 	}
 	e.mu.RUnlock()
 	for _, id := range ids {
+		log.Printf("dagflow distributed worker starting workflow=%s", id)
 		e.StartDistributedWorker(runCtx, id, 4)
 	}
+	log.Printf("dagflow engine started workflows=%d consumers=%d", len(e.flows), len(e.ConsumerInfo()))
 	return nil
 }
 
@@ -436,6 +460,9 @@ func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queu
 		node := wf.Nodes[item.NodeID]
 		if node == nil {
 			return fmt.Errorf("node %s not found", item.NodeID)
+		}
+		if task.Visits == nil {
+			task.Visits = map[string]int{}
 		}
 		task.Visits[node.ID]++
 		if task.Visits[node.ID] > wf.MaxVisits {
