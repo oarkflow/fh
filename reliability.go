@@ -273,24 +273,25 @@ func (r *Reliability) Middleware() HandlerFunc {
 			if err != nil {
 				return err
 			}
-			switch decision {
-			case idemReplay:
-				c.Set(HeaderReplayed, r.cfg.IdempotencyReplayHeaderValue)
-				for k, values := range rec.Headers {
-					for _, v := range values {
-						setReplayHeader(c, k, v)
-					}
+	switch decision {
+		case idemReplay:
+			c.Set(HeaderReplayed, r.cfg.IdempotencyReplayHeaderValue)
+			for k, values := range rec.Headers {
+				for _, v := range values {
+					setReplayHeader(c, k, v)
 				}
-				if len(rec.ContentType) > 0 {
-					c.Type(rec.ContentType)
-				}
-				return c.Status(rec.StatusCode).SendBytes(rec.Response)
-			case idemConflict:
-				return c.Status(StatusConflict).JSON(Map{"error": "idempotency_key_reused_with_different_payload", "request_id": requestID})
-			case idemProcessing:
-				return c.Status(r.cfg.IdempotencyProcessingStatus).JSON(Map{"error": "idempotency_key_processing", "request_id": requestID})
 			}
-			c.OnBeforeResponse(func(ctx *Ctx) error {
+			if len(rec.ContentType) > 0 {
+				c.Type(rec.ContentType)
+			}
+			return c.Status(rec.StatusCode).SendBytes(rec.Response)
+		case idemConflict:
+			return c.Status(StatusConflict).JSON(Map{"error": "idempotency_key_reused_with_different_payload", "request_id": requestID})
+		case idemProcessing:
+			return c.Status(r.cfg.IdempotencyProcessingStatus).JSON(Map{"error": "idempotency_key_processing", "request_id": requestID})
+		}
+		c.Locals("fh.idem_started", true)
+		c.OnBeforeResponse(func(ctx *Ctx) error {
 				return r.idem.Complete(key, reqHash, ctx.StatusCode(), string(ctx.contentType), ctx.GetRespHeaders(), ctx.ResponseBody())
 			})
 		}
@@ -1096,7 +1097,7 @@ func (r *Reliability) ApplyPolicy(c *Ctx, p ReliabilityPolicy) error {
 	if p.Journal && r.journal != nil {
 		_ = r.journal.Append(RequestJournalEntry{RequestID: requestID, Event: "policy.received", Method: c.Method(), Path: c.Path(), BodyHash: hashBody(c.Body()), RemoteIP: c.IP(), Time: time.Now().UTC()})
 	}
-	if r.idem != nil && isUnsafeMethod(c.Header.Method) {
+	if r.idem != nil && isUnsafeMethod(c.Header.Method) && c.Locals("fh.idem_started") == nil {
 		key := ""
 		if p.IdempotencyKey != nil {
 			key = p.IdempotencyKey(c)

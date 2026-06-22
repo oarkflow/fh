@@ -27,6 +27,10 @@ Each example has its own `go.mod`, `main.go`, and `README.md`. The examples use 
 | `secure-file-processing` | upload validation, durable file-processing pipeline, static downloads |
 | `api-gateway` | CORS, security headers, rate limits, route groups, rewrite, proxy-style gateway responses |
 | `multi-tenant-api` | tenant middleware, route groups, per-tenant idempotent writes, tenant-scoped queue jobs |
+| `secure-api-middleware-stack` | complete route-oriented middleware stack for public, partner, browser, webhook, operations, static, and proxy boundaries |
+| `workflow-reliable-checkout` | actor-serialized checkout workflow, lifecycle hooks, idempotent response replay, and durable queue handoff |
+
+See [`realworld/README.md`](realworld/README.md) for the complete middleware-to-example coverage matrix.
 
 ## Common reliability files
 

@@ -1,0 +1,1 @@
+This file is served by the static middleware with ETag and cache headers.
