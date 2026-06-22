@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -52,6 +53,7 @@ type JobResult struct {
 	NodeID     string    `json:"node_id"`
 	Result     any       `json:"result,omitempty"`
 	Error      string    `json:"error,omitempty"`
+	Stack      string    `json:"stack,omitempty"`
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
 }
@@ -71,6 +73,7 @@ type BrokerEvent struct {
 	Status     string         `json:"status,omitempty"`
 	Message    string         `json:"message,omitempty"`
 	Error      string         `json:"error,omitempty"`
+	Stack      string         `json:"stack,omitempty"`
 	Data       map[string]any `json:"data,omitempty"`
 }
 
@@ -350,12 +353,24 @@ func (b *MemoryBroker) Nack(ctx context.Context, jobID string, err error) error 
 func (b *MemoryBroker) Complete(ctx context.Context, r JobResult) error {
 	var waiters []chan JobResult
 	b.mu.Lock()
+	job := b.jobs[r.JobID]
+	if r.Queue == "" {
+		r.Queue = job.Queue
+	}
+	if r.TaskID == "" {
+		r.TaskID = job.TaskID
+	}
+	if r.WorkflowID == "" {
+		r.WorkflowID = job.WorkflowID
+	}
+	if r.NodeID == "" {
+		r.NodeID = job.NodeID
+	}
 	b.results[r.JobID] = r
 	waiters = b.waiters[r.JobID]
 	delete(b.waiters, r.JobID)
 	if r.Queue != "" {
 		if q := b.queues[r.Queue]; q != nil {
-			q.completed++
 			event := "job.completed"
 			status := "completed"
 			message := "job completed successfully"
@@ -363,8 +378,10 @@ func (b *MemoryBroker) Complete(ctx context.Context, r JobResult) error {
 				event = "job.result.failed"
 				status = "failed"
 				message = "job result released with failure"
+			} else {
+				q.completed++
 			}
-			b.record(BrokerEvent{Event: event, Queue: r.Queue, JobID: r.JobID, TaskID: r.TaskID, WorkflowID: r.WorkflowID, NodeID: r.NodeID, Status: status, Error: r.Error, Message: message})
+			b.record(BrokerEvent{Event: event, Queue: r.Queue, JobID: r.JobID, TaskID: r.TaskID, WorkflowID: r.WorkflowID, NodeID: r.NodeID, Attempt: job.Attempt, Status: status, Error: r.Error, Stack: r.Stack, Message: message})
 		}
 	}
 	b.mu.Unlock()
@@ -441,8 +458,10 @@ func (b *MemoryBroker) consumerLoop(ctx context.Context, id string, jobs <-chan 
 	defer heartbeat.Stop()
 	defer func() {
 		if r := recover(); r != nil {
+			stack := string(debug.Stack())
+			log.Printf("dagflow queue worker panic recovered consumer=%s panic=%v\n%s", id, r, stack)
 			b.bumpConsumer(id, false)
-			b.consumerEvent(id, "consumer.worker.panic", "worker loop panic", fmt.Errorf("%v", r))
+			b.consumerEvent(id, "consumer.worker.panic", "worker loop panic: "+stack, fmt.Errorf("%v", r))
 		}
 		b.consumerEvent(id, "consumer.worker.stopped", "worker loop stopped", nil)
 	}()
@@ -507,6 +526,8 @@ func safeHandleJob(ctx context.Context, handler QueueConsumerHandler, job Job) (
 	defer func() {
 		if r := recover(); r != nil {
 			jr.Error = fmt.Sprintf("panic: %v", r)
+			jr.Stack = string(debug.Stack())
+			log.Printf("dagflow queue job panic recovered queue=%s job=%s task=%s workflow=%s node=%s panic=%v\n%s", job.Queue, job.ID, job.TaskID, job.WorkflowID, job.NodeID, r, jr.Stack)
 		}
 		if jr.FinishedAt.IsZero() {
 			jr.FinishedAt = time.Now()
@@ -685,7 +706,7 @@ func (b *MemoryBroker) consumerJobFinished(id string, job Job, jr JobResult) {
 			status = "failed"
 			c.info.LastError = jr.Error
 		}
-		b.record(BrokerEvent{Event: "consumer.job.finished", Queue: c.info.Queue, ConsumerID: id, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: status, Error: jr.Error, Message: "consumer finished job"})
+		b.record(BrokerEvent{Event: "consumer.job.finished", Queue: c.info.Queue, ConsumerID: id, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: status, Error: jr.Error, Stack: jr.Stack, Message: "consumer finished job"})
 	}
 }
 

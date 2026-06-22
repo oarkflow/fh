@@ -153,6 +153,7 @@ func cloneTask(t *Task) *Task {
 	var cp Task
 	b, _ := json.Marshal(t)
 	_ = json.Unmarshal(b, &cp)
+	ensureTaskRuntimeState(&cp)
 	return &cp
 }
 func cloneChainRun(r *ChainRun) *ChainRun {
@@ -162,6 +163,7 @@ func cloneChainRun(r *ChainRun) *ChainRun {
 	var cp ChainRun
 	b, _ := json.Marshal(r)
 	_ = json.Unmarshal(b, &cp)
+	ensureChainRunRuntimeState(&cp)
 	return &cp
 }
 

@@ -1,7 +1,9 @@
 package dagflow
 
 import (
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/oarkflow/bcl"
@@ -115,6 +117,14 @@ func (e *Engine) evalConditionSpec(spec ConditionSpec, facts map[string]any) (bo
 
 func normalizeBCLExpr(expr string) string {
 	expr = strings.TrimSpace(expr)
+
+	// Some BCL decoder versions can stringify a parsed block/list into a value like:
+	// [map[body:map[...] id:`node.id == "validate" && input.to == "blocked@blocked.test"` ...]]
+	// Recover the raw backtick expression when it is present instead of evaluating the whole map string.
+	if recovered := extractBacktickExpression(expr); recovered != "" && looksLikeParsedBCLBlock(expr) {
+		expr = recovered
+	}
+
 	for {
 		trimmed := strings.TrimSpace(expr)
 		if len(trimmed) >= 2 {
@@ -130,8 +140,22 @@ func normalizeBCLExpr(expr string) string {
 	expr = strings.ReplaceAll(expr, "\r", " ")
 	expr = strings.ReplaceAll(expr, "\n", " ")
 	expr = strings.ReplaceAll(expr, "\t", " ")
+	expr = strings.ReplaceAll(expr, `\"`, `"`)
 	return strings.TrimSpace(expr)
 }
+
+func extractBacktickExpression(s string) string {
+	start := strings.IndexByte(s, '`')
+	if start < 0 {
+		return ""
+	}
+	end := strings.IndexByte(s[start+1:], '`')
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[start+1 : start+1+end])
+}
+
 func evalBCLBool(expr string, facts map[string]any) (bool, error) {
 	expr = normalizeBCLExpr(expr)
 	if expr == "" {
@@ -140,7 +164,7 @@ func evalBCLBool(expr string, facts map[string]any) (bool, error) {
 	if looksLikeParsedBCLBlock(expr) {
 		return false, NewPermanentError("invalid condition shape; parsed BCL block was assigned to expression: %q", expr)
 	}
-	ok1, err := bcl.Eval(expr, facts)
+	ok1, err := bcl.Eval(expr, normalizeFactsForBCL(facts))
 	if err != nil {
 		return false, NewPermanentError("expression %q failed: %w", expr, err)
 	}
@@ -157,19 +181,24 @@ func looksLikeParsedBCLBlock(expr string) bool {
 }
 
 func (e *Engine) workflowFacts(task *Task, node *Node, result any, extra map[string]any) map[string]any {
+	ensureTaskRuntimeState(task)
 	states := map[string]any{}
 	results := map[string]any{}
 	if task != nil {
 		for id, st := range task.NodeStates {
+			if st == nil {
+				continue
+			}
 			states[id] = map[string]any{"status": string(st.Status), "attempts": st.Attempts, "error": st.Error, "job_id": st.JobID, "duration": st.Duration.String()}
 		}
 		for id, res := range task.NodeResults {
-			results[id] = res
+			results[id] = normalizeFactValue(res)
 		}
 	}
+	normalizedResult := normalizeFactValue(result)
 	facts := map[string]any{
-		"result": result,
-		"input":  result,
+		"result": normalizedResult,
+		"input":  normalizedResult,
 		"node":   map[string]any{"id": safeNodeID(node), "handler": safeNodeHandler(node), "type": safeNodeType(node)},
 		"task": map[string]any{
 			"id": taskString(task, func(t *Task) string { return t.ID }), "workflow_id": taskString(task, func(t *Task) string { return t.WorkflowID }), "status": taskString(task, func(t *Task) string { return string(t.Status) }),
@@ -214,6 +243,61 @@ func cloneFacts(in map[string]any) map[string]any {
 	}
 	return out
 }
+
+func normalizeFactsForBCL(in map[string]any) map[string]any {
+	if in == nil {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = normalizeFactValue(v)
+	}
+	return out
+}
+
+func normalizeFactValue(v any) any {
+	if v == nil {
+		return nil
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			out[k] = normalizeFactValue(vv)
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			out[k] = vv
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, vv := range x {
+			out[i] = normalizeFactValue(vv)
+		}
+		return out
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return nil
+		}
+		return normalizeFactValue(rv.Elem().Interface())
+	}
+	if rv.Kind() == reflect.Struct {
+		b, err := json.Marshal(v)
+		if err == nil {
+			var m map[string]any
+			if json.Unmarshal(b, &m) == nil && m != nil {
+				return normalizeFactValue(m)
+			}
+		}
+	}
+	return v
+}
+
 func safeNodeID(n *Node) string {
 	if n == nil {
 		return ""

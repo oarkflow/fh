@@ -436,6 +436,7 @@ func (e *Engine) RunStandaloneNode(ctx context.Context, workflowID, nodeID strin
 }
 
 func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queue []RunItem) error {
+	ensureTaskRuntimeState(task)
 	if len(queue) == 0 {
 		queue = task.Cursor
 	}
@@ -568,6 +569,7 @@ func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queu
 }
 
 func (e *Engine) runNode(parent context.Context, wf *Workflow, task *Task, node *Node, input any, stateKey string) (any, error) {
+	ensureTaskRuntimeState(task)
 	state := task.NodeStates[stateKey]
 	if state == nil {
 		state = &NodeState{NodeID: stateKey, Status: NodePending}
@@ -720,6 +722,7 @@ func (e *Engine) dispatchNode(ctx context.Context, wf *Workflow, task *Task, nod
 }
 
 func (e *Engine) executeHandler(ctx context.Context, wf *Workflow, task *Task, node *Node, input any, attempt int) (any, error) {
+	ensureTaskRuntimeState(task)
 	if err := e.ValidateAgainstSchema(node.InputSchema, input); err != nil {
 		return nil, err
 	}
@@ -1008,6 +1011,7 @@ func (e *Engine) applyEdgeData(ctx context.Context, wf *Workflow, task *Task, no
 }
 
 func (e *Engine) finishTask(task *Task, err error) {
+	ensureTaskRuntimeState(task)
 	if task.Status == TaskWaiting || task.Status == TaskPaused || task.Status == TaskCancelled {
 		task.UpdatedAt = time.Now()
 		_ = e.store.Save(task)

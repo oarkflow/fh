@@ -2305,3 +2305,14 @@ dagflow broker component=memory_broker event=consumer.job.started queue=email_jo
 dagflow queue workflow job starting queue=email_jobs job=... task=... workflow=notification_approval_demo attempt=1
 dagflow queue workflow job completed queue=email_jobs job=... task=... workflow=notification_approval_demo status=completed
 ```
+
+## Queue/rule hardening notes
+
+This build includes defensive fixes for queue-driven workflow execution and task-rule evaluation:
+
+- Task rules now evaluate `when` / `condition` with JSON-normalized facts so expressions like `input.to` and `input.request.subject` work even when Go handlers return structs.
+- Parsed/stringified BCL block values are normalized back to their raw backtick expression when possible, preventing accidental evaluation of values like `[map[body:map[...] id:\`...\`]]`.
+- Control actions (`reject`, `approve`, `require_approval`, `pause`, `cancel`) require an explicit `when` or named `condition`; use `when \`true\`` for intentional unconditional control rules.
+- Business rejections are terminal outcomes and are no longer retried by the in-memory queue broker.
+- Background queue panics now emit stack traces in broker diagnostics and logs.
+- Task runtime maps are initialized after load/clone and before execution to prevent nil-map panics from deserialized tasks.

@@ -80,6 +80,24 @@ type ApprovalStore interface {
 var ErrApprovalRequired = errors.New("approval required")
 var ErrTaskRejected = errors.New("task rejected")
 
+type TaskRejectedError struct {
+	Reason string
+}
+
+func (e TaskRejectedError) Error() string {
+	if e.Reason == "" {
+		return ErrTaskRejected.Error()
+	}
+	return ErrTaskRejected.Error() + ": " + e.Reason
+}
+
+func (e TaskRejectedError) Unwrap() error { return ErrTaskRejected }
+
+func IsTaskRejectedError(err error) bool {
+	var rejected TaskRejectedError
+	return errors.As(err, &rejected) || errors.Is(err, ErrTaskRejected)
+}
+
 type PermanentError struct {
 	Err error
 }
@@ -98,18 +116,47 @@ func NewPermanentError(format string, args ...any) error {
 }
 
 func IsPermanentError(err error) bool {
+	if err == nil {
+		return false
+	}
 	var pe PermanentError
-	return errors.As(err, &pe)
+	if errors.As(err, &pe) {
+		return true
+	}
+	return IsTaskRejectedError(err) || isPermanentErrorText(err.Error())
 }
 
 func isPermanentErrorText(s string) bool {
 	s = strings.ToLower(s)
-	return strings.Contains(s, "invalid condition shape") ||
+	return strings.Contains(s, "task rejected") ||
+		strings.Contains(s, "invalid condition shape") ||
+		strings.Contains(s, "missing when/condition expression") ||
 		strings.Contains(s, "did not return a boolean") ||
 		strings.Contains(s, "condition must be a string expression") ||
 		strings.Contains(s, "condition ") && strings.Contains(s, " not found") ||
 		strings.Contains(s, "unsupported action") ||
 		strings.Contains(s, "schema") && strings.Contains(s, "not found")
+}
+
+func controlActionRequiresCondition(action TaskActionType) bool {
+	switch action {
+	case ActionReject, ActionApprove, ActionRequireApproval, ActionPause, ActionCancel:
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *Engine) evalTaskRuleMatch(rule TaskRule, facts map[string]any) (bool, error) {
+	condition := strings.TrimSpace(rule.Condition)
+	when := normalizeBCLExpr(rule.When)
+	if condition == "" && when == "" {
+		if controlActionRequiresCondition(rule.Action.Type) {
+			return false, NewPermanentError("missing when/condition expression for control action %q", rule.Action.Type)
+		}
+		return true, nil
+	}
+	return e.evalNamedOrInline(condition, when, facts)
 }
 
 func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, node *Node, event string, input any) error {
@@ -118,7 +165,7 @@ func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, n
 			continue
 		}
 		facts := e.workflowFacts(task, node, input, map[string]any{"event": event})
-		ok, err := e.evalNamedOrInline(rule.Condition, rule.When, facts)
+		ok, err := e.evalTaskRuleMatch(rule, facts)
 		if err != nil {
 			return fmt.Errorf("task rule %s: %w", rule.ID, err)
 		}
@@ -146,7 +193,7 @@ func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, n
 			task.Error = reason
 			task.LastError = reason
 			e.audit(task, "task.rejected", reason, map[string]any{"rule": rule.ID, "input": payload})
-			return fmt.Errorf("%w: %s", ErrTaskRejected, reason)
+			return TaskRejectedError{Reason: reason}
 		case ActionPause:
 			task.Status = TaskPaused
 			task.Cursor = task.Cursor
