@@ -152,6 +152,9 @@ func RegisterOperations(app *fh.App, engine *Engine, cfg *Config, bclRoot ...str
 	app.Post("/ops/approvals/bulk/reject", opsGuard(opsBulkReject(engine)))
 	app.Get("/ops/leases", opsGuard(opsLeases(engine)))
 	app.Get("/ops/queues", opsGuard(opsQueues(engine)))
+	app.Post("/ops/queues/:queue/pause", opsGuard(opsQueueAction(engine, "pause")))
+	app.Post("/ops/queues/:queue/resume", opsGuard(opsQueueAction(engine, "resume")))
+	app.Post("/ops/queues/:queue/purge", opsGuard(opsQueueAction(engine, "purge")))
 	app.Get("/ops/consumers", opsGuard(opsConsumers(engine)))
 	app.Post("/ops/consumers/:id/pause", opsGuard(opsConsumerAction(engine, "pause")))
 	app.Post("/ops/consumers/:id/resume", opsGuard(opsConsumerAction(engine, "resume")))
@@ -466,6 +469,35 @@ func opsConsumerAction(engine *Engine, action string) fh.HandlerFunc {
 		return writeJSON(c, fh.StatusOK, map[string]any{"id": id, "action": action, "ok": true, "consumers": engine.ConsumerInfo()})
 	}
 }
+func opsQueueAction(engine *Engine, action string) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		queue := c.Param("queue")
+		switch action {
+		case "pause":
+			if err := engine.PauseQueue(queue); err != nil {
+				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
+			}
+			return writeJSON(c, fh.StatusOK, map[string]any{"queue": queue, "status": "paused"})
+		case "resume":
+			if err := engine.ResumeQueue(queue); err != nil {
+				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
+			}
+			return writeJSON(c, fh.StatusOK, map[string]any{"queue": queue, "status": "running"})
+		case "purge":
+			if c.Query("confirm") != "true" {
+				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": "queue purge requires ?confirm=true"})
+			}
+			purged, err := engine.PurgeQueue(queue)
+			if err != nil {
+				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
+			}
+			return writeJSON(c, fh.StatusOK, map[string]any{"queue": queue, "purged": purged})
+		default:
+			return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": "unknown queue action"})
+		}
+	}
+}
+
 func opsEnqueueWorkflow(engine *Engine) fh.HandlerFunc {
 	return func(c *fh.Ctx) error {
 		input, err := readJSONBody(c)

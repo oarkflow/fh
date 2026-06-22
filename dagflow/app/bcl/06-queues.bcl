@@ -4,6 +4,7 @@ queue "email_jobs" {
   max_attempts 3
   visibility_timeout "30s"
   dlq "email_jobs_dlq"
+  dlq_business_rejections true
 }
 
 queue "email_jobs_dlq" {
@@ -16,5 +17,7 @@ consumer "email_jobs_consumer" {
   queue "email_jobs"
   workflow "notification_approval_demo"
   concurrency 4
+  heartbeat_interval "5s"
+  heartbeat_log_interval "30s"
   enabled true
 }

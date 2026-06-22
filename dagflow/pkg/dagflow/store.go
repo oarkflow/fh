@@ -35,6 +35,7 @@ func NewMemoryTaskStore() *MemoryTaskStore {
 }
 func (s *MemoryTaskStore) Create(t *Task) error { return s.Save(t) }
 func (s *MemoryTaskStore) Save(t *Task) error {
+	ensureTaskRuntimeState(t)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tasks[t.ID] = cloneTask(t)

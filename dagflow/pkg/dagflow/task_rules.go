@@ -83,21 +83,34 @@ var ErrApprovalRequired = errors.New("approval required")
 var ErrTaskRejected = errors.New("task rejected")
 
 type TaskRejectedError struct {
-	Reason string
+	Reason string `json:"reason,omitempty"`
 }
 
 func (e TaskRejectedError) Error() string {
 	if e.Reason == "" {
-		return ErrTaskRejected.Error()
+		return "task rejected"
 	}
-	return ErrTaskRejected.Error() + ": " + e.Reason
+	return "task rejected: " + e.Reason
 }
 
 func (e TaskRejectedError) Unwrap() error { return ErrTaskRejected }
 
-func IsTaskRejectedError(err error) bool {
-	var rejected TaskRejectedError
-	return errors.As(err, &rejected) || errors.Is(err, ErrTaskRejected)
+type TaskCancelledError struct{ Reason string }
+
+func (e TaskCancelledError) Error() string {
+	if e.Reason == "" {
+		return "task cancelled"
+	}
+	return "task cancelled: " + e.Reason
+}
+
+type TaskTimeoutError struct{ Reason string }
+
+func (e TaskTimeoutError) Error() string {
+	if e.Reason == "" {
+		return "task timed out"
+	}
+	return "task timed out: " + e.Reason
 }
 
 type PermanentError struct {
@@ -125,44 +138,27 @@ func IsPermanentError(err error) bool {
 	if errors.As(err, &pe) {
 		return true
 	}
-	return IsTaskRejectedError(err) || isPermanentErrorText(err.Error())
+	var rejected TaskRejectedError
+	if errors.As(err, &rejected) || errors.Is(err, ErrTaskRejected) {
+		return true
+	}
+	var cancelled TaskCancelledError
+	if errors.As(err, &cancelled) {
+		return true
+	}
+	return isPermanentErrorText(err.Error())
 }
 
 func isPermanentErrorText(s string) bool {
 	s = strings.ToLower(s)
-	return strings.Contains(s, "task rejected") ||
-		strings.Contains(s, "invalid condition shape") ||
-		strings.Contains(s, "missing when/condition expression") ||
+	return strings.Contains(s, "invalid condition shape") ||
 		strings.Contains(s, "did not return a boolean") ||
 		strings.Contains(s, "condition must be a string expression") ||
 		strings.Contains(s, "condition ") && strings.Contains(s, " not found") ||
 		strings.Contains(s, "unsupported action") ||
-		strings.Contains(s, "schema") && strings.Contains(s, "not found")
-}
-
-func controlActionRequiresCondition(action TaskActionType) bool {
-	switch action {
-	case ActionReject, ActionApprove, ActionRequireApproval, ActionPause, ActionCancel:
-		return true
-	default:
-		return false
-	}
-}
-
-func (e *Engine) evalTaskRuleMatch(rule TaskRule, facts map[string]any) (bool, error) {
-	condition := strings.TrimSpace(rule.Condition)
-	when := normalizeBCLExpr(rule.When)
-	if condition == "" && when == "" {
-		if controlActionRequiresCondition(rule.Action.Type) {
-			return false, NewPermanentError("missing when/condition expression for control action %q", rule.Action.Type)
-		}
-		return true, nil
-	}
-	return e.evalNamedOrInline(condition, when, facts)
-}
-
-func shouldLogRuleEval(wf *Workflow) bool {
-	return wf != nil && wf.Debug || os.Getenv("DAGFLOW_RULE_DEBUG") == "1" || strings.EqualFold(os.Getenv("DAGFLOW_RULE_DEBUG"), "true")
+		strings.Contains(s, "schema") && strings.Contains(s, "not found") ||
+		strings.Contains(s, "task rejected") ||
+		strings.Contains(s, "task cancelled")
 }
 
 func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, node *Node, event string, input any) error {
@@ -170,13 +166,10 @@ func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, n
 		if !ruleEnabled(rule.Enabled) || !matchesEvent(rule.Events, event) {
 			continue
 		}
-		facts := e.workflowFacts(task, node, input, map[string]any{"event": event, "rule": map[string]any{"id": rule.ID, "action": string(rule.Action.Type)}})
-		ok, err := e.evalTaskRuleMatch(rule, facts)
-		if shouldLogRuleEval(wf) {
-			log.Printf(
-				"dagflow rule eval workflow=%s task=%s node=%s event=%s rule=%s condition=%q when=%q action=%s matched=%v input=%v task_input=%v error=%v",
-				safeWorkflowID(wf), safeTaskID(task), safeNodeID(node), event, rule.ID, rule.Condition, normalizeBCLExpr(rule.When), rule.Action.Type, ok, facts["input"], facts["task_input"], err,
-			)
+		facts := e.workflowFacts(task, node, input, map[string]any{"event": event})
+		ok, err := e.evalNamedOrInline(rule.Condition, rule.When, facts)
+		if ruleDebugEnabled(wf) {
+			log.Printf("dagflow rule eval workflow=%s task=%s node=%s event=%s rule=%s condition=%q when=%q action=%s matched=%v input=%v task_input=%v error=%v", task.WorkflowID, task.ID, safeNodeID(node), event, rule.ID, rule.Condition, rule.When, rule.Action.Type, ok, Redact(input), Redact(task.Input), err)
 		}
 		if err != nil {
 			return fmt.Errorf("task rule %s: %w", rule.ID, err)
@@ -201,7 +194,7 @@ func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, n
 			e.audit(task, "task.auto_approved", firstNonEmpty(rule.Message, rule.Action.Reason, "task auto approved"), map[string]any{"rule": rule.ID})
 		case ActionReject:
 			reason := firstNonEmpty(rule.Action.Reason, rule.Message, "task rejected by rule")
-			task.Status = TaskFailed
+			task.Status = TaskRejected
 			task.Error = reason
 			task.LastError = reason
 			e.audit(task, "task.rejected", reason, map[string]any{"rule": rule.ID, "input": payload})
@@ -212,11 +205,14 @@ func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, n
 			e.audit(task, "task.paused_by_rule", firstNonEmpty(rule.Message, rule.Action.Reason, "task paused by rule"), map[string]any{"rule": rule.ID})
 			return ErrApprovalRequired
 		case ActionCancel:
+			reason := firstNonEmpty(rule.Message, rule.Action.Reason, "task cancelled by rule")
 			task.Status = TaskCancelled
+			task.Error = reason
+			task.LastError = reason
 			now := time.Now()
 			task.CompletedAt = &now
-			e.audit(task, "task.cancelled_by_rule", firstNonEmpty(rule.Message, rule.Action.Reason, "task cancelled by rule"), map[string]any{"rule": rule.ID})
-			return ErrApprovalRequired
+			e.audit(task, "task.cancelled_by_rule", reason, map[string]any{"rule": rule.ID})
+			return TaskCancelledError{Reason: reason}
 		case ActionRequireApproval:
 			if e.approvalAlreadyApproved(task.ID, rule.ID, safeNodeID(node)) {
 				e.audit(task, "approval.already_approved", "approval already approved; continuing", map[string]any{"rule": rule.ID})
@@ -392,16 +388,9 @@ func (e *Engine) decideTaskApproval(ctx context.Context, taskID, approver, reaso
 	return task, err
 }
 
-func safeWorkflowID(wf *Workflow) string {
-	if wf == nil {
-		return ""
+func ruleDebugEnabled(wf *Workflow) bool {
+	if os.Getenv("DAGFLOW_RULE_DEBUG") == "1" || os.Getenv("DAGFLOW_RULE_DEBUG") == "true" {
+		return true
 	}
-	return wf.ID
-}
-
-func safeTaskID(task *Task) string {
-	if task == nil {
-		return ""
-	}
-	return task.ID
+	return wf != nil && wf.Debug
 }

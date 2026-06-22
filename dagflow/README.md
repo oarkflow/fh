@@ -2081,28 +2081,7 @@ curl -s -X POST localhost:8080/ops/approvals/bulk/approve \
 
 ### Demo workflow
 
-`app/bcl/20-workflows/notification_approval_demo.bcl` demonstrates workflow-level notifications, node-level notifications, a rule-based rejection, and a manual approval gate. The demo now references named conditions from `app/bcl/20-workflows/conditions.bcl` instead of duplicating inline rule logic, so rules, branches, routes, and middleware all use the same condition engine.
-
-Important named conditions used by this workflow:
-
-```bcl
-condition "blocked_recipient_domain" {
-  all [
-    `node.id == "validate"`,
-    `input.to == "blocked@blocked.test"`
-  ]
-}
-
-condition "sensitive_email_subject" {
-  all [`node.id == "send"`]
-  any [
-    `input.request.subject == "approval"`,
-    `input.request.subject == "sensitive"`
-  ]
-}
-```
-
-The blocked-domain reject rule should only fire for `blocked@blocked.test`; normal recipients such as `user@example.com` should pass validation and continue to send/store.
+`app/bcl/20-workflows/notification_approval_demo.bcl` demonstrates workflow-level notifications, node-level notifications, a rule-based rejection, and a manual approval gate.
 
 Run a normal request:
 
@@ -2327,13 +2306,55 @@ dagflow queue workflow job starting queue=email_jobs job=... task=... workflow=n
 dagflow queue workflow job completed queue=email_jobs job=... task=... workflow=notification_approval_demo status=completed
 ```
 
-## Queue/rule hardening notes
+## Production hardening additions
 
-This build includes defensive fixes for queue-driven workflow execution and task-rule evaluation:
+This build keeps the public `pkg/dagflow` facade compatible while preparing a split domain layout under:
 
-- Task rules now evaluate `when` / `condition` with JSON-normalized facts so expressions like `input.to` and `input.request.subject` work even when Go handlers return structs.
-- Parsed/stringified BCL block values are normalized back to their raw backtick expression when possible, preventing accidental evaluation of values like `[map[body:map[...] id:\`...\`]]`.
-- Control actions (`reject`, `approve`, `require_approval`, `pause`, `cancel`) require an explicit `when` or named `condition`; use `when \`true\`` for intentional unconditional control rules.
-- Business rejections are terminal outcomes and are no longer retried by the in-memory queue broker.
-- Background queue panics now emit stack traces in broker diagnostics and logs.
-- Task runtime maps are initialized after load/clone and before execution to prevent nil-map panics from deserialized tasks.
+- `pkg/dagflow/workflow` - workflow graph and execution domain documentation/future internals.
+- `pkg/dagflow/queue` - queue/broker/consumer domain documentation/future internals.
+- `pkg/dagflow/rules` - task rule and condition domain documentation/future internals.
+- `pkg/dagflow/approvals` - approval domain documentation/future internals.
+- `pkg/dagflow/notifications` - notification domain documentation/future internals.
+- `pkg/dagflow/observability` - diagnostics/metrics domain documentation/future internals.
+- `pkg/dagflow/security` - production security domain documentation/future internals.
+- `pkg/dagflow/store` - persistence domain documentation/future internals.
+
+The facade remains in `pkg/dagflow` so existing applications do not break while internals can be moved behind stable interfaces incrementally.
+
+### Queue lifecycle controls
+
+```bash
+curl http://localhost:8080/ops/queues -H 'X-API-Key: dev-secret'
+curl -X POST http://localhost:8080/ops/queues/email_jobs/pause -H 'X-API-Key: dev-secret'
+curl -X POST http://localhost:8080/ops/queues/email_jobs/resume -H 'X-API-Key: dev-secret'
+curl -X POST 'http://localhost:8080/ops/queues/email_jobs/purge?confirm=true' -H 'X-API-Key: dev-secret'
+```
+
+### Prometheus metrics
+
+```bash
+curl 'http://localhost:8080/metrics?format=prometheus'
+```
+
+### Production security
+
+When `DAGFLOW_ENV=production`, DAGFlow refuses to start unless:
+
+- `DAGFLOW_SIGNING_SECRET` is set and is not `dev-change-me`.
+- `DAGFLOW_ADMIN_TOKEN` is set, is not `dev-secret`, and has at least 24 characters.
+
+### Queue behavior expectations
+
+- `user@example.com` completes through receive -> validate -> send -> store.
+- `blocked@blocked.test` is rejected at validate and is not retried.
+- Business rejections are terminal. Whether they go to DLQ is controlled by `dlq_business_rejections` in the queue BCL.
+- Consumer heartbeat state is updated internally on every heartbeat but logs are throttled by `heartbeat_log_interval`.
+
+### Test coverage added
+
+Additional tests cover:
+
+- Named task-rule conditions matching and not matching.
+- Business rejection being permanent and setting rejected status.
+- Memory broker pause/resume/purge behavior.
+- Memory broker await-result behavior.

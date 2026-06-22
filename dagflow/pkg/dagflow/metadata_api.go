@@ -3,6 +3,7 @@ package dagflow
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 
 	"github.com/oarkflow/fh"
 )
@@ -181,7 +182,13 @@ func dlqReplay(engine *Engine) fh.HandlerFunc {
 	}
 }
 func opsMetrics(engine *Engine) fh.HandlerFunc {
-	return func(c *fh.Ctx) error { return writeJSON(c, fh.StatusOK, engine.Metrics()) }
+	return func(c *fh.Ctx) error {
+		if c.Query("format") == "prometheus" || strings.Contains(c.Get("Accept"), "text/plain") {
+			c.Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			return c.SendString(engine.Metrics().Prometheus())
+		}
+		return writeJSON(c, fh.StatusOK, engine.Metrics())
+	}
 }
 func opsOutbox(engine *Engine) fh.HandlerFunc {
 	return func(c *fh.Ctx) error {

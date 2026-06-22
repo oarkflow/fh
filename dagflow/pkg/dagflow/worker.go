@@ -53,9 +53,10 @@ type JobResult struct {
 	NodeID     string    `json:"node_id"`
 	Result     any       `json:"result,omitempty"`
 	Error      string    `json:"error,omitempty"`
-	Stack      string    `json:"stack,omitempty"`
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
+	Status     string    `json:"status,omitempty"`
+	Stack      string    `json:"stack,omitempty"`
 }
 
 type BrokerEvent struct {
@@ -112,20 +113,24 @@ type ManagedBroker interface {
 }
 
 type QueueConfig struct {
-	ID                string `bcl:",id" json:"id"`
-	Capacity          int    `bcl:"capacity,omitempty" json:"capacity,omitempty"`
-	MaxAttempts       int    `bcl:"max_attempts,omitempty" json:"max_attempts,omitempty"`
-	VisibilityTimeout string `bcl:"visibility_timeout,omitempty" json:"visibility_timeout,omitempty"`
-	DLQ               string `bcl:"dlq,omitempty" json:"dlq,omitempty"`
+	ID                    string `bcl:",id" json:"id"`
+	Capacity              int    `bcl:"capacity,omitempty" json:"capacity,omitempty"`
+	MaxAttempts           int    `bcl:"max_attempts,omitempty" json:"max_attempts,omitempty"`
+	VisibilityTimeout     string `bcl:"visibility_timeout,omitempty" json:"visibility_timeout,omitempty"`
+	DLQ                   string `bcl:"dlq,omitempty" json:"dlq,omitempty"`
+	DLQBusinessRejections bool   `bcl:"dlq_business_rejections,omitempty" json:"dlq_business_rejections,omitempty"`
 }
 
 type QueueConsumerConfig struct {
-	ID          string  `bcl:",id" json:"id"`
-	Queue       string  `bcl:"queue" json:"queue"`
-	Workflow    string  `bcl:"workflow,omitempty" json:"workflow,omitempty"`
-	Concurrency int     `bcl:"concurrency,omitempty" json:"concurrency,omitempty"`
-	Enabled     *bool   `bcl:"enabled,omitempty" json:"enabled,omitempty"`
-	Mode        RunMode `bcl:"mode,ident,omitempty" json:"mode,omitempty"`
+	ID                   string  `bcl:",id" json:"id"`
+	Queue                string  `bcl:"queue" json:"queue"`
+	Workflow             string  `bcl:"workflow,omitempty" json:"workflow,omitempty"`
+	Concurrency          int     `bcl:"concurrency,omitempty" json:"concurrency,omitempty"`
+	Enabled              *bool   `bcl:"enabled,omitempty" json:"enabled,omitempty"`
+	Mode                 RunMode `bcl:"mode,ident,omitempty" json:"mode,omitempty"`
+	HeartbeatInterval    string  `bcl:"heartbeat_interval,omitempty" json:"heartbeat_interval,omitempty"`
+	HeartbeatLogInterval string  `bcl:"heartbeat_log_interval,omitempty" json:"heartbeat_log_interval,omitempty"`
+	Debug                bool    `bcl:"debug,omitempty" json:"debug,omitempty"`
 }
 
 type QueueInfo struct {
@@ -143,6 +148,7 @@ type QueueInfo struct {
 	OldestAge   time.Duration `json:"oldest_age,omitempty"`
 	MaxAttempts int           `json:"max_attempts,omitempty"`
 	DLQ         string        `json:"dlq,omitempty"`
+	Paused      bool          `json:"paused,omitempty"`
 }
 
 type QueueConsumerInfo struct {
@@ -173,11 +179,16 @@ type memoryQueue struct {
 	completed int64
 	retried   int64
 	dead      int64
+	paused    bool
 }
 
 type memoryConsumer struct {
-	info   QueueConsumerInfo
-	cancel context.CancelFunc
+	info                 QueueConsumerInfo
+	cancel               context.CancelFunc
+	heartbeatInterval    time.Duration
+	heartbeatLogInterval time.Duration
+	debug                bool
+	lastHeartbeatLog     time.Time
 }
 
 type MemoryBroker struct {
@@ -213,7 +224,11 @@ func (b *MemoryBroker) record(event BrokerEvent) {
 		b.events = b.events[:1000]
 	}
 	if event.Error != "" {
-		log.Printf("dagflow broker component=%s event=%s queue=%s consumer=%s job=%s task=%s workflow=%s node=%s attempt=%d error=%q message=%q", event.Component, event.Event, event.Queue, event.ConsumerID, event.JobID, event.TaskID, event.WorkflowID, event.NodeID, event.Attempt, event.Error, event.Message)
+		if event.Stack != "" {
+			log.Printf("dagflow broker component=%s event=%s queue=%s consumer=%s job=%s task=%s workflow=%s node=%s attempt=%d error=%q message=%q\n%s", event.Component, event.Event, event.Queue, event.ConsumerID, event.JobID, event.TaskID, event.WorkflowID, event.NodeID, event.Attempt, event.Error, event.Message, event.Stack)
+		} else {
+			log.Printf("dagflow broker component=%s event=%s queue=%s consumer=%s job=%s task=%s workflow=%s node=%s attempt=%d error=%q message=%q", event.Component, event.Event, event.Queue, event.ConsumerID, event.JobID, event.TaskID, event.WorkflowID, event.NodeID, event.Attempt, event.Error, event.Message)
+		}
 		return
 	}
 	log.Printf("dagflow broker component=%s event=%s queue=%s consumer=%s job=%s task=%s workflow=%s node=%s attempt=%d status=%s message=%q", event.Component, event.Event, event.Queue, event.ConsumerID, event.JobID, event.TaskID, event.WorkflowID, event.NodeID, event.Attempt, event.Status, event.Message)
@@ -250,13 +265,14 @@ func (b *MemoryBroker) EnsureQueue(cfg QueueConfig) error {
 		if cfg.DLQ != "" {
 			q.cfg.DLQ = cfg.DLQ
 		}
+		q.cfg.DLQBusinessRejections = cfg.DLQBusinessRejections
 		return nil
 	}
 	capv := cfg.Capacity
 	if capv <= 0 {
 		capv = 4096
 	}
-	b.queues[cfg.ID] = &memoryQueue{cfg: QueueConfig{ID: cfg.ID, Capacity: capv, MaxAttempts: cfg.MaxAttempts, VisibilityTimeout: cfg.VisibilityTimeout, DLQ: cfg.DLQ}, jobs: make(chan Job, capv)}
+	b.queues[cfg.ID] = &memoryQueue{cfg: QueueConfig{ID: cfg.ID, Capacity: capv, MaxAttempts: cfg.MaxAttempts, VisibilityTimeout: cfg.VisibilityTimeout, DLQ: cfg.DLQ, DLQBusinessRejections: cfg.DLQBusinessRejections}, jobs: make(chan Job, capv)}
 	b.record(BrokerEvent{Event: "queue.ensure", Queue: cfg.ID, Message: "queue ready", Data: map[string]any{"capacity": capv, "max_attempts": cfg.MaxAttempts, "dlq": cfg.DLQ}})
 	return nil
 }
@@ -353,24 +369,12 @@ func (b *MemoryBroker) Nack(ctx context.Context, jobID string, err error) error 
 func (b *MemoryBroker) Complete(ctx context.Context, r JobResult) error {
 	var waiters []chan JobResult
 	b.mu.Lock()
-	job := b.jobs[r.JobID]
-	if r.Queue == "" {
-		r.Queue = job.Queue
-	}
-	if r.TaskID == "" {
-		r.TaskID = job.TaskID
-	}
-	if r.WorkflowID == "" {
-		r.WorkflowID = job.WorkflowID
-	}
-	if r.NodeID == "" {
-		r.NodeID = job.NodeID
-	}
 	b.results[r.JobID] = r
 	waiters = b.waiters[r.JobID]
 	delete(b.waiters, r.JobID)
 	if r.Queue != "" {
 		if q := b.queues[r.Queue]; q != nil {
+			q.completed++
 			event := "job.completed"
 			status := "completed"
 			message := "job completed successfully"
@@ -378,10 +382,8 @@ func (b *MemoryBroker) Complete(ctx context.Context, r JobResult) error {
 				event = "job.result.failed"
 				status = "failed"
 				message = "job result released with failure"
-			} else {
-				q.completed++
 			}
-			b.record(BrokerEvent{Event: event, Queue: r.Queue, JobID: r.JobID, TaskID: r.TaskID, WorkflowID: r.WorkflowID, NodeID: r.NodeID, Attempt: job.Attempt, Status: status, Error: r.Error, Stack: r.Stack, Message: message})
+			b.record(BrokerEvent{Event: event, Queue: r.Queue, JobID: r.JobID, TaskID: r.TaskID, WorkflowID: r.WorkflowID, NodeID: r.NodeID, Status: status, Error: r.Error, Stack: r.Stack, Message: message})
 		}
 	}
 	b.mu.Unlock()
@@ -441,7 +443,9 @@ func (b *MemoryBroker) StartConsumer(ctx context.Context, cfg QueueConsumerConfi
 	}
 	cctx, cancel := context.WithCancel(ctx)
 	now := time.Now()
-	mc := &memoryConsumer{info: QueueConsumerInfo{ID: cfg.ID, Queue: cfg.Queue, Workflow: cfg.Workflow, Concurrency: cfg.Concurrency, Status: ConsumerRunning, StartedAt: now, UpdatedAt: now, LastHeartbeat: now, Workers: cfg.Concurrency, LastEvent: "started"}, cancel: cancel}
+	heartbeatInterval := parseDurationDefault(cfg.HeartbeatInterval, 15*time.Second)
+	heartbeatLogInterval := parseDurationDefault(cfg.HeartbeatLogInterval, 30*time.Second)
+	mc := &memoryConsumer{info: QueueConsumerInfo{ID: cfg.ID, Queue: cfg.Queue, Workflow: cfg.Workflow, Concurrency: cfg.Concurrency, Status: ConsumerRunning, StartedAt: now, UpdatedAt: now, LastHeartbeat: now, Workers: cfg.Concurrency, LastEvent: "started"}, cancel: cancel, heartbeatInterval: heartbeatInterval, heartbeatLogInterval: heartbeatLogInterval, debug: cfg.Debug}
 	b.consumers[cfg.ID] = mc
 	b.record(BrokerEvent{Event: "consumer.started", Queue: cfg.Queue, ConsumerID: cfg.ID, WorkflowID: cfg.Workflow, Status: string(ConsumerRunning), Message: "consumer started", Data: map[string]any{"concurrency": cfg.Concurrency}})
 	jobs := queue.jobs
@@ -452,16 +456,35 @@ func (b *MemoryBroker) StartConsumer(ctx context.Context, cfg QueueConsumerConfi
 	return nil
 }
 
+func parseDurationDefault(raw string, fallback time.Duration) time.Duration {
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
+}
+
+func (b *MemoryBroker) consumerHeartbeatInterval(id string) time.Duration {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if c := b.consumers[id]; c != nil && c.heartbeatInterval > 0 {
+		return c.heartbeatInterval
+	}
+	return 15 * time.Second
+}
+
 func (b *MemoryBroker) consumerLoop(ctx context.Context, id string, jobs <-chan Job, handler QueueConsumerHandler) {
 	b.consumerEvent(id, "consumer.worker.started", "worker loop started", nil)
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeatInterval := b.consumerHeartbeatInterval(id)
+	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
 	defer func() {
 		if r := recover(); r != nil {
-			stack := string(debug.Stack())
-			log.Printf("dagflow queue worker panic recovered consumer=%s panic=%v\n%s", id, r, stack)
 			b.bumpConsumer(id, false)
-			b.consumerEvent(id, "consumer.worker.panic", "worker loop panic: "+stack, fmt.Errorf("%v", r))
+			b.consumerEvent(id, "consumer.worker.panic", "worker loop panic", fmt.Errorf("%v", r))
 		}
 		b.consumerEvent(id, "consumer.worker.stopped", "worker loop stopped", nil)
 	}()
@@ -480,7 +503,7 @@ func (b *MemoryBroker) consumerLoop(ctx context.Context, id string, jobs <-chan 
 		if status == ConsumerStopped {
 			return
 		}
-		if status == ConsumerPaused {
+		if status == ConsumerPaused || b.consumerQueuePaused(id) {
 			select {
 			case <-time.After(100 * time.Millisecond):
 				continue
@@ -527,13 +550,16 @@ func safeHandleJob(ctx context.Context, handler QueueConsumerHandler, job Job) (
 		if r := recover(); r != nil {
 			jr.Error = fmt.Sprintf("panic: %v", r)
 			jr.Stack = string(debug.Stack())
-			log.Printf("dagflow queue job panic recovered queue=%s job=%s task=%s workflow=%s node=%s panic=%v\n%s", job.Queue, job.ID, job.TaskID, job.WorkflowID, job.NodeID, r, jr.Stack)
+			jr.Status = "panic"
 		}
 		if jr.FinishedAt.IsZero() {
 			jr.FinishedAt = time.Now()
 		}
 	}()
 	jr = handler(ctx, job)
+	if jr.Error == "" && jr.Status == "" {
+		jr.Status = "succeeded"
+	}
 	if jr.JobID == "" {
 		jr.JobID = job.ID
 	}
@@ -615,6 +641,9 @@ func (b *MemoryBroker) nackJob(ctx context.Context, job Job, err error) bool {
 	b.record(BrokerEvent{Event: "job.dead", Queue: job.Queue, JobID: job.ID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: "dead", Error: fmt.Sprint(err), Message: "job reached terminal failure"})
 	b.mu.Unlock()
 	if cfg.DLQ != "" {
+		if !cfg.DLQBusinessRejections && IsPermanentError(err) && errors.Is(err, ErrTaskRejected) {
+			return true
+		}
 		dlq := job
 		dlq.ID = newID("job")
 		dlq.Queue = cfg.DLQ
@@ -642,10 +671,21 @@ func (b *MemoryBroker) consumerHeartbeat(id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if c := b.consumers[id]; c != nil {
-		c.info.LastHeartbeat = time.Now()
-		c.info.UpdatedAt = c.info.LastHeartbeat
+		now := time.Now()
+		c.info.LastHeartbeat = now
+		c.info.UpdatedAt = now
 		c.info.LastEvent = "heartbeat"
-		b.record(BrokerEvent{Event: "consumer.heartbeat", Queue: c.info.Queue, ConsumerID: id, WorkflowID: c.info.Workflow, Status: string(c.info.Status), Message: "consumer heartbeat"})
+		shouldLog := c.debug
+		if c.heartbeatLogInterval <= 0 {
+			c.heartbeatLogInterval = 30 * time.Second
+		}
+		if !shouldLog && (c.lastHeartbeatLog.IsZero() || now.Sub(c.lastHeartbeatLog) >= c.heartbeatLogInterval) {
+			shouldLog = true
+		}
+		if shouldLog {
+			c.lastHeartbeatLog = now
+			b.record(BrokerEvent{Event: "consumer.heartbeat", Queue: c.info.Queue, ConsumerID: id, WorkflowID: c.info.Workflow, Status: string(c.info.Status), Message: "consumer heartbeat"})
+		}
 	}
 }
 
@@ -761,6 +801,62 @@ func (b *MemoryBroker) StopConsumer(id string) error {
 	return nil
 }
 
+func (b *MemoryBroker) consumerQueuePaused(id string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	c := b.consumers[id]
+	if c == nil {
+		return false
+	}
+	q := b.queues[c.info.Queue]
+	return q != nil && q.paused
+}
+
+func (b *MemoryBroker) PauseQueue(id string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	q := b.queues[id]
+	if q == nil {
+		return fmt.Errorf("queue %s not found", id)
+	}
+	q.paused = true
+	b.record(BrokerEvent{Event: "queue.paused", Queue: id, Status: "paused", Message: "queue paused"})
+	return nil
+}
+
+func (b *MemoryBroker) ResumeQueue(id string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	q := b.queues[id]
+	if q == nil {
+		return fmt.Errorf("queue %s not found", id)
+	}
+	q.paused = false
+	b.record(BrokerEvent{Event: "queue.resumed", Queue: id, Status: "running", Message: "queue resumed"})
+	return nil
+}
+
+func (b *MemoryBroker) PurgeQueue(id string) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	q := b.queues[id]
+	if q == nil {
+		return 0, fmt.Errorf("queue %s not found", id)
+	}
+	purged := 0
+	for {
+		select {
+		case job := <-q.jobs:
+			delete(b.jobs, job.ID)
+			delete(b.jobQueues, job.ID)
+			purged++
+		default:
+			b.record(BrokerEvent{Event: "queue.purged", Queue: id, Status: "purged", Message: "queue purged", Data: map[string]any{"purged": purged}})
+			return purged, nil
+		}
+	}
+}
+
 func (b *MemoryBroker) ListConsumers() []QueueConsumerInfo {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -782,7 +878,7 @@ func (b *MemoryBroker) ListQueues() []QueueInfo {
 				consumers++
 			}
 		}
-		out = append(out, QueueInfo{ID: q.cfg.ID, Capacity: cap(q.jobs), Depth: len(q.jobs), Published: q.published, Acked: q.acked, Nacked: q.nacked, Completed: q.completed, Consumers: consumers, Retried: q.retried, Dead: q.dead, MaxAttempts: q.cfg.MaxAttempts, DLQ: q.cfg.DLQ})
+		out = append(out, QueueInfo{ID: q.cfg.ID, Capacity: cap(q.jobs), Depth: len(q.jobs), Published: q.published, Acked: q.acked, Nacked: q.nacked, Completed: q.completed, Consumers: consumers, Retried: q.retried, Dead: q.dead, MaxAttempts: q.cfg.MaxAttempts, DLQ: q.cfg.DLQ, Paused: q.paused})
 	}
 	return out
 }
@@ -889,8 +985,10 @@ func (e *Engine) executeJob(ctx context.Context, job Job) JobResult {
 	jr := JobResult{JobID: job.ID, Queue: job.Queue, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Result: res, StartedAt: started, FinishedAt: time.Now()}
 	if err != nil {
 		jr.Error = err.Error()
+		jr.Status = "failed"
 		log.Printf("dagflow queue node job failed queue=%s job=%s task=%s workflow=%s node=%s error=%v", job.Queue, job.ID, job.TaskID, job.WorkflowID, job.NodeID, err)
 	} else {
+		jr.Status = "succeeded"
 		log.Printf("dagflow queue node job completed queue=%s job=%s task=%s workflow=%s node=%s", job.Queue, job.ID, job.TaskID, job.WorkflowID, job.NodeID)
 	}
 	if s, ok := e.store.(ExtendedStore); ok && leaseID != "" {
@@ -908,6 +1006,7 @@ func (e *Engine) executeWorkflowQueueJob(ctx context.Context, job Job) JobResult
 	task, err := e.store.Get(job.TaskID)
 	if err != nil {
 		jr.Error = err.Error()
+		jr.Status = "failed"
 		jr.FinishedAt = time.Now()
 		return jr
 	}
@@ -929,8 +1028,10 @@ func (e *Engine) executeWorkflowQueueJob(ctx context.Context, job Job) JobResult
 	e.finishTask(task, err)
 	if err != nil {
 		jr.Error = err.Error()
+		jr.Status = "failed"
 		log.Printf("dagflow queue workflow job failed queue=%s job=%s task=%s workflow=%s error=%v", job.Queue, job.ID, job.TaskID, job.WorkflowID, err)
 	} else {
+		jr.Status = "succeeded"
 		log.Printf("dagflow queue workflow job completed queue=%s job=%s task=%s workflow=%s status=%s", job.Queue, job.ID, job.TaskID, job.WorkflowID, task.Status)
 	}
 	jr.Result = task.Result

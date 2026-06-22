@@ -836,7 +836,7 @@ func buildNotificationRule(c NotificationRuleConfig) NotificationRule {
 }
 
 func buildTaskRule(c TaskRuleConfig) TaskRule {
-	return TaskRule{ID: c.ID, Enabled: c.Enabled, Events: append([]string(nil), c.Events...), When: normalizeBCLExpr(c.When), Condition: strings.TrimSpace(c.Condition), Action: c.Action, Message: c.Message, Data: buildDataSpec(c.Data)}
+	return TaskRule{ID: c.ID, Enabled: c.Enabled, Events: append([]string(nil), c.Events...), When: c.When, Condition: c.Condition, Action: c.Action, Message: c.Message, Data: buildDataSpec(c.Data)}
 }
 
 func buildDataSpec(c DataConfig) DataSpec {

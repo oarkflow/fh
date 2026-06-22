@@ -15,12 +15,12 @@ import (
 )
 
 var (
-	dateBuf          atomic.Value
-	dateCacheUnix    int64
-	dateMu           sync.Mutex
-	dateValueBuf     atomic.Value
+	dateBuf            atomic.Value
+	dateCacheUnix      int64
+	dateMu             sync.Mutex
+	dateValueBuf       atomic.Value
 	dateValueCacheUnix int64
-	dateValueMu      sync.Mutex
+	dateValueMu        sync.Mutex
 )
 
 // cachedDate returns the full "Date: ...\r\n" header line.
@@ -857,7 +857,6 @@ func (c *Ctx) writeResponseString(s string) error {
 		}
 	}
 
-	c.responseTime = time.Now()
 	*c.writeBuf = buf
 	return writeAll(c.conn, buf)
 }
@@ -964,7 +963,6 @@ func (c *Ctx) writeResponse(body []byte) error {
 		}
 	}
 
-	c.responseTime = time.Now()
 	*c.writeBuf = buf
 	return writeAll(c.conn, buf)
 }
@@ -999,6 +997,16 @@ func appendExtraHeaders(buf []byte, headers []Header) []byte {
 
 // appendStatusLine writes "HTTP/1.1 <code> <text>\r\n" to buf.
 func appendStatusLine(buf []byte, code int) []byte {
+	switch code {
+	case StatusOK:
+		return append(buf, "HTTP/1.1 200 OK\r\n"...)
+	case StatusNotFound:
+		return append(buf, "HTTP/1.1 404 Not Found\r\n"...)
+	case StatusBadRequest:
+		return append(buf, "HTTP/1.1 400 Bad Request\r\n"...)
+	case StatusInternalServerError:
+		return append(buf, "HTTP/1.1 500 Internal Server Error\r\n"...)
+	}
 	buf = append(buf, "HTTP/1.1 "...)
 	buf = appendInt(buf, code)
 	buf = append(buf, ' ')

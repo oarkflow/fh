@@ -110,7 +110,7 @@ type App struct {
 }
 
 type connState struct {
-	active bool
+	active atomic.Bool
 	h2     *h2Conn
 }
 
@@ -379,6 +379,9 @@ func (a *App) Serve(ln net.Listener) error {
 	a.connMu.Unlock()
 	a.closed.Store(false)
 	a.draining.Store(false)
+	// Freeze routes once the server starts. This removes router RWMutex
+	// traffic from every request while preserving build-time safety.
+	a.router.Freeze()
 
 	for _, fn := range a.hooks.onListen {
 		if err := fn(); err != nil {
@@ -485,7 +488,7 @@ func (a *App) beginShutdown() error {
 	for conn, state := range a.conns {
 		if state.h2 != nil {
 			h2conns = append(h2conns, state.h2)
-		} else if !state.active {
+		} else if !state.active.Load() {
 			_ = conn.Close()
 		}
 	}
@@ -519,16 +522,18 @@ func (a *App) runShutdownHooks() {
 
 func (a *App) setConnActive(conn net.Conn, active bool) {
 	a.connMu.Lock()
-	if state := a.conns[conn]; state != nil {
-		state.active = active
-	}
+	state := a.conns[conn]
 	a.connMu.Unlock()
+	if state != nil {
+		state.active.Store(active)
+	}
 }
 
 func (a *App) setH2Conn(conn net.Conn, h2c *h2Conn) {
 	a.connMu.Lock()
 	if state := a.conns[conn]; state != nil {
-		state.active, state.h2 = true, h2c
+		state.active.Store(true)
+		state.h2 = h2c
 	}
 	a.connMu.Unlock()
 }
@@ -563,6 +568,9 @@ func (a *App) serveConn(conn net.Conn) {
 	for _, fn := range a.hooks.onConnect {
 		fn(conn)
 	}
+	a.connMu.Lock()
+	state := a.conns[conn]
+	a.connMu.Unlock()
 	if tc, ok := conn.(*tls.Conn); ok && !a.cfg.DisableHTTP2 {
 		_ = tc.SetDeadline(time.Now().Add(a.cfg.ReadTimeout))
 		if err := tc.Handshake(); err != nil {
@@ -639,7 +647,9 @@ func (a *App) serveConn(conn net.Conn) {
 			}
 			headEnd = findHeaderEnd(accumulated)
 		}
-		a.setConnActive(conn, true)
+		if state != nil {
+			state.active.Store(true)
+		}
 
 		// ── Parse request head ────────────────────────────────────────
 		ctx := acquireCtx(conn, a)
@@ -821,7 +831,9 @@ func (a *App) serveConn(conn net.Conn) {
 				accumulated = buf[:0]
 			}
 		}
-		a.setConnActive(conn, false)
+		if state != nil {
+			state.active.Store(false)
+		}
 	}
 }
 
@@ -914,12 +926,9 @@ func (a *App) chain(handlers []HandlerFunc) HandlerFunc {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 func findHeaderEnd(b []byte) int {
-	for i := 0; i < len(b)-3; i++ {
-		if b[i] == '\r' && b[i+1] == '\n' && b[i+2] == '\r' && b[i+3] == '\n' {
-			return i
-		}
-	}
-	return -1
+	// bytes.Index uses optimized runtime routines on supported architectures and
+	// is materially faster than a Go byte-by-byte loop for pipelined traffic.
+	return bytes.Index(b, strHeaderEnd)
 }
 
 func (a *App) emitError(err error) {

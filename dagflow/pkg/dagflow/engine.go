@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -240,60 +239,24 @@ func (e *Engine) ValidateChainsAndWorkflowNodes() error {
 				return fmt.Errorf("chain %s references missing workflow %s", ch.ID, id)
 			}
 		}
-		if ch.Condition != "" {
-			if _, ok := e.conditions[ch.Condition]; !ok {
-				return fmt.Errorf("chain %s references missing condition %s", ch.ID, ch.Condition)
-			}
-		}
 	}
 	for _, wf := range e.flows {
-		if err := e.validateWorkflowConditionRefsLocked(wf); err != nil {
+		if err := e.validateConditionRefLocked("workflow "+wf.ID, wf.ID, wf.Rules, wf.Notifications); err != nil {
 			return err
+		}
+		for _, edge := range wf.Edges {
+			if edge.Condition != "" && e.conditions[edge.Condition].Name == "" {
+				return fmt.Errorf("workflow %s edge %s references missing condition %s", wf.ID, edge.ID, edge.Condition)
+			}
 		}
 		for _, n := range wf.Nodes {
 			if n.Type == NodeWorkflow && e.flows[n.Workflow] == nil {
 				return fmt.Errorf("workflow %s node %s references missing workflow %s", wf.ID, n.ID, n.Workflow)
 			}
-		}
-	}
-	return nil
-}
-
-func (e *Engine) validateWorkflowConditionRefsLocked(wf *Workflow) error {
-	if wf == nil {
-		return nil
-	}
-	for _, r := range wf.Rules {
-		if err := e.validateConditionRefLocked(r.Condition, "workflow %s rule %s", wf.ID, r.ID); err != nil {
-			return err
-		}
-	}
-	for _, nr := range wf.Notifications {
-		if err := e.validateConditionRefLocked(nr.Condition, "workflow %s notification %s", wf.ID, nr.ID); err != nil {
-			return err
-		}
-	}
-	for _, n := range wf.Nodes {
-		if err := e.validateConditionRefLocked(n.Condition, "workflow %s node %s", wf.ID, n.ID); err != nil {
-			return err
-		}
-		for _, r := range n.Rules {
-			if err := e.validateConditionRefLocked(r.Condition, "workflow %s node %s rule %s", wf.ID, n.ID, r.ID); err != nil {
-				return err
+			if n.Condition != "" && e.conditions[n.Condition].Name == "" {
+				return fmt.Errorf("workflow %s node %s references missing condition %s", wf.ID, n.ID, n.Condition)
 			}
-		}
-		for _, nr := range n.Notifications {
-			if err := e.validateConditionRefLocked(nr.Condition, "workflow %s node %s notification %s", wf.ID, n.ID, nr.ID); err != nil {
-				return err
-			}
-		}
-	}
-	for _, edges := range wf.Outgoing {
-		for _, edge := range edges {
-			if edge == nil {
-				continue
-			}
-			if err := e.validateConditionRefLocked(edge.Condition, "workflow %s edge %s", wf.ID, edge.ID); err != nil {
+			if err := e.validateConditionRefLocked("workflow "+wf.ID+" node "+n.ID, wf.ID, n.Rules, n.Notifications); err != nil {
 				return err
 			}
 		}
@@ -301,15 +264,19 @@ func (e *Engine) validateWorkflowConditionRefsLocked(wf *Workflow) error {
 	return nil
 }
 
-func (e *Engine) validateConditionRefLocked(condition, format string, args ...any) error {
-	condition = strings.TrimSpace(condition)
-	if condition == "" {
-		return nil
+func (e *Engine) validateConditionRefLocked(scope, workflowID string, rules []TaskRule, notifications []NotificationRule) error {
+	for _, rule := range rules {
+		if rule.Condition != "" && e.conditions[rule.Condition].Name == "" {
+			return fmt.Errorf("%s rule %s references missing condition %s", scope, rule.ID, rule.Condition)
+		}
 	}
-	if _, ok := e.conditions[condition]; ok {
-		return nil
+	for _, nr := range notifications {
+		if nr.Condition != "" && e.conditions[nr.Condition].Name == "" {
+			return fmt.Errorf("%s notification %s references missing condition %s", scope, nr.ID, nr.Condition)
+		}
 	}
-	return fmt.Errorf(format+" references missing condition %s", append(args, condition)...)
+	_ = workflowID
+	return nil
 }
 func (e *Engine) workflow(id string) (*Workflow, error) {
 	e.mu.RLock()
@@ -498,7 +465,6 @@ func (e *Engine) RunStandaloneNode(ctx context.Context, workflowID, nodeID strin
 }
 
 func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queue []RunItem) error {
-	ensureTaskRuntimeState(task)
 	if len(queue) == 0 {
 		queue = task.Cursor
 	}
@@ -631,7 +597,6 @@ func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queu
 }
 
 func (e *Engine) runNode(parent context.Context, wf *Workflow, task *Task, node *Node, input any, stateKey string) (any, error) {
-	ensureTaskRuntimeState(task)
 	state := task.NodeStates[stateKey]
 	if state == nil {
 		state = &NodeState{NodeID: stateKey, Status: NodePending}
@@ -784,7 +749,6 @@ func (e *Engine) dispatchNode(ctx context.Context, wf *Workflow, task *Task, nod
 }
 
 func (e *Engine) executeHandler(ctx context.Context, wf *Workflow, task *Task, node *Node, input any, attempt int) (any, error) {
-	ensureTaskRuntimeState(task)
 	if err := e.ValidateAgainstSchema(node.InputSchema, input); err != nil {
 		return nil, err
 	}
@@ -1080,11 +1044,19 @@ func (e *Engine) finishTask(task *Task, err error) {
 		return
 	}
 	if err != nil {
-		e.metrics.Inc("workflow_failed_total")
-		task.Status = TaskFailed
-		task.Error = err.Error()
-		task.LastError = err.Error()
-		e.audit(task, "task.failed", "task failed", map[string]any{"error": err.Error()})
+		if IsPermanentError(err) && errors.Is(err, ErrTaskRejected) {
+			e.metrics.Inc("workflow_rejected_total")
+			task.Status = TaskRejected
+			task.Error = err.Error()
+			task.LastError = err.Error()
+			e.audit(task, "task.rejected", "task rejected", map[string]any{"error": err.Error()})
+		} else {
+			e.metrics.Inc("workflow_failed_total")
+			task.Status = TaskFailed
+			task.Error = err.Error()
+			task.LastError = err.Error()
+			e.audit(task, "task.failed", "task failed", map[string]any{"error": err.Error()})
+		}
 	} else {
 		task.Status = TaskCompleted
 		e.metrics.Inc("workflow_completed_total")

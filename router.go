@@ -257,18 +257,24 @@ func (r *Router) Find(method, path string, params *[]Param) HandlerFunc {
 }
 
 func (r *Router) FindBytes(method, path []byte, params *[]Param) HandlerFunc {
+	// Request parser already validates method as a token and normal HTTP clients
+	// send canonical uppercase methods. Avoid strings.ToUpper on the hot path.
 	if r.frozen.Load() {
-		return r.findNoLock(b2s(method), path, params)
+		return r.findNoLockCanonical(b2s(method), path, params)
 	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.findNoLock(b2s(method), path, params)
+	return r.findNoLockCanonical(b2s(method), path, params)
 }
 
 func (r *Router) findNoLock(method string, path []byte, params *[]Param) HandlerFunc {
 	method = strings.ToUpper(method)
+	return r.findNoLockCanonical(method, path, params)
+}
+
+func (r *Router) findNoLockCanonical(method string, path []byte, params *[]Param) HandlerFunc {
 
 	var local []Param
 	if params == nil {

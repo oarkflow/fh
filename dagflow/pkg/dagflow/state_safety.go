@@ -2,6 +2,9 @@ package dagflow
 
 import "time"
 
+// ensureTaskRuntimeState restores all runtime maps/slices that may be nil after
+// JSON decoding, partial store loading, or manually-created task values. Every
+// hot execution path should call this before mutating task state.
 func ensureTaskRuntimeState(task *Task) {
 	if task == nil {
 		return
@@ -21,8 +24,20 @@ func ensureTaskRuntimeState(task *Task) {
 	if task.Visits == nil {
 		task.Visits = map[string]int{}
 	}
-	for _, st := range task.JoinStates {
-		ensureJoinStateRuntimeState(st)
+	if task.Audit == nil {
+		task.Audit = []AuditEvent{}
+	}
+	if task.Errors == nil {
+		task.Errors = []TaskError{}
+	}
+	if task.CurrentNodes == nil {
+		task.CurrentNodes = []string{}
+	}
+	if task.PreviousNodes == nil {
+		task.PreviousNodes = []string{}
+	}
+	if task.Cursor == nil {
+		task.Cursor = []RunItem{}
 	}
 	if task.CreatedAt.IsZero() {
 		task.CreatedAt = time.Now()
@@ -30,20 +45,41 @@ func ensureTaskRuntimeState(task *Task) {
 	if task.UpdatedAt.IsZero() {
 		task.UpdatedAt = task.CreatedAt
 	}
+	for id, st := range task.NodeStates {
+		if st == nil {
+			task.NodeStates[id] = &NodeState{NodeID: id, Status: NodePending}
+			continue
+		}
+		if st.NodeID == "" {
+			st.NodeID = id
+		}
+		if st.Status == "" {
+			st.Status = NodePending
+		}
+	}
+	for id, js := range task.JoinStates {
+		ensureJoinStateRuntime(id, js)
+	}
 }
 
-func ensureJoinStateRuntimeState(st *JoinState) {
-	if st == nil {
+func ensureJoinStateRuntime(id string, js *JoinState) {
+	if js == nil {
 		return
 	}
-	if st.CompletedSources == nil {
-		st.CompletedSources = map[string]bool{}
+	if js.EdgeID == "" {
+		js.EdgeID = id
 	}
-	if st.Results == nil {
-		st.Results = map[string]any{}
+	if js.CompletedSources == nil {
+		js.CompletedSources = map[string]bool{}
 	}
-	if st.Errors == nil {
-		st.Errors = map[string]string{}
+	if js.Results == nil {
+		js.Results = map[string]any{}
+	}
+	if js.Errors == nil {
+		js.Errors = map[string]string{}
+	}
+	if js.Sources == nil {
+		js.Sources = []string{}
 	}
 }
 
@@ -63,13 +99,13 @@ func ensureChainRunRuntimeState(run *ChainRun) {
 	if run.Audit == nil {
 		run.Audit = []AuditEvent{}
 	}
-	for _, task := range run.Tasks {
-		ensureTaskRuntimeState(task)
-	}
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now()
 	}
 	if run.UpdatedAt.IsZero() {
 		run.UpdatedAt = run.CreatedAt
+	}
+	for _, task := range run.Tasks {
+		ensureTaskRuntimeState(task)
 	}
 }

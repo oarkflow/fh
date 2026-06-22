@@ -25,8 +25,12 @@ func ValidateProductionSecurity() error {
 	if os.Getenv("DAGFLOW_SIGNING_SECRET") == "" || os.Getenv("DAGFLOW_SIGNING_SECRET") == "dev-change-me" {
 		return fmt.Errorf("DAGFLOW_SIGNING_SECRET must be set to a strong secret in production")
 	}
-	if os.Getenv("DAGFLOW_ADMIN_TOKEN") == "" {
+	adminToken := os.Getenv("DAGFLOW_ADMIN_TOKEN")
+	if adminToken == "" {
 		return fmt.Errorf("DAGFLOW_ADMIN_TOKEN must be set in production")
+	}
+	if adminToken == "dev-secret" || adminToken == "change-me" || len(adminToken) < 24 {
+		return fmt.Errorf("DAGFLOW_ADMIN_TOKEN must be a strong non-development token in production")
 	}
 	return nil
 }

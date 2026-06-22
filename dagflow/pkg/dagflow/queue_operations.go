@@ -142,3 +142,30 @@ func (e *Engine) StopConsumer(id string) error {
 	}
 	return fmt.Errorf("broker does not support managed consumers")
 }
+
+type QueueAdminBroker interface {
+	PauseQueue(string) error
+	ResumeQueue(string) error
+	PurgeQueue(string) (int, error)
+}
+
+func (e *Engine) PauseQueue(id string) error {
+	if qb, ok := e.broker.(QueueAdminBroker); ok {
+		return qb.PauseQueue(id)
+	}
+	return fmt.Errorf("broker does not support queue pause")
+}
+
+func (e *Engine) ResumeQueue(id string) error {
+	if qb, ok := e.broker.(QueueAdminBroker); ok {
+		return qb.ResumeQueue(id)
+	}
+	return fmt.Errorf("broker does not support queue resume")
+}
+
+func (e *Engine) PurgeQueue(id string) (int, error) {
+	if qb, ok := e.broker.(QueueAdminBroker); ok {
+		return qb.PurgeQueue(id)
+	}
+	return 0, fmt.Errorf("broker does not support queue purge")
+}

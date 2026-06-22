@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -129,6 +130,7 @@ func validateFieldType(name string, f SchemaField, v any) error {
 func (e *Engine) Metrics() MetricSnapshot { return e.metrics.Snapshot() }
 
 type MetricsRegistry struct {
+	mu       sync.RWMutex
 	counters map[string]*atomic.Uint64
 	gauges   map[string]*atomic.Int64
 }
@@ -140,10 +142,17 @@ func (m *MetricsRegistry) Inc(name string) {
 	if m == nil {
 		return
 	}
+	m.mu.RLock()
 	c := m.counters[name]
+	m.mu.RUnlock()
 	if c == nil {
-		c = &atomic.Uint64{}
-		m.counters[name] = c
+		m.mu.Lock()
+		c = m.counters[name]
+		if c == nil {
+			c = &atomic.Uint64{}
+			m.counters[name] = c
+		}
+		m.mu.Unlock()
 	}
 	c.Add(1)
 }
@@ -151,10 +160,17 @@ func (m *MetricsRegistry) SetGauge(name string, v int64) {
 	if m == nil {
 		return
 	}
+	m.mu.RLock()
 	g := m.gauges[name]
+	m.mu.RUnlock()
 	if g == nil {
-		g = &atomic.Int64{}
-		m.gauges[name] = g
+		m.mu.Lock()
+		g = m.gauges[name]
+		if g == nil {
+			g = &atomic.Int64{}
+			m.gauges[name] = g
+		}
+		m.mu.Unlock()
 	}
 	g.Store(v)
 }
@@ -163,6 +179,8 @@ func (m *MetricsRegistry) Snapshot() MetricSnapshot {
 	if m == nil {
 		return out
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for k, v := range m.counters {
 		out.Counters[k] = v.Load()
 	}
@@ -170,4 +188,43 @@ func (m *MetricsRegistry) Snapshot() MetricSnapshot {
 		out.Gauges[k] = v.Load()
 	}
 	return out
+}
+
+func (m MetricSnapshot) Prometheus() string {
+	var b strings.Builder
+	counterNames := make([]string, 0, len(m.Counters))
+	for k := range m.Counters {
+		counterNames = append(counterNames, k)
+	}
+	sort.Strings(counterNames)
+	for _, k := range counterNames {
+		name := prometheusName(k)
+		fmt.Fprintf(&b, "# TYPE %s counter\n%s %d\n", name, name, m.Counters[k])
+	}
+	gaugeNames := make([]string, 0, len(m.Gauges))
+	for k := range m.Gauges {
+		gaugeNames = append(gaugeNames, k)
+	}
+	sort.Strings(gaugeNames)
+	for _, k := range gaugeNames {
+		name := prometheusName(k)
+		fmt.Fprintf(&b, "# TYPE %s gauge\n%s %d\n", name, name, m.Gauges[k])
+	}
+	return b.String()
+}
+
+func prometheusName(s string) string {
+	if s == "" {
+		return "dagflow_metric"
+	}
+	var b strings.Builder
+	b.WriteString("dagflow_")
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
