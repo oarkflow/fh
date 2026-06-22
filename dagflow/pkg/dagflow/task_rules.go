@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 	"time"
 )
@@ -159,13 +161,23 @@ func (e *Engine) evalTaskRuleMatch(rule TaskRule, facts map[string]any) (bool, e
 	return e.evalNamedOrInline(condition, when, facts)
 }
 
+func shouldLogRuleEval(wf *Workflow) bool {
+	return wf != nil && wf.Debug || os.Getenv("DAGFLOW_RULE_DEBUG") == "1" || strings.EqualFold(os.Getenv("DAGFLOW_RULE_DEBUG"), "true")
+}
+
 func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, node *Node, event string, input any) error {
 	for _, rule := range collectTaskRules(wf, node) {
 		if !ruleEnabled(rule.Enabled) || !matchesEvent(rule.Events, event) {
 			continue
 		}
-		facts := e.workflowFacts(task, node, input, map[string]any{"event": event})
+		facts := e.workflowFacts(task, node, input, map[string]any{"event": event, "rule": map[string]any{"id": rule.ID, "action": string(rule.Action.Type)}})
 		ok, err := e.evalTaskRuleMatch(rule, facts)
+		if shouldLogRuleEval(wf) {
+			log.Printf(
+				"dagflow rule eval workflow=%s task=%s node=%s event=%s rule=%s condition=%q when=%q action=%s matched=%v input=%v task_input=%v error=%v",
+				safeWorkflowID(wf), safeTaskID(task), safeNodeID(node), event, rule.ID, rule.Condition, normalizeBCLExpr(rule.When), rule.Action.Type, ok, facts["input"], facts["task_input"], err,
+			)
+		}
 		if err != nil {
 			return fmt.Errorf("task rule %s: %w", rule.ID, err)
 		}
@@ -378,4 +390,18 @@ func (e *Engine) decideTaskApproval(ctx context.Context, taskID, approver, reaso
 	}
 	e.finishTask(task, err)
 	return task, err
+}
+
+func safeWorkflowID(wf *Workflow) string {
+	if wf == nil {
+		return ""
+	}
+	return wf.ID
+}
+
+func safeTaskID(task *Task) string {
+	if task == nil {
+		return ""
+	}
+	return task.ID
 }

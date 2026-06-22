@@ -2081,7 +2081,28 @@ curl -s -X POST localhost:8080/ops/approvals/bulk/approve \
 
 ### Demo workflow
 
-`app/bcl/20-workflows/notification_approval_demo.bcl` demonstrates workflow-level notifications, node-level notifications, a rule-based rejection, and a manual approval gate.
+`app/bcl/20-workflows/notification_approval_demo.bcl` demonstrates workflow-level notifications, node-level notifications, a rule-based rejection, and a manual approval gate. The demo now references named conditions from `app/bcl/20-workflows/conditions.bcl` instead of duplicating inline rule logic, so rules, branches, routes, and middleware all use the same condition engine.
+
+Important named conditions used by this workflow:
+
+```bcl
+condition "blocked_recipient_domain" {
+  all [
+    `node.id == "validate"`,
+    `input.to == "blocked@blocked.test"`
+  ]
+}
+
+condition "sensitive_email_subject" {
+  all [`node.id == "send"`]
+  any [
+    `input.request.subject == "approval"`,
+    `input.request.subject == "sensitive"`
+  ]
+}
+```
+
+The blocked-domain reject rule should only fire for `blocked@blocked.test`; normal recipients such as `user@example.com` should pass validation and continue to send/store.
 
 Run a normal request:
 

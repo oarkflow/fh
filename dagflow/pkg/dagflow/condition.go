@@ -164,22 +164,12 @@ func evalBCLBool(expr string, facts map[string]any) (bool, error) {
 	if looksLikeParsedBCLBlock(expr) {
 		return false, NewPermanentError("invalid condition shape; parsed BCL block was assigned to expression: %q", expr)
 	}
-	normalizedFacts := normalizeFactsForBCL(facts)
 
-	// Evaluate common boolean guard expressions with DAGFlow's deterministic evaluator first.
-	// This avoids accidental truthy behavior or ambiguous map/list handling from the BCL
-	// runtime for workflow control expressions such as:
-	//   node.id == "validate" && input.to == "blocked@blocked.test"
-	//   input.request.subject == "approval" || input.request.subject == "sensitive"
-	//   result.valid == true
-	if ok, handled, err := evalSimpleBoolExpression(expr, normalizedFacts); handled {
-		if err != nil {
-			return false, NewPermanentError("expression %q failed: %w", expr, err)
-		}
-		return ok, nil
-	}
-
-	ok1, err := bcl.Eval(expr, normalizedFacts)
+	// Keep all workflow guards, rule guards, route guards, middleware guards,
+	// and named conditions on the same condition engine. Do not use a separate
+	// ad-hoc evaluator here; BCL condition evaluation is the single source of
+	// truth for boolean semantics across DAGFlow.
+	ok1, err := bcl.Eval(expr, normalizeFactsForBCL(facts))
 	if err != nil {
 		return false, NewPermanentError("expression %q failed: %w", expr, err)
 	}
@@ -214,7 +204,19 @@ func (e *Engine) workflowFacts(task *Task, node *Node, result any, extra map[str
 	facts := map[string]any{
 		"result": normalizedResult,
 		"input":  normalizedResult,
-		"node":   map[string]any{"id": safeNodeID(node), "handler": safeNodeHandler(node), "type": safeNodeType(node)},
+		"task_input": normalizeFactValue(func() any {
+			if task != nil {
+				return task.Input
+			}
+			return nil
+		}()),
+		"original_input": normalizeFactValue(func() any {
+			if task != nil {
+				return task.Input
+			}
+			return nil
+		}()),
+		"node": map[string]any{"id": safeNodeID(node), "handler": safeNodeHandler(node), "type": safeNodeType(node)},
 		"task": map[string]any{
 			"id": taskString(task, func(t *Task) string { return t.ID }), "workflow_id": taskString(task, func(t *Task) string { return t.WorkflowID }), "status": taskString(task, func(t *Task) string { return string(t.Status) }),
 			"current_node": taskString(task, func(t *Task) string { return t.CurrentNode }), "previous_node": taskString(task, func(t *Task) string { return t.PreviousNode }), "previous_nodes": safePreviousNodes(task), "last_error": taskString(task, func(t *Task) string { return t.LastError }), "visits": safeTaskVisits(task),

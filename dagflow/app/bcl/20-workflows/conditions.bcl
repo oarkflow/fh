@@ -1,4 +1,8 @@
+# Shared, named conditions used by workflows, edges, route filters, and task rules.
+# Keep business rules here so every guard uses DAGFlow's centralized condition engine.
+
 condition "is_email_valid" {
+  description "Validation node accepted the email request."
   all [
     `result.valid == true`,
     `result.request.to != ""`
@@ -6,7 +10,36 @@ condition "is_email_valid" {
 }
 
 condition "is_email_invalid" {
+  description "Validation node rejected the email request."
   all [
     `result.valid == false`
+  ]
+}
+
+condition "blocked_recipient_domain" {
+  description "Reject only the explicit blocked demo recipient while the validate node is about to run."
+  all [
+    `node.id == "validate"`,
+    `input.to == "blocked@blocked.test"`
+  ]
+}
+
+condition "sensitive_email_subject" {
+  description "Require manual approval before sending sensitive email subjects."
+  all [
+    `node.id == "send"`
+  ]
+  any [
+    `input.request.subject == "approval"`,
+    `input.request.subject == "sensitive"`
+  ]
+}
+
+condition "email_payload_present" {
+  description "Route/request guard for required email payload fields."
+  all [
+    `input.to != ""`,
+    `input.subject != ""`,
+    `input.body != ""`
   ]
 }

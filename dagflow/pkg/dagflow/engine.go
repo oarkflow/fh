@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -239,8 +240,16 @@ func (e *Engine) ValidateChainsAndWorkflowNodes() error {
 				return fmt.Errorf("chain %s references missing workflow %s", ch.ID, id)
 			}
 		}
+		if ch.Condition != "" {
+			if _, ok := e.conditions[ch.Condition]; !ok {
+				return fmt.Errorf("chain %s references missing condition %s", ch.ID, ch.Condition)
+			}
+		}
 	}
 	for _, wf := range e.flows {
+		if err := e.validateWorkflowConditionRefsLocked(wf); err != nil {
+			return err
+		}
 		for _, n := range wf.Nodes {
 			if n.Type == NodeWorkflow && e.flows[n.Workflow] == nil {
 				return fmt.Errorf("workflow %s node %s references missing workflow %s", wf.ID, n.ID, n.Workflow)
@@ -248,6 +257,59 @@ func (e *Engine) ValidateChainsAndWorkflowNodes() error {
 		}
 	}
 	return nil
+}
+
+func (e *Engine) validateWorkflowConditionRefsLocked(wf *Workflow) error {
+	if wf == nil {
+		return nil
+	}
+	for _, r := range wf.Rules {
+		if err := e.validateConditionRefLocked(r.Condition, "workflow %s rule %s", wf.ID, r.ID); err != nil {
+			return err
+		}
+	}
+	for _, nr := range wf.Notifications {
+		if err := e.validateConditionRefLocked(nr.Condition, "workflow %s notification %s", wf.ID, nr.ID); err != nil {
+			return err
+		}
+	}
+	for _, n := range wf.Nodes {
+		if err := e.validateConditionRefLocked(n.Condition, "workflow %s node %s", wf.ID, n.ID); err != nil {
+			return err
+		}
+		for _, r := range n.Rules {
+			if err := e.validateConditionRefLocked(r.Condition, "workflow %s node %s rule %s", wf.ID, n.ID, r.ID); err != nil {
+				return err
+			}
+		}
+		for _, nr := range n.Notifications {
+			if err := e.validateConditionRefLocked(nr.Condition, "workflow %s node %s notification %s", wf.ID, n.ID, nr.ID); err != nil {
+				return err
+			}
+		}
+	}
+	for _, edges := range wf.Outgoing {
+		for _, edge := range edges {
+			if edge == nil {
+				continue
+			}
+			if err := e.validateConditionRefLocked(edge.Condition, "workflow %s edge %s", wf.ID, edge.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (e *Engine) validateConditionRefLocked(condition, format string, args ...any) error {
+	condition = strings.TrimSpace(condition)
+	if condition == "" {
+		return nil
+	}
+	if _, ok := e.conditions[condition]; ok {
+		return nil
+	}
+	return fmt.Errorf(format+" references missing condition %s", append(args, condition)...)
 }
 func (e *Engine) workflow(id string) (*Workflow, error) {
 	e.mu.RLock()

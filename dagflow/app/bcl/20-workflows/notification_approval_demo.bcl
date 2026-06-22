@@ -15,7 +15,7 @@ workflow "notification_approval_demo" {
 
   rule "reject_blocked_domain" {
     events ["node.before"]
-    when `node.id == "validate" && input.to == "blocked@blocked.test"`
+    condition "blocked_recipient_domain"
     message "recipient domain is blocked"
     action {
       type reject
@@ -40,7 +40,7 @@ workflow "notification_approval_demo" {
 
     rule "manual_approval_for_sensitive_subject" {
       events ["node.before"]
-      when `input.request.subject == "approval" || input.request.subject == "sensitive"`
+      condition "sensitive_email_subject"
       message "manual approval required before sending sensitive email"
       action {
         type require_approval
@@ -77,14 +77,14 @@ workflow "notification_approval_demo" {
     from "validate"
     to "send"
     type branch
-    when `result.valid == true`
+    condition "is_email_valid"
   }
 
   edge "invalid_to_store" {
     from "validate"
     to "store"
     type branch
-    when `result.valid == false`
+    condition "is_email_invalid"
   }
 
   edge "send_to_store" {
