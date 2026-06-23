@@ -1,0 +1,216 @@
+# AuthZ DSL Configuration
+
+tenant root {
+  name "Root Organization"
+}
+
+tenant acme-corp {
+  name "Acme Corporation"
+  parent root
+}
+
+tenant globex {
+  name "Globex Industries"
+  parent root
+}
+
+# Policies
+
+policy allow-read {
+  tenant acme-corp
+  effect allow
+  actions [read]
+  resources [document:*]
+  when {
+    subject.type == "user"
+  }
+  priority 10
+}
+
+policy allow-admin {
+  tenant acme-corp
+  effect allow
+  actions [*]
+  resources [*]
+  when {
+    subject.roles contains any [
+      admin
+      superadmin
+    ]
+  }
+  priority 100
+}
+
+policy route-admin-api {
+  tenant acme-corp
+  effect allow
+  actions [
+    GET
+    POST
+    PUT
+    DELETE
+  ]
+  resources [
+    route:*
+  ]
+  when {
+    subject.roles contains any [
+      admin
+      superadmin
+    ]
+  }
+  priority 90
+}
+
+policy route-compliance-viewer {
+  tenant acme-corp
+  effect allow
+  actions [GET]
+  resources [
+    route:GET:/api/compliance/report
+  ]
+  when {
+    subject.roles contains any [
+      compliance-officer
+      auditor
+      admin
+    ]
+  }
+  priority 80
+}
+
+policy route-owner-profile {
+  tenant acme-corp
+  effect allow
+  actions [
+    GET
+    PUT
+  ]
+  resources [
+    route:GET:/api/v1/users/*
+    route:PUT:/api/v1/users/*
+  ]
+  when {
+    resource.owner_id == subject.id
+  }
+  priority 60
+}
+
+policy tenant-scoped {
+  tenant acme-corp
+  effect allow
+  actions [
+    GET
+    POST
+  ]
+  resources [
+    route:*
+  ]
+  when {
+    resource.tenant_id == subject.tenant_id
+  }
+  priority 40
+}
+
+# Roles
+
+role admin {
+  tenant acme-corp
+  name "Administrator"
+  permissions [
+    *:*
+  ]
+}
+
+role compliance-officer {
+  tenant acme-corp
+  name "Compliance Officer"
+  permissions [
+    read:route:GET:/_fh/*
+    read:document:*
+    read:audit:*
+  ]
+}
+
+role auditor {
+  tenant acme-corp
+  name "Auditor"
+  permissions [
+    read:audit:*
+    read:route:GET:/_fh/compliance*
+  ]
+}
+
+role engineer {
+  tenant acme-corp
+  name "Engineer"
+  permissions [
+    read:document:*
+    write:document:*
+  ]
+}
+
+role viewer {
+  tenant acme-corp
+  name "Viewer"
+  permissions [
+    read:*
+  ]
+}
+
+role owner {
+  tenant acme-corp
+  name "Owner"
+  permissions [
+    read:*
+  ]
+  owner_actions [
+    read
+    write
+    delete
+  ]
+}
+
+# ACLs
+
+acl acl-health {
+  resource route:GET:/health
+  subject guest
+  actions [GET]
+  effect allow
+}
+
+acl acl-webhook {
+  resource route:POST:/webhooks/payments
+  subject guest
+  actions [POST]
+  effect allow
+}
+
+acl acl-queue-email {
+  resource route:POST:/queue/email
+  subject guest
+  actions [POST]
+  effect allow
+}
+
+# Memberships
+
+members {
+  user:alice   [admin]
+  user:bob     [compliance-officer]
+  user:carol   [engineer]
+  user:dave    [viewer]
+  user:erin    [auditor]
+  user:frank   [owner]
+}
+
+# Engine
+
+engine {
+  cache_ttl      5000
+  attr_ttl       10000
+  batch_size     128
+  flush_interval 50
+  workers        8
+}
