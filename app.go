@@ -70,6 +70,10 @@ type Config struct {
 	TemplateEngine       TemplateEngine
 	// Reliability enables request journal, idempotency, and durable async queue.
 	Reliability ReliabilityConfig
+	// Environment controls safe error exposure defaults. Use EnvDevelopment locally and EnvProduction in production.
+	Environment Environment
+	// ErrorOptions controls RFC 9457 problem details, redaction, and debug extensions.
+	ErrorOptions ErrorOptions
 	// Debug exposes private error causes in 500 responses. Keep disabled in production.
 	Debug bool
 }
@@ -84,6 +88,8 @@ var defaultConfig = Config{
 	MaxHeaderCount:       64,
 	MaxRequestLineSize:   8 << 10,
 	MaxConcurrentStreams: 128,
+	Environment:          EnvProduction,
+	ErrorOptions:         ErrorOptions{Environment: EnvProduction},
 }
 
 var ErrAppAlreadyStarted = errors.New("fasthttp: app has already been started")
@@ -166,6 +172,13 @@ func New(config ...Config) *App {
 		cfg.Logger = c.Logger
 		cfg.TemplateEngine = c.TemplateEngine
 		cfg.Reliability = c.Reliability
+		if c.Environment != "" {
+			cfg.Environment = c.Environment
+		}
+		cfg.ErrorOptions = c.ErrorOptions
+		if cfg.ErrorOptions.Environment == "" {
+			cfg.ErrorOptions.Environment = cfg.Environment
+		}
 		cfg.Debug = c.Debug
 	}
 	if cfg.ErrorHandler == nil {
@@ -566,15 +579,6 @@ func (a *App) runShutdownHooks() {
 	})
 }
 
-func (a *App) setConnActive(conn net.Conn, active bool) {
-	a.connMu.Lock()
-	state := a.conns[conn]
-	a.connMu.Unlock()
-	if state != nil {
-		state.active.Store(active)
-	}
-}
-
 func (a *App) setH2Conn(conn net.Conn, h2c *h2Conn) {
 	a.connMu.Lock()
 	if state := a.conns[conn]; state != nil {
@@ -892,7 +896,7 @@ func (a *App) dispatch(ctx *Ctx) {
 				a.logger.Printf("[fasthttp] panic: %v", r)
 			}
 			if !ctx.responded {
-				a.cfg.ErrorHandler(ctx, WrapHTTPError(errors.New("panic in request handler"), StatusInternalServerError, "INTERNAL_ERROR", "An internal server error occurred"))
+				a.cfg.ErrorHandler(ctx, NewPanicError(r))
 			}
 		}
 	}()
@@ -1042,16 +1046,16 @@ func defaultErrorHandler(ctx *Ctx, err error) {
 	if ctx.server != nil && ctx.server.logger != nil {
 		ctx.server.logger.Printf("[fasthttp] request error: %v", err)
 	}
-	_ = ctx.ErrorResponse(err)
+	_ = ctx.SafeErrorResponse(err)
 }
 
 func defaultNotFoundHandler(ctx *Ctx) error {
-	return ctx.Status(StatusNotFound).SendString("404 Not Found")
+	return NotFound("Resource not found")
 }
 
 func defaultMethodNotAllowedHandler(ctx *Ctx, allowed []string) error {
 	ctx.Set("Allow", strings.Join(allowed, ", "))
-	return ctx.Status(StatusMethodNotAllowed).SendString("405 Method Not Allowed")
+	return MethodNotAllowed("Method not allowed")
 }
 
 func defaultOptionsHandler(ctx *Ctx, allowed []string) error {

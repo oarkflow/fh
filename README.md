@@ -627,3 +627,9 @@ Middleware is organized exclusively under `mw/*`. Root-package response handlers
 and reliability runtime adapters remain in the core because they require private
 server state; reusable request-chain middleware belongs in its matching `mw`
 package.
+
+## Error framework
+
+FH includes a production-safe error framework based on RFC 9457 Problem Details. It supports typed errors, validation errors, panic recovery, request ID correlation, retryability metadata, severity/kind classification, secret redaction, and environment-aware debug output.
+
+See [`docs/ERROR_FRAMEWORK.md`](docs/ERROR_FRAMEWORK.md) and [`examples/error-framework/main.go`](examples/error-framework/main.go).
