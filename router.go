@@ -849,17 +849,17 @@ func prebuildStatic200(contentType, body []byte) []byte {
 
 func (c *Ctx) canStaticPrebuilt() bool {
 	return c.status == StatusOK &&
-	!c.responded &&
-	c.h2 == nil &&
-	c.bodyTransform == nil &&
-	!c.captureResponseBody &&
-	c.chCount == 0 &&
-	len(c.extraHeaders) == 0 &&
-	len(c.responseCookies) == 0 &&
-	len(c.responseTrailers) == 0 &&
-	len(c.beforeResponse) == 0 &&
-	c.Header.KeepAlive &&
-	!c.forceClose &&
-	!methodIs(c.Header.Method, 'H', 'E', 'A', 'D') &&
-	!c.server.cfg.SendDateHeader && !c.server.cfg.SendKeepAliveHeader
+		!c.responded &&
+		c.h2 == nil &&
+		c.bodyTransform == nil &&
+		!c.captureResponseBody &&
+		c.chCount == 0 &&
+		len(c.extraHeaders) == 0 &&
+		len(c.responseCookies) == 0 &&
+		len(c.responseTrailers) == 0 &&
+		len(c.beforeResponse) == 0 &&
+		c.Header.KeepAlive &&
+		!c.forceClose &&
+		!methodIs(c.Header.Method, 'H', 'E', 'A', 'D') &&
+		!c.server.cfg.SendDateHeader && !c.server.cfg.SendKeepAliveHeader
 }

@@ -59,7 +59,7 @@ func main() {
 			return context.Background()
 		},
 
-		Subject: func(c *fh.Ctx) *authz.Subject {
+		Subject: func(c *fh.Ctx) (*authz.Subject, bool, error) {
 			subjectID := strings.TrimSpace(c.Get("X-Subject-ID"))
 			tenantID := strings.TrimSpace(c.Get("X-Tenant-ID"))
 
@@ -73,10 +73,10 @@ func main() {
 					"ip":        c.IP(),
 					"userAgent": c.Get("User-Agent"),
 				},
-			}
+			}, true, nil
 		},
 
-		Resource: func(c *fh.Ctx) *authz.Resource {
+		Resource: func(c *fh.Ctx) (*authz.Resource, bool, error) {
 			tenantID := strings.TrimSpace(c.Get("X-Tenant-ID"))
 
 			res := &authz.Resource{
@@ -106,10 +106,10 @@ func main() {
 				res.OwnerID = parts[len(parts)-1]
 			}
 
-			return res
+			return res, true, nil
 		},
 
-		Environment: func(c *fh.Ctx) *authz.Environment {
+		Environment: func(c *fh.Ctx) (*authz.Environment, bool, error) {
 			return &authz.Environment{
 				Time:     time.Now(),
 				TenantID: strings.TrimSpace(c.Get("X-Tenant-ID")),
@@ -117,7 +117,7 @@ func main() {
 					"ip":        c.IP(),
 					"userAgent": c.Get("User-Agent"),
 				},
-			}
+			}, true, nil
 		},
 
 		OnDenied: func(c *fh.Ctx, decision *authz.Decision) error {

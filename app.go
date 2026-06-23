@@ -53,6 +53,14 @@ type Hooks struct {
 
 // Config holds server configuration.
 type Config struct {
+	// Mode controls secure default and compliance validation behavior.
+	Mode Mode
+	// Compliance enables business/professional/enterprise/security evidence endpoints and profiles.
+	Compliance ComplianceConfig
+	// Audit configures compliance-grade business/security audit records.
+	Audit AuditConfig
+	// Redaction controls sensitive field masking across audit, logs, journals and examples.
+	Redaction      RedactionConfig
 	ReadTimeout    time.Duration
 	WriteTimeout   time.Duration
 	IdleTimeout    time.Duration
@@ -215,6 +223,9 @@ func WithEnvironment(env Environment) Option {
 func WithErrorOptions(eo ErrorOptions) Option {
 	return func(c *Config) { c.ErrorOptions = eo }
 }
+func WithCompliance(cc ComplianceConfig) Option {
+	return func(c *Config) { c.Compliance = cc }
+}
 
 var ErrAppAlreadyStarted = errors.New("fasthttp: app has already been started")
 var ErrRewrite = errors.New("fasthttp: reroute rewritten request")
@@ -245,7 +256,8 @@ type App struct {
 	routeMeta    []RouteInfo
 	openapi      OpenAPIConfig
 	reliability  *Reliability
-	drainingCh  chan struct{} // closed when draining starts, signals all connection contexts
+	audit        AuditSink
+	drainingCh   chan struct{} // closed when draining starts, signals all connection contexts
 }
 
 type connState struct {
@@ -285,6 +297,7 @@ func NewWithConfig(cfg Config) *App {
 // handlers and initializes the app struct together with the reliability
 // subsystem when enabled.
 func buildApp(cfg Config) *App {
+	applyComplianceDefaults(&cfg)
 	if cfg.ErrorHandler == nil {
 		cfg.ErrorHandler = defaultErrorHandler
 	}
@@ -307,11 +320,23 @@ func buildApp(cfg Config) *App {
 	}
 
 	app := &App{
-		cfg:         cfg,
-		router:      newRouter(),
-		logger:      logger,
-		conns:       make(map[net.Conn]*connState),
-		drainingCh:  make(chan struct{}),
+		cfg:        cfg,
+		router:     newRouter(),
+		logger:     logger,
+		conns:      make(map[net.Conn]*connState),
+		drainingCh: make(chan struct{}),
+	}
+
+	if cfg.Audit.Enabled {
+		if cfg.Audit.Sink != nil {
+			app.audit = cfg.Audit.Sink
+		} else {
+			sink, err := OpenFileAuditSink(cfg.Audit.FilePath)
+			if err != nil {
+				panic(err)
+			}
+			app.audit = sink
+		}
 	}
 
 	if cfg.Reliability.Enabled {
@@ -321,6 +346,15 @@ func buildApp(cfg Config) *App {
 		}
 		app.reliability = reliability
 		app.middleware = append(app.middleware, reliability.Middleware())
+	}
+
+	if cfg.Compliance.ExposeEndpoints {
+		app.EnableComplianceEndpoints(cfg.Compliance.EndpointPrefix)
+		app.EnableHealth(cfg.Compliance.EndpointPrefix)
+		app.EnableRuntime(cfg.Compliance.EndpointPrefix)
+	}
+	if cfg.Compliance.FailOnCritical && hasCritical(app.ValidateSecurity()) {
+		panic("fh: critical compliance/security findings")
 	}
 
 	app.router.UnsafeParams = !cfg.SafeParams
@@ -498,6 +532,9 @@ func (a *App) ListenTLS(addr, certFile, keyFile string) error {
 
 // ServeTLS wraps ln with TLS and advertises HTTP/2 through ALPN when enabled.
 func (a *App) ServeTLS(ln net.Listener, config *tls.Config) error {
+	if err := validateTLSConfig(config); err != nil {
+		return err
+	}
 	if config == nil {
 		return errors.New("nil TLS config")
 	}
@@ -712,6 +749,13 @@ func (a *App) closeAllConnections() {
 
 func (a *App) runShutdownHooks() {
 	a.shutdownOnce.Do(func() {
+		if a.audit != nil {
+			if closer, ok := a.audit.(AuditSinkCloser); ok {
+				if err := closer.Close(); err != nil {
+					a.logger.Printf("[fasthttp] audit shutdown error: %v", err)
+				}
+			}
+		}
 		if a.reliability != nil {
 			if err := a.reliability.Close(); err != nil {
 				a.logger.Printf("[fasthttp] reliability shutdown error: %v", err)

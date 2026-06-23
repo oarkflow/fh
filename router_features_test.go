@@ -287,7 +287,9 @@ func TestGroupTyped(t *testing.T) {
 	grp.GetTyped("/users/:id", func(c *fh.Ctx, req typedGroupReq) (typedGroupRes, error) {
 		return typedGroupRes{ID: req.ID, Prefix: "api"}, nil
 	})
-	grp.PostTyped("/users", func(c *fh.Ctx, req struct{ Name string `json:"name"` }) (typedGroupRes, error) {
+	grp.PostTyped("/users", func(c *fh.Ctx, req struct {
+		Name string `json:"name"`
+	}) (typedGroupRes, error) {
 		return typedGroupRes{ID: "new", Prefix: "api"}, nil
 	})
 	addr := testServer(t, app)

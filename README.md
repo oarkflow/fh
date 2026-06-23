@@ -636,3 +636,160 @@ package.
 FH includes a production-safe error framework based on RFC 9457 Problem Details. It supports typed errors, validation errors, panic recovery, request ID correlation, retryability metadata, severity/kind classification, secret redaction, and environment-aware debug output.
 
 See [`docs/ERROR_FRAMEWORK.md`](docs/ERROR_FRAMEWORK.md) and [`examples/error-framework/main.go`](examples/error-framework/main.go).
+
+---
+
+## Compliance-first runtime additions
+
+`fh` now includes a built-in Business/Professional/Enterprise/Security compliance layer on top of the existing router, middleware, reliability, OpenAPI, queue and security primitives.
+
+### Compliance profiles
+
+```go
+app := fh.NewWithConfig(fh.Config{
+    Mode: fh.ModeProduction,
+    Compliance: fh.ComplianceConfig{
+        Enabled: true,
+        Profile: fh.ComplianceEnterprise,
+        Strict: true,
+        ExposeEndpoints: true,
+    },
+    Reliability: fh.ReliabilityConfig{
+        Enabled: true,
+        DataDir: ".fh-data",
+        JournalEnabled: true,
+        IdempotencyEnabled: true,
+        QueueEnabled: true,
+    },
+    Audit: fh.AuditConfig{Enabled: true, FilePath: ".fh-data/audit.jsonl", Redact: true},
+    Redaction: fh.DefaultRedactionConfig(),
+})
+```
+
+Profiles include:
+
+```text
+business
+professional
+enterprise
+security_strict
+financial
+healthcare
+government
+internal_service
+public_api
+webhook_receiver
+```
+
+Compliance mode enables safe defaults for request limits, timeouts, reliability, idempotency, request journaling, audit records, redaction and evidence endpoints.
+
+### Evidence endpoints
+
+When `Compliance.ExposeEndpoints` is enabled, these routes are registered:
+
+```text
+GET /_fh/compliance
+GET /_fh/compliance/controls
+GET /_fh/compliance/findings
+GET /_fh/config/safe
+GET /_fh/runtime
+GET /_fh/routes
+GET /_fh/health
+GET /_fh/live
+GET /_fh/ready
+GET /_fh/queue/stats      # when queue is enabled
+```
+
+### Route security metadata
+
+Annotate routes so security/compliance tooling can prove which controls apply.
+
+```go
+app.Post("/payments",
+    fh.RequireAuth(),
+    fh.RequireScope("payments:create"),
+    createPayment,
+).WithRouteSecurity(fh.RouteSecurityConfig{
+    AuthRequired: true,
+    Scopes: []string{"payments:create"},
+    IdempotencyRequired: true,
+    AuditRequired: true,
+    DataClass: "regulated",
+})
+```
+
+The route inventory and OpenAPI export include security metadata such as scopes, idempotency requirements and data classification.
+
+### Principal, tenant and authorization primitives
+
+```go
+principal := fh.PrincipalExtractor(fh.PrincipalExtractors{
+    ID:       fh.HeaderString("X-Subject-ID"),
+    TenantID: fh.HeaderString("X-Tenant-ID"),
+    Roles:    fh.HeaderCSV("X-Roles"),
+    Scopes:   fh.HeaderCSV("X-Scopes"),
+})
+
+app.Use(fh.UsePrincipal(principal, true))
+app.Use(fh.TenantResolverWith(fh.TenantExtractor(
+    fh.PrincipalTenantExtractor(),
+    fh.HeaderString("X-Tenant-ID"),
+), true))
+app.Post("/orders", fh.RequireAuth(), fh.RequireScope("orders:create"), handler)
+```
+
+Extractors are ordinary functions over `*fh.Ctx`, so identity and policy inputs
+can come from headers, query strings, route params, JSON body fields, locals,
+sessions, JWT claims, or application stores.
+
+For policy authorization, use the optional `contrib/mw/authz` middleware. It is
+backed by `github.com/oarkflow/authz` and accepts extractors for subject,
+action, resource and environment:
+
+```go
+engine, _ := authzmw.LoadEngineFromAuthzFile("config.authz")
+
+app.Use(authzmw.FHWithConfig(authzmw.FHConfig{
+    Engine:      engine,
+    Subject:     authzmw.SubjectFromPrincipal(),
+    Action:      authzmw.StaticAction("read"),
+    Resource:    authzmw.ResourceFromRoute("order", "id"),
+    Environment: authzmw.EnvironmentFromRequest(),
+}))
+```
+
+### Audit and operation ledger
+
+Audit records are append-only JSONL by default:
+
+```go
+_ = c.Audit().Record("user.disabled", "user", c.Param("id"))
+_ = c.Ledger("order.created", "order", orderID, before, after)
+```
+
+Default file:
+
+```text
+.fh-reliability/audit.jsonl
+```
+
+Audit records include request ID, tenant ID, actor ID, action, resource, result, route, IP and data classification. Sensitive metadata is redacted when `Audit.Redact` or `Redaction.Enabled` is set.
+
+### New middleware packages
+
+```text
+mw/auth        attach an fh.Principal from an application resolver
+mw/tenant      resolve and require tenant context
+mw/audit       record request/business audit events
+mw/compliance  enforce route security metadata and attach data policy
+```
+
+### Enterprise example
+
+See:
+
+```text
+examples/compliance-enterprise
+```
+
+It demonstrates production compliance defaults, idempotent order creation, durable queued email, request journal, audit ledger, principal/tenant auth, scope checks, compliance evidence endpoints and admin status.

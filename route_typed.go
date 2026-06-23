@@ -298,16 +298,18 @@ func schemaFromType(t reflect.Type, seen map[reflect.Type]bool) JSONSchema {
 }
 
 type RouteInfo struct {
-	Method         string     `json:"method"`
-	Path           string     `json:"path"`
-	Name           string     `json:"name,omitempty"`
-	Typed          bool       `json:"typed,omitempty"`
-	RequestType    string     `json:"request_type,omitempty"`
-	ResponseType   string     `json:"response_type,omitempty"`
-	RequestSchema  JSONSchema `json:"request_schema,omitempty"`
-	ResponseSchema JSONSchema `json:"response_schema,omitempty"`
-	Deprecated     bool       `json:"deprecated,omitempty"`
-	Tags           []string   `json:"tags,omitempty"`
+	Method         string              `json:"method"`
+	Path           string              `json:"path"`
+	Name           string              `json:"name,omitempty"`
+	Typed          bool                `json:"typed,omitempty"`
+	RequestType    string              `json:"request_type,omitempty"`
+	ResponseType   string              `json:"response_type,omitempty"`
+	RequestSchema  JSONSchema          `json:"request_schema,omitempty"`
+	ResponseSchema JSONSchema          `json:"response_schema,omitempty"`
+	Deprecated     bool                `json:"deprecated,omitempty"`
+	Tags           []string            `json:"tags,omitempty"`
+	Security       RouteSecurityConfig `json:"security,omitempty"`
+	Data           DataPolicy          `json:"data,omitempty"`
 }
 
 func (a *App) registerRouteInfo(info RouteInfo) {
@@ -391,6 +393,15 @@ func (a *App) OpenAPI() map[string]any {
 		if len(r.Tags) > 0 {
 			op["tags"] = r.Tags
 		}
+		if r.Security.AuthRequired || len(r.Security.Scopes) > 0 {
+			op["security"] = []map[string][]string{{"bearerAuth": r.Security.Scopes}}
+		}
+		if r.Security.IdempotencyRequired {
+			op["x-idempotency-required"] = true
+		}
+		if r.Data.Sensitivity != "" {
+			op["x-data-class"] = r.Data.Sensitivity
+		}
 		if r.Deprecated {
 			op["deprecated"] = true
 		}
@@ -406,7 +417,7 @@ func (a *App) OpenAPI() map[string]any {
 	for _, s := range cfg.Servers {
 		servers = append(servers, map[string]string{"url": s})
 	}
-	return map[string]any{"openapi": "3.1.0", "info": map[string]any{"title": cfg.Title, "version": cfg.Version, "description": cfg.Description}, "servers": servers, "paths": paths}
+	return map[string]any{"openapi": "3.1.0", "info": map[string]any{"title": cfg.Title, "version": cfg.Version, "description": cfg.Description}, "servers": servers, "paths": paths, "components": map[string]any{"securitySchemes": map[string]any{"bearerAuth": map[string]any{"type": "http", "scheme": "bearer"}, "apiKeyAuth": map[string]any{"type": "apiKey", "in": "header", "name": "X-API-Key"}, "hmacSignature": map[string]any{"type": "apiKey", "in": "header", "name": "X-Signature"}}}}
 }
 
 const docsHTML = `<!doctype html><html><head><title>fh API Docs</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:system-ui;margin:2rem;max-width:980px}pre{background:#f6f8fa;padding:1rem;overflow:auto}</style></head><body><h1>fh API Docs</h1><p>OpenAPI JSON is available at <a href="/openapi.json">/openapi.json</a>.</p><pre id="spec">Loading...</pre><script>fetch('/openapi.json').then(r=>r.json()).then(j=>spec.textContent=JSON.stringify(j,null,2))</script></body></html>`
