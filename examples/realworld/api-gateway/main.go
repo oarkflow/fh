@@ -15,7 +15,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: false, QueueEnabled: false}})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: false, QueueEnabled: false}))
 	app.Use(recovermw.New())
 	app.Use(security.New())
 	app.Use(cors.New(cors.Config{AllowOrigins: []string{"http://localhost:5173"}, AllowMethods: []string{"GET", "POST", "PUT", "DELETE"}, AllowHeaders: []string{"Content-Type", "Authorization", "Idempotency-Key"}}))

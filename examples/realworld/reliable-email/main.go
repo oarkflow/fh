@@ -23,10 +23,10 @@ func main() {
 	workers := flag.Int("workers", 2, "queue workers")
 	flag.Parse()
 
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{
 		Enabled: true, DataDir: *data, JournalEnabled: true, IdempotencyEnabled: true,
 		QueueEnabled: true, QueueWorkers: *workers, QueueMaxAttempts: 5, QueuePollInterval: 100 * time.Millisecond,
-	}})
+	}))
 
 	app.Queue().Register("email.send", func(ctx context.Context, job *fh.QueueJob) error {
 		var req EmailRequest

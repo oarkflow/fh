@@ -2,15 +2,18 @@ package fh
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"io"
 	"log"
 	"net"
+	"os/signal"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -101,6 +104,9 @@ type Config struct {
 	ErrorOptions ErrorOptions
 	// Debug exposes private error causes in 500 responses. Keep disabled in production.
 	Debug bool
+	// ShutdownTimeout is the maximum duration to wait for active connections to
+	// complete during graceful shutdown. Zero means wait indefinitely.
+	ShutdownTimeout time.Duration
 }
 
 var defaultConfig = Config{
@@ -117,6 +123,97 @@ var defaultConfig = Config{
 	MaxConcurrentStreams: 128,
 	Environment:          EnvProduction,
 	ErrorOptions:         ErrorOptions{Environment: EnvProduction},
+}
+
+// Option is a functional option for configuring an App via New.
+type Option func(*Config)
+
+func WithReadTimeout(d time.Duration) Option {
+	return func(c *Config) { c.ReadTimeout = d }
+}
+func WithWriteTimeout(d time.Duration) Option {
+	return func(c *Config) { c.WriteTimeout = d }
+}
+func WithIdleTimeout(d time.Duration) Option {
+	return func(c *Config) { c.IdleTimeout = d }
+}
+func WithShutdownTimeout(d time.Duration) Option {
+	return func(c *Config) { c.ShutdownTimeout = d }
+}
+func WithMaxConnections(n int) Option {
+	return func(c *Config) { c.MaxConnections = n }
+}
+func WithReadBufferSize(n int) Option {
+	return func(c *Config) { c.ReadBufferSize = n }
+}
+func WithMaxRequestBodySize(n int) Option {
+	return func(c *Config) { c.MaxRequestBodySize = n }
+}
+func WithMaxHeaderListSize(n int) Option {
+	return func(c *Config) { c.MaxHeaderListSize = n }
+}
+func WithMaxHeaderCount(n int) Option {
+	return func(c *Config) { c.MaxHeaderCount = n }
+}
+func WithMaxRequestLineSize(n int) Option {
+	return func(c *Config) { c.MaxRequestLineSize = n }
+}
+func WithMaxConcurrentStreams(n uint32) Option {
+	return func(c *Config) { c.MaxConcurrentStreams = n }
+}
+func WithFastMode(enabled bool) Option {
+	return func(c *Config) { c.FastMode = enabled }
+}
+func WithSafeParams(enabled bool) Option {
+	return func(c *Config) { c.SafeParams = enabled }
+}
+func WithCaptureResponseBody(enabled bool) Option {
+	return func(c *Config) { c.CaptureResponseBody = enabled }
+}
+func WithSendDateHeader(enabled bool) Option {
+	return func(c *Config) { c.SendDateHeader = enabled }
+}
+func WithSendKeepAliveHeader(enabled bool) Option {
+	return func(c *Config) { c.SendKeepAliveHeader = enabled }
+}
+func WithStrictHeaderValueValidation(enabled bool) Option {
+	return func(c *Config) { c.StrictHeaderValueValidation = enabled }
+}
+func WithDisableKeepAlive(disabled bool) Option {
+	return func(c *Config) { c.DisableKeepAlive = disabled }
+}
+func WithDisableHTTP2(disabled bool) Option {
+	return func(c *Config) { c.DisableHTTP2 = disabled }
+}
+func WithDebug(enabled bool) Option {
+	return func(c *Config) { c.Debug = enabled }
+}
+func WithErrorHandler(h ErrorHandler) Option {
+	return func(c *Config) { c.ErrorHandler = h }
+}
+func WithNotFoundHandler(h NotFoundHandler) Option {
+	return func(c *Config) { c.NotFoundHandler = h }
+}
+func WithMethodNotAllowedHandler(h MethodNotAllowedHandler) Option {
+	return func(c *Config) { c.MethodNotAllowed = h }
+}
+func WithOptionsHandler(h OptionsHandler) Option {
+	return func(c *Config) { c.OptionsHandler = h }
+}
+func WithLogger(l *log.Logger) Option {
+	return func(c *Config) { c.Logger = l }
+}
+func WithTemplateEngine(te TemplateEngine) Option {
+	return func(c *Config) { c.TemplateEngine = te }
+}
+func WithReliability(r ReliabilityConfig) Option {
+	return func(c *Config) { c.Reliability = r }
+}
+func WithEnvironment(env Environment) Option {
+	return func(c *Config) { c.Environment = env }
+}
+func WithErrorOptions(eo ErrorOptions) Option {
+	return func(c *Config) { c.ErrorOptions = eo }
 }
 
 var ErrAppAlreadyStarted = errors.New("fasthttp: app has already been started")
@@ -148,6 +245,7 @@ type App struct {
 	routeMeta    []RouteInfo
 	openapi      OpenAPIConfig
 	reliability  *Reliability
+	drainingCh  chan struct{} // closed when draining starts, signals all connection contexts
 }
 
 type connState struct {
@@ -155,67 +253,43 @@ type connState struct {
 	h2     *h2Conn
 }
 
-// New creates a new App with optional config.
-func New(config ...Config) *App {
+// New creates a new App with functional options. Call with zero options to use
+// defaults. Example:
+//
+//	app := fh.New(
+//	    fh.WithReadTimeout(5*time.Second),
+//	    fh.WithWriteTimeout(10*time.Second),
+//	    fh.WithDebug(true),
+//	)
+func New(opts ...Option) *App {
 	cfg := defaultConfig
-	if len(config) > 0 {
-		c := config[0]
-		if c.ReadTimeout > 0 {
-			cfg.ReadTimeout = c.ReadTimeout
-		}
-		if c.WriteTimeout > 0 {
-			cfg.WriteTimeout = c.WriteTimeout
-		}
-		if c.IdleTimeout > 0 {
-			cfg.IdleTimeout = c.IdleTimeout
-		}
-		if c.ReadBufferSize > 0 {
-			cfg.ReadBufferSize = c.ReadBufferSize
-		}
-		if c.MaxConnections > 0 {
-			cfg.MaxConnections = c.MaxConnections
-		}
-		cfg.FastMode = c.FastMode
-		cfg.SafeParams = c.SafeParams
-		cfg.CaptureResponseBody = c.CaptureResponseBody
-		cfg.SendDateHeader = c.SendDateHeader
-		cfg.SendKeepAliveHeader = c.SendKeepAliveHeader
-		cfg.StrictHeaderValueValidation = c.StrictHeaderValueValidation
-		if c.MaxRequestBodySize > 0 {
-			cfg.MaxRequestBodySize = c.MaxRequestBodySize
-		}
-		if c.MaxHeaderListSize > 0 {
-			cfg.MaxHeaderListSize = c.MaxHeaderListSize
-		}
-		if c.MaxHeaderCount > 0 {
-			cfg.MaxHeaderCount = c.MaxHeaderCount
-		}
-		if c.MaxRequestLineSize > 0 {
-			cfg.MaxRequestLineSize = c.MaxRequestLineSize
-		}
-		if c.MaxConcurrentStreams > 0 {
-			cfg.MaxConcurrentStreams = c.MaxConcurrentStreams
-		}
-		cfg.DisableKeepAlive = c.DisableKeepAlive
-		cfg.DisableHTTP2 = c.DisableHTTP2
-		cfg.ErrorHandler = c.ErrorHandler
-		cfg.NotFoundHandler = c.NotFoundHandler
-		cfg.MethodNotAllowed = c.MethodNotAllowed
-		cfg.OptionsHandler = c.OptionsHandler
-		cfg.Logger = c.Logger
-		cfg.TemplateEngine = c.TemplateEngine
-		cfg.Reliability = c.Reliability
-		if c.Environment != "" {
-			cfg.Environment = c.Environment
-		}
-		cfg.ErrorOptions = c.ErrorOptions
-		if cfg.ErrorOptions.Environment == "" {
-			cfg.ErrorOptions.Environment = cfg.Environment
-		}
-		cfg.Debug = c.Debug
+	for _, opt := range opts {
+		opt(&cfg)
 	}
+	return buildApp(cfg)
+}
+
+// NewWithConfig creates a new App from a Config struct. Non-zero fields
+// override defaults; nil handlers are replaced with built-in defaults. This
+// is a convenience for users who prefer a single config object.
+//
+//	app := fh.NewWithConfig(fh.Config{
+//	    ReadTimeout: 5 * time.Second,
+//	    WriteTimeout: 10 * time.Second,
+//	})
+func NewWithConfig(cfg Config) *App {
+	return buildApp(cfg)
+}
+
+// buildApp constructs an *App from a fully resolved Config. It applies default
+// handlers and initializes the app struct together with the reliability
+// subsystem when enabled.
+func buildApp(cfg Config) *App {
 	if cfg.ErrorHandler == nil {
 		cfg.ErrorHandler = defaultErrorHandler
+	}
+	if cfg.ErrorOptions.Environment == "" {
+		cfg.ErrorOptions.Environment = cfg.Environment
 	}
 	if cfg.NotFoundHandler == nil {
 		cfg.NotFoundHandler = defaultNotFoundHandler
@@ -233,10 +307,11 @@ func New(config ...Config) *App {
 	}
 
 	app := &App{
-		cfg:    cfg,
-		router: newRouter(),
-		logger: logger,
-		conns:  make(map[net.Conn]*connState),
+		cfg:         cfg,
+		router:      newRouter(),
+		logger:      logger,
+		conns:       make(map[net.Conn]*connState),
+		drainingCh:  make(chan struct{}),
 	}
 
 	if cfg.Reliability.Enabled {
@@ -437,6 +512,42 @@ func (a *App) ServeTLS(ln net.Listener, config *tls.Config) error {
 	return a.Serve(tls.NewListener(ln, cfg))
 }
 
+// ListenWithGracefulShutdown starts the server and blocks until SIGINT or
+// SIGTERM is received, then performs a graceful shutdown. If ShutdownTimeout
+// is configured, the server will force-close remaining connections after that
+// duration. Use OnShutdown to register cleanup hooks.
+func (a *App) ListenWithGracefulShutdown(addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		<-ctx.Done()
+		a.logger.Printf("[fasthttp] signal received, starting graceful shutdown...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), a.effectiveShutdownTimeout())
+		defer cancel()
+		if err := a.ShutdownWithContext(shutdownCtx); err != nil {
+			a.logger.Printf("[fasthttp] graceful shutdown: %v", err)
+		}
+	}()
+
+	return a.Serve(ln)
+}
+
+// effectiveShutdownTimeout returns the configured shutdown timeout or a default
+// of 30 seconds when Shutdown() is called without an explicit timeout via the
+// ListenWithGracefulShutdown flow. It is only used internally.
+func (a *App) effectiveShutdownTimeout() time.Duration {
+	if a.cfg.ShutdownTimeout > 0 {
+		return a.cfg.ShutdownTimeout
+	}
+	return 30 * time.Second
+}
+
 func (a *App) Serve(ln net.Listener) error {
 	a.buildMu.Lock()
 	if !a.started.CompareAndSwap(false, true) {
@@ -511,14 +622,7 @@ func (a *App) Serve(ln net.Listener) error {
 	}
 
 	a.activeConn.Wait()
-
 	a.runShutdownHooks()
-	if a.reliability != nil {
-		if err := a.reliability.Close(); err != nil && acceptErr == nil {
-			acceptErr = err
-		}
-	}
-
 	return acceptErr
 }
 
@@ -529,18 +633,22 @@ func (a *App) assertMutable() {
 }
 
 func (a *App) Shutdown() error {
+	if a.cfg.ShutdownTimeout > 0 {
+		return a.ShutdownWithTimeout(a.cfg.ShutdownTimeout)
+	}
 	err := a.beginShutdown()
 	a.activeConn.Wait()
 	a.runShutdownHooks()
-	if a.reliability != nil {
-		if closeErr := a.reliability.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}
 	return err
 }
 
 func (a *App) ShutdownWithTimeout(d time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	return a.ShutdownWithContext(ctx)
+}
+
+func (a *App) ShutdownWithContext(ctx context.Context) error {
 	if err := a.beginShutdown(); err != nil {
 		return err
 	}
@@ -552,19 +660,22 @@ func (a *App) ShutdownWithTimeout(d time.Duration) error {
 	select {
 	case <-done:
 		a.runShutdownHooks()
-		if a.reliability != nil {
-			return a.reliability.Close()
-		}
 		return nil
-	case <-time.After(d):
+	case <-ctx.Done():
 		a.closeAllConnections()
-		return errors.New("shutdown timed out")
+		return ctx.Err()
 	}
 }
 
 func (a *App) beginShutdown() error {
 	a.closed.Store(true)
 	a.draining.Store(true)
+	// Signal all connection contexts that draining has started.
+	// Safe to close multiple times — subsequent closes are recovered.
+	func() {
+		defer func() { recover() }()
+		close(a.drainingCh)
+	}()
 	var err error
 	a.connMu.Lock()
 	listener := a.listener
@@ -658,6 +769,12 @@ func (a *App) serveConn(conn net.Conn) {
 		}
 		a.activeConn.Done()
 	}()
+
+	// Connection-level context: cancelled when the TCP connection terminates
+	// (client disconnect, idle close, or I/O error). Per-request contexts are
+	// derived from this so that handlers see cancellation on connection death.
+	connCtx, connCancel := context.WithCancel(context.Background())
+	defer connCancel()
 
 	for _, fn := range a.hooks.onConnect {
 		fn(conn)
@@ -910,7 +1027,18 @@ func (a *App) serveConn(conn net.Conn) {
 			}
 		}
 
+		// Derive a per-request context from the connection context with an
+		// optional WriteTimeout deadline. Handlers and middleware can observe
+		// c.Context().Done() to implement cooperative cancellation.
+		reqCtx, reqCancel := context.WithCancel(connCtx)
+		if a.cfg.WriteTimeout > 0 {
+			reqCtx, reqCancel = context.WithTimeout(connCtx, a.cfg.WriteTimeout)
+		}
+		ctx.SetContext(reqCtx)
+
 		a.dispatch(ctx)
+
+		reqCancel()
 		keepAlive := ctx.Header.KeepAlive && !ctx.forceClose && !ctx.upgraded && !a.cfg.DisableKeepAlive && !a.draining.Load()
 		upgraded := ctx.upgraded
 

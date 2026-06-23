@@ -39,10 +39,10 @@ func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
 
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{
 		Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true,
 		QueueWorkers: 2, QueueConcurrencyLimitByKey: true,
-	}})
+	}))
 	app.Use(recover.New())
 	app.Use(security.New())
 	app.Use(logger.New(logger.Config{FormatName: "json"}))

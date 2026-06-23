@@ -603,7 +603,7 @@ func TestAutomaticHEADOptionsAndMethodNotAllowed(t *testing.T) {
 
 func TestConfigurableFallbackHandlers(t *testing.T) {
 	makeApp := func() *App {
-		app := New(Config{
+		app := NewWithConfig(Config{
 			NotFoundHandler: func(c *Ctx) error {
 				return c.Status(StatusTeapot).SendString("custom missing")
 			},

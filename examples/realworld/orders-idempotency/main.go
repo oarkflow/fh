@@ -23,7 +23,7 @@ var seq uint64
 func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: false, RequireIdempotencyKey: true}})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: false, RequireIdempotencyKey: true}))
 
 	app.Get("/", func(c *fh.Ctx) error {
 		return c.JSON(fh.Map{"service": "orders-idempotency", "post": "/orders requires Idempotency-Key"})

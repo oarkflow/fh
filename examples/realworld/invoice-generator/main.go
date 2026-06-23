@@ -23,7 +23,7 @@ func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
 	_ = os.MkdirAll("public/invoices", 0700)
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 1}})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 1}))
 	app.Static("/files", "public")
 	app.Queue().Register("invoice.generate", func(ctx context.Context, job *fh.QueueJob) error {
 		var j InvoiceJob

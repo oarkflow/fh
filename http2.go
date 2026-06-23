@@ -74,9 +74,11 @@ type h2Frame struct {
 }
 
 type h2Conn struct {
-	app  *App
-	conn net.Conn
-	r    io.Reader
+	app    *App
+	conn   net.Conn
+	r      io.Reader
+	ctx    context.Context
+	cancel context.CancelFunc
 	// frameBuf is reused by the connection read loop. Frame payloads are consumed
 	// synchronously, so retaining one buffer avoids an allocation for every frame.
 	frameBuf []byte
@@ -154,6 +156,7 @@ func newH2Conn(app *App, conn net.Conn) *h2Conn {
 		peerInitialWindow: h2InitialWindow,
 		resetWindowStart:  time.Now(),
 	}
+	h.ctx, h.cancel = context.WithCancel(context.Background())
 	h.peerMaxFrame.Store(h2DefaultFrame)
 	h.peerMaxHeaderList.Store(^uint32(0))
 	h.flowCond = sync.NewCond(&h.flowMu)
@@ -188,13 +191,15 @@ func maxH2RequestBodySize(app *App) int {
 }
 
 func (h *h2Conn) newStreamContext() (context.Context, context.CancelFunc) {
-	// Keep this implementation dependency-light: it uses the existing WriteTimeout
-	// as an upper bound for handler lifetime if configured. If your Config has a
-	// dedicated HandlerTimeout, replace this with that field.
+	// Derive from the connection-level context so that stream contexts are
+	// cancelled when the TCP connection closes or when the server drains.
+	// WriteTimeout is applied as an upper bound for handler lifetime when
+	// configured. If your Config has a dedicated HandlerTimeout, replace
+	// this with that field.
 	if h.app.cfg.WriteTimeout > 0 {
-		return context.WithTimeout(context.Background(), h.app.cfg.WriteTimeout)
+		return context.WithTimeout(h.ctx, h.app.cfg.WriteTimeout)
 	}
-	return context.WithCancel(context.Background())
+	return context.WithCancel(h.ctx)
 }
 
 func (h *h2Conn) closeAllStreams() {
@@ -212,6 +217,9 @@ func (h *h2Conn) closeAllStreams() {
 		}
 	}
 
+	if h.cancel != nil {
+		h.cancel()
+	}
 	_ = h.conn.Close()
 }
 

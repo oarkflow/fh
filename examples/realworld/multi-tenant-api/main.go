@@ -30,7 +30,7 @@ func tenantMiddleware(c *fh.Ctx) error {
 func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 2}})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 2}))
 	app.Queue().Register("project.report", func(ctx context.Context, job *fh.QueueJob) error {
 		var j ReportJob
 		_ = json.Unmarshal(job.Payload, &j)

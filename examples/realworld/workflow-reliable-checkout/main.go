@@ -38,10 +38,10 @@ func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
 
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{
 		Enabled: true, DataDir: ".fh-data", JournalEnabled: true,
 		IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 2,
-	}})
+	}))
 	app.Queue().Register("checkout.fulfill", func(ctx context.Context, job *fh.QueueJob) error {
 		log.Printf("fulfilling checkout job=%s payload=%s", job.ID, job.Payload)
 		return nil
@@ -86,24 +86,30 @@ func main() {
 			return req.CartID
 		}}),
 		lifecycle.New(lifecycle.Hooks{
-			OnRequestStart: func(c *fh.Ctx) { log.Printf("checkout start request=%v", c.Locals("request_id")) },
-			OnError: func(c *fh.Ctx, err error) {
+			OnRequestStart: func(c *fh.Ctx) error {
+				log.Printf("checkout start request=%v", c.Locals("request_id"))
+				return nil
+			},
+			OnError: func(c *fh.Ctx, err error) error {
 				log.Printf("checkout failed request=%v: %v", c.Locals("request_id"), err)
 				if reserved, _ := c.Locals("inventory_reserved").(bool); reserved {
 					if compensateErr := c.RunCompensations(); compensateErr != nil {
 						log.Printf("checkout compensation failed request=%v: %v", c.Locals("request_id"), compensateErr)
+						return compensateErr
 					}
 				}
+				return nil
 			},
-			OnRequestEnd: func(c *fh.Ctx) {
+			OnRequestEnd: func(c *fh.Ctx) error {
 				log.Printf("checkout end request=%v status=%d", c.Locals("request_id"), c.StatusCode())
+				return nil
 			},
 		}),
 		checkout.Handler(),
 	)
 
 	// The typed endpoint shows the concise async form of the reliability middleware.
-	app.Post("/inventory/restocks", reliability.Endpoint[RestockRequest, fh.Map](reliability.EndpointOptions[RestockRequest, fh.Map]{
+	app.Post("/inventory/restocks", reliability.Endpoint(reliability.EndpointOptions[RestockRequest, fh.Map]{
 		Policy: fh.ReliabilityPolicy{Enabled: true, RequireIdempotency: true, Journal: true, ReplayResponse: true},
 		Validate: func(c *fh.Ctx, req *RestockRequest) error {
 			if req.SKU == "" || req.Quantity <= 0 {

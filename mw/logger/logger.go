@@ -109,7 +109,7 @@ const (
 
 var defaultStaticExtensions = []string{
 	".css", ".js", ".mjs", ".map",
-	".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".bmp", ".avif",
+	".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".bmp", ".avif", ".ico",
 	".woff", ".woff2", ".ttf", ".otf", ".eot",
 	".mp4", ".webm", ".mp3", ".wav", ".ogg",
 	".pdf", ".zip", ".gz", ".br",

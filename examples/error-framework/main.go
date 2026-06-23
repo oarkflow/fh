@@ -10,14 +10,14 @@ import (
 )
 
 func main() {
-	app := fh.New(fh.Config{
-		Environment: fh.EnvDevelopment, // use fh.EnvProduction in production
-		ErrorOptions: fh.ErrorOptions{
+	app := fh.New(
+		fh.WithEnvironment(fh.EnvDevelopment),
+		fh.WithErrorOptions(fh.ErrorOptions{
 			Environment:     fh.EnvDevelopment,
 			ProblemTypeBase: "https://api.example.com/problems",
 			ExposeCauses:    true,
-		},
-	})
+		}),
+	)
 
 	app.Use(requestid.New())
 	app.Use(recover.New())

@@ -27,7 +27,7 @@ var seq uint64
 func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, RequireIdempotencyKey: true}})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, RequireIdempotencyKey: true}))
 	app.Queue().Register("payment.webhook", func(ctx context.Context, job *fh.QueueJob) error {
 		var ev PaymentWebhook
 		_ = json.Unmarshal(job.Payload, &ev)

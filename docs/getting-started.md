@@ -81,10 +81,16 @@ app.Serve(ln)
 ### Graceful Shutdown
 
 ```go
-// Blocking shutdown
+// Listen with automatic signal handling (SIGINT/SIGTERM)
+app.ListenWithGracefulShutdown(":8080")
+
+// Blocking shutdown (waits indefinitely or until ShutdownTimeout)
 app.Shutdown()
 
-// With timeout
+// Shutdown with context (deadline, cancellation)
+app.ShutdownWithContext(ctx)
+
+// Shutdown with explicit timeout
 app.ShutdownWithTimeout(30 * time.Second)
 ```
 

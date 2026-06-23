@@ -169,11 +169,11 @@ func main() {
 	journal := &memoryJournal{}
 	idem := newMemoryIdempotency(24 * time.Hour)
 	queueStore := newMemoryQueueStorage()
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{
 		Enabled: true, JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true,
 		JournalStore: journal, IdempotencyRepository: idem, QueueStorage: queueStore,
 		QueueWorkers: 1, QueuePollInterval: 50 * time.Millisecond,
-	}})
+	}))
 	app.Queue().Register("email.send", func(ctx context.Context, job *fh.QueueJob) error {
 		var e emailJob
 		if err := json.Unmarshal(job.Payload, &e); err != nil {

@@ -17,9 +17,9 @@ import (
 )
 
 func main() {
-	app := fh.New(fh.Config{
-		MaxRequestBodySize: 2 << 20, // absolute server ceiling: 2 MiB
-	})
+	app := fh.New(
+		fh.WithMaxRequestBodySize(2 << 20), // absolute server ceiling: 2 MiB
+	)
 
 	// Reject unsafe Early-Data requests unless protected by Idempotency-Key.
 	app.Use(earlydata.New(earlydata.Config{

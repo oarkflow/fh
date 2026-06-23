@@ -25,7 +25,7 @@ type ChannelJob struct {
 func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 3}})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 3}))
 	for _, typ := range []string{"notify.email", "notify.sms", "notify.websocket"} {
 		jobType := typ
 		app.Queue().Register(jobType, func(ctx context.Context, job *fh.QueueJob) error {

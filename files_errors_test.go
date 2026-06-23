@@ -97,7 +97,7 @@ func TestTypedAndValidationProblemResponses(t *testing.T) {
 func TestInternalErrorsMaskedUnlessDebug(t *testing.T) {
 	secret := "database password is secret"
 	for _, tc := range []struct{ debug, exposed bool }{{false, false}, {true, true}} {
-		app := New(Config{Debug: tc.debug})
+		app := NewWithConfig(Config{Debug: tc.debug})
 		app.Get("/", func(*Ctx) error { return errors.New(secret) })
 		resp := pipeRequest(t, app, "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
 		if bytes.Contains([]byte(resp), []byte(secret)) != tc.exposed {

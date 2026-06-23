@@ -22,7 +22,7 @@ func init() {
 }
 
 func main() {
-	app := fh.New(fh.Config{DisableKeepAlive: false})
+	app := fh.New(fh.WithDisableKeepAlive(false))
 
 	app.Get("/plaintext", func(c *fh.Ctx) error {
 		return c.SendString("Hello, World!")

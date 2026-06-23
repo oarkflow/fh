@@ -30,7 +30,7 @@ func TestRenderNoEngine(t *testing.T) {
 }
 
 func TestRenderWithEngine(t *testing.T) {
-	app := fh.New(fh.Config{
+	app := fh.NewWithConfig(fh.Config{
 		TemplateEngine: &mockEngine{},
 	})
 	app.Get("/", func(c *fh.Ctx) error {
@@ -48,7 +48,7 @@ func TestRenderWithEngine(t *testing.T) {
 }
 
 func TestRenderWithData(t *testing.T) {
-	app := fh.New(fh.Config{
+	app := fh.NewWithConfig(fh.Config{
 		TemplateEngine: &mockEngine{
 			renderFn: func(w io.Writer, name string, data any, layout ...string) error {
 				m, ok := data.(map[string]any)
@@ -74,7 +74,7 @@ func TestRenderWithData(t *testing.T) {
 }
 
 func TestRenderWithLayout(t *testing.T) {
-	app := fh.New(fh.Config{
+	app := fh.NewWithConfig(fh.Config{
 		TemplateEngine: &mockEngine{
 			renderFn: func(w io.Writer, name string, data any, layout ...string) error {
 				l := ""
@@ -101,7 +101,7 @@ func TestRenderWithLayout(t *testing.T) {
 }
 
 func TestRenderHTMLEscape(t *testing.T) {
-	app := fh.New(fh.Config{
+	app := fh.NewWithConfig(fh.Config{
 		TemplateEngine: &mockEngine{},
 	})
 	app.Get("/", func(c *fh.Ctx) error {
@@ -135,7 +135,7 @@ func TestRenderNoEngineError(t *testing.T) {
 }
 
 func TestRenderContentType(t *testing.T) {
-	app := fh.New(fh.Config{
+	app := fh.NewWithConfig(fh.Config{
 		TemplateEngine: &mockEngine{},
 	})
 	app.Get("/", func(c *fh.Ctx) error {

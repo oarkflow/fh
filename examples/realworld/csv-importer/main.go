@@ -24,7 +24,7 @@ func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
 	_ = os.MkdirAll("uploads", 0700)
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 1, QueuePollInterval: 200 * time.Millisecond}})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 1, QueuePollInterval: 200 * time.Millisecond}))
 	app.Use(bodylimit.New(20 << 20))
 	app.Queue().Register("csv.import.users", func(ctx context.Context, job *fh.QueueJob) error {
 		var j ImportJob

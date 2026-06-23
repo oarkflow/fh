@@ -24,7 +24,7 @@ func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	secret := flag.String("secret", "dev-secret", "HMAC webhook secret")
 	flag.Parse()
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 2}})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 2}))
 	app.Queue().Register("webhook.process", func(ctx context.Context, job *fh.QueueJob) error {
 		log.Printf("process webhook job=%s payload=%s", job.ID, string(job.Payload))
 		return nil

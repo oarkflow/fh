@@ -146,12 +146,12 @@ func main() {
 	splEngine.engine.HydrationRuntimeURL = "/static/" + runtimeName
 	splEngine.HydrationAssets("/static/hydration")
 
-	app := fh.New(fh.Config{
-		ReadTimeout:        10 * time.Second,
-		WriteTimeout:       10 * time.Second,
-		MaxRequestBodySize: 32 * 1024 * 1024,
-		TemplateEngine:     splEngine,
-	})
+	app := fh.New(
+		fh.WithReadTimeout(10*time.Second),
+		fh.WithWriteTimeout(10*time.Second),
+		fh.WithMaxRequestBodySize(32*1024*1024),
+		fh.WithTemplateEngine(splEngine),
+	)
 
 	// CSRF must run before pages/API routes.
 	// A safe GET creates the csrf_token cookie and exposes the token through

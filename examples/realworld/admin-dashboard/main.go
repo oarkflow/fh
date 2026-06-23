@@ -15,7 +15,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: false, QueueEnabled: true}})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: false, QueueEnabled: true}))
 	app.Use(recovermw.New())
 	app.Use(security.New())
 	app.Use(ratelimiter.New(ratelimiter.Config{Max: 60, Window: time.Minute}))

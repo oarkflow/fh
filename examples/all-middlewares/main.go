@@ -51,16 +51,14 @@ func main() {
 	upstream := flag.String("upstream", "http://127.0.0.1:4000", "gateway upstream")
 	flag.Parse()
 
-	app := fh.New(fh.Config{
-		Reliability: fh.ReliabilityConfig{
-			Enabled:            true,
-			DataDir:            env("FH_DATA_DIR", ".fh-data"),
-			JournalEnabled:     true,
-			IdempotencyEnabled: true,
-			QueueEnabled:       true,
-			QueueWorkers:       2,
-		},
-	})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{
+		Enabled:            true,
+		DataDir:            env("FH_DATA_DIR", ".fh-data"),
+		JournalEnabled:     true,
+		IdempotencyEnabled: true,
+		QueueEnabled:       true,
+		QueueWorkers:       2,
+	}))
 	requests := metrics.New()
 	sessions := session.NewMemoryStore(10 * time.Minute)
 	defer sessions.StopGC()
@@ -319,14 +317,17 @@ func main() {
 	// ── Lifecycle Hooks ──────────────────────────────────────────────
 	app.Post("/demo/lifecycle",
 		lifecycle.New(lifecycle.Hooks{
-			OnRequestStart: func(c *fh.Ctx) {
+			OnRequestStart: func(c *fh.Ctx) error {
 				log.Printf("lifecycle start request=%v", c.Locals("request_id"))
+				return nil
 			},
-			OnError: func(c *fh.Ctx, err error) {
+			OnError: func(c *fh.Ctx, err error) error {
 				log.Printf("lifecycle error request=%v: %v", c.Locals("request_id"), err)
+				return nil
 			},
-			OnRequestEnd: func(c *fh.Ctx) {
+			OnRequestEnd: func(c *fh.Ctx, err error) error {
 				log.Printf("lifecycle end request=%v status=%d", c.Locals("request_id"), c.StatusCode())
+				return nil
 			},
 		}),
 		func(c *fh.Ctx) error {

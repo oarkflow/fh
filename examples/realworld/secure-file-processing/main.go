@@ -25,7 +25,7 @@ func main() {
 	addr := flag.String("addr", ":3000", "listen address")
 	flag.Parse()
 	_ = os.MkdirAll("storage", 0700)
-	app := fh.New(fh.Config{Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 2}})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", JournalEnabled: true, IdempotencyEnabled: true, QueueEnabled: true, QueueWorkers: 2}))
 	app.Use(security.New())
 	app.Use(bodylimit.New(25 << 20))
 	app.Static("/downloads", "storage")

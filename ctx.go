@@ -497,6 +497,26 @@ func (c *Ctx) SetContext(ctx context.Context) {
 	c.requestContext = ctx
 }
 
+// Done returns a channel that is closed when the request context is cancelled
+// (timeout, client disconnect, server draining). Handlers should select on
+// this channel alongside their own work to implement cooperative cancellation.
+func (c *Ctx) Done() <-chan struct{} {
+	return c.requestContext.Done()
+}
+
+// Err returns nil while the request is still active and a non-nil error
+// (context.Canceled or context.DeadlineExceeded) once the context has been
+// cancelled or its deadline has expired.
+func (c *Ctx) Err() error {
+	return c.requestContext.Err()
+}
+
+// Deadline returns the time at which the request context will be cancelled,
+// if a deadline has been set (e.g. via WriteTimeout or the timeout middleware).
+func (c *Ctx) Deadline() (time.Time, bool) {
+	return c.requestContext.Deadline()
+}
+
 // TransformBody installs a buffered response transformation. It is intended
 // for middleware such as gzip compression and does not affect Stream output.
 func (c *Ctx) TransformBody(fn func([]byte) ([]byte, error)) { c.bodyTransform = fn }

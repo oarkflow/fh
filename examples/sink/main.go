@@ -52,16 +52,16 @@ func main() {
 	splEngine.HydrationRuntimeURL("/static/spl-runtime.min.js?v=" + splEngine.RuntimeVersion())
 	splEngine.HydrationAssets("/static/hydration")
 
-	app := fh.New(fh.Config{
-		ReadTimeout:        10 * time.Second,
-		WriteTimeout:       10 * time.Second,
-		IdleTimeout:        60 * time.Second,
-		MaxConnections:     1000,
-		ReadBufferSize:     8192,
-		MaxRequestBodySize: 4 * 1024 * 1024,
-		DisableKeepAlive:   false,
-		TemplateEngine:     splEngine,
-	})
+	app := fh.New(
+		fh.WithReadTimeout(10*time.Second),
+		fh.WithWriteTimeout(10*time.Second),
+		fh.WithIdleTimeout(60*time.Second),
+		fh.WithMaxConnections(1000),
+		fh.WithReadBufferSize(8192),
+		fh.WithMaxRequestBodySize(4*1024*1024),
+		fh.WithDisableKeepAlive(false),
+		fh.WithTemplateEngine(splEngine),
+	)
 
 	// ──────────────────────────────────────────────────────────────────────
 	// 2. LIFECYCLE HOOKS

@@ -25,20 +25,18 @@ func main() {
 	workers := flag.Int("queue-workers", 2, "durable queue worker count")
 	flag.Parse()
 
-	app := fh.New(fh.Config{
-		Reliability: fh.ReliabilityConfig{
-			Enabled:               *reliable,
-			DataDir:               *dataDir,
-			JournalEnabled:        true,
-			IdempotencyEnabled:    true,
-			QueueEnabled:          true,
-			RequireIdempotencyKey: *requireIdempotency,
-			IdempotencyTTL:        24 * time.Hour,
-			QueueWorkers:          *workers,
-			QueueMaxAttempts:      5,
-			QueuePollInterval:     100 * time.Millisecond,
-		},
-	})
+	app := fh.New(fh.WithReliability(fh.ReliabilityConfig{
+		Enabled:               *reliable,
+		DataDir:               *dataDir,
+		JournalEnabled:        true,
+		IdempotencyEnabled:    true,
+		QueueEnabled:          true,
+		RequireIdempotencyKey: *requireIdempotency,
+		IdempotencyTTL:        24 * time.Hour,
+		QueueWorkers:          *workers,
+		QueueMaxAttempts:      5,
+		QueuePollInterval:     100 * time.Millisecond,
+	}))
 
 	if q := app.Queue(); q != nil {
 		q.Register("send_email", func(ctx context.Context, job *fh.QueueJob) error {

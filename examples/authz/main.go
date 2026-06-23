@@ -22,12 +22,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	app := fh.New(fh.Config{
-		ReadTimeout:        10 * time.Second,
-		WriteTimeout:       10 * time.Second,
-		IdleTimeout:        60 * time.Second,
-		MaxRequestBodySize: 4 * 1024 * 1024,
-	})
+	app := fh.New(
+		fh.WithReadTimeout(10*time.Second),
+		fh.WithWriteTimeout(10*time.Second),
+		fh.WithIdleTimeout(60*time.Second),
+		fh.WithMaxRequestBodySize(4*1024*1024),
+	)
 
 	// Public health route should not go through AuthZ.
 	app.Get("/health", func(c *fh.Ctx) error {

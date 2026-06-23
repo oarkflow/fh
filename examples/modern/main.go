@@ -36,11 +36,16 @@ type UserResponse struct {
 }
 
 func main() {
-	app := fh.New(fh.Config{
-		ReadTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
-		MaxRequestBodySize: 1 << 20, MaxHeaderListSize: 32 << 10, MaxHeaderCount: 64, MaxRequestLineSize: 8 << 10,
-		Reliability: fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", QueueWorkers: 2},
-	})
+	app := fh.New(
+		fh.WithReadTimeout(5*time.Second),
+		fh.WithWriteTimeout(10*time.Second),
+		fh.WithIdleTimeout(60*time.Second),
+		fh.WithMaxRequestBodySize(1<<20),
+		fh.WithMaxHeaderListSize(32<<10),
+		fh.WithMaxHeaderCount(64),
+		fh.WithMaxRequestLineSize(8<<10),
+		fh.WithReliability(fh.ReliabilityConfig{Enabled: true, DataDir: ".fh-data", QueueWorkers: 2}),
+	)
 
 	app.Use(requestid.New())
 	app.Use(security.New())

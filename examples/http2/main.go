@@ -88,14 +88,14 @@ func main() {
 
 	// ── 1. Cleartext HTTP — h2c (prior knowledge + upgrade) ────────────────
 
-	appH2C := fh.New(fh.Config{
-		ReadTimeout:          10 * time.Second,
-		WriteTimeout:         10 * time.Second,
-		IdleTimeout:          60 * time.Second,
-		MaxRequestBodySize:   4 << 20,
-		MaxConcurrentStreams: 128,
-		MaxHeaderListSize:    64 << 10,
-	})
+	appH2C := fh.New(
+		fh.WithReadTimeout(10*time.Second),
+		fh.WithWriteTimeout(10*time.Second),
+		fh.WithIdleTimeout(60*time.Second),
+		fh.WithMaxRequestBodySize(4<<20),
+		fh.WithMaxConcurrentStreams(128),
+		fh.WithMaxHeaderListSize(64<<10),
+	)
 	routes(appH2C)
 
 	go func() {
@@ -107,14 +107,14 @@ func main() {
 
 	// ── 2. TLS + ALPN — negotiates h2 automatically ───────────────────────
 
-	appTLS := fh.New(fh.Config{
-		ReadTimeout:          10 * time.Second,
-		WriteTimeout:         10 * time.Second,
-		IdleTimeout:          60 * time.Second,
-		MaxRequestBodySize:   4 << 20,
-		MaxConcurrentStreams: 128,
-		MaxHeaderListSize:    64 << 10,
-	})
+	appTLS := fh.New(
+		fh.WithReadTimeout(10*time.Second),
+		fh.WithWriteTimeout(10*time.Second),
+		fh.WithIdleTimeout(60*time.Second),
+		fh.WithMaxRequestBodySize(4<<20),
+		fh.WithMaxConcurrentStreams(128),
+		fh.WithMaxHeaderListSize(64<<10),
+	)
 	routes(appTLS)
 
 	cert := generateSelfSignedCert()

@@ -400,7 +400,10 @@ Session stores: `MemoryStore` (default), `FileStore`. Custom stores implement `s
 ## Graceful Shutdown
 
 ```go
-app := fh.New()
+// Option 1: one-liner with signal handling (SIGINT/SIGTERM)
+app.ListenWithGracefulShutdown(":8080")
+
+// Option 2: manual signal handling
 go app.Listen(":8080")
 
 quit := make(chan os.Signal, 1)
@@ -409,7 +412,7 @@ signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 
 ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 defer cancel()
-app.Shutdown(ctx)
+app.ShutdownWithContext(ctx)
 ```
 
 ---

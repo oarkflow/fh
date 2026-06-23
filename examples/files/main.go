@@ -22,7 +22,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	app := fh.New(fh.Config{Debug: os.Getenv("DEBUG") == "1"})
+	app := fh.New(fh.WithDebug(os.Getenv("DEBUG") == "1"))
 
 	app.Get("/", func(c *fh.Ctx) error {
 		return c.JSON(map[string]any{

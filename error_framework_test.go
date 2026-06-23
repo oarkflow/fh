@@ -12,7 +12,7 @@ import (
 )
 
 func TestProblemDetailsProductionMasksInternalError(t *testing.T) {
-	app := fh.New(fh.Config{Environment: fh.EnvProduction})
+	app := fh.NewWithConfig(fh.Config{Environment: fh.EnvProduction})
 	app.Get("/", func(c *fh.Ctx) error { return errors.New("database password=secret") })
 	resp := rawRequest(t, app, "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
 	if !strings.Contains(resp, "500 Internal Server Error") || !strings.Contains(resp, "application/problem+json") {
@@ -27,7 +27,7 @@ func TestProblemDetailsProductionMasksInternalError(t *testing.T) {
 }
 
 func TestProblemDetailsDevelopmentIncludesRedactedDebug(t *testing.T) {
-	app := fh.New(fh.Config{Environment: fh.EnvDevelopment, ErrorOptions: fh.ErrorOptions{Environment: fh.EnvDevelopment, ExposeCauses: true}})
+	app := fh.NewWithConfig(fh.Config{Environment: fh.EnvDevelopment, ErrorOptions: fh.ErrorOptions{Environment: fh.EnvDevelopment, ExposeCauses: true}})
 	app.Get("/", func(c *fh.Ctx) error { return errors.New("database password=secret") })
 	resp := rawRequest(t, app, "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
 	if !strings.Contains(resp, "debug") || !strings.Contains(resp, "[REDACTED]") {
