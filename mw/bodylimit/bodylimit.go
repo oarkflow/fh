@@ -4,7 +4,7 @@ import "github.com/oarkflow/fh"
 
 type Config struct {
 	Limit int
-	Next  func(*fh.Ctx) bool
+	Next  func(fh.Ctx) bool
 }
 
 // New limits a request body. Register it with app.Use for a global policy or
@@ -15,7 +15,7 @@ func WithConfig(cfg Config) fh.HandlerFunc {
 	if cfg.Limit <= 0 {
 		panic("bodylimit: limit must be positive")
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(c) {
 			return c.Next()
 		}

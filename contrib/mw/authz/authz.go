@@ -51,23 +51,23 @@ type FHConfig struct {
 	Resource    fh.Extractor[*authz.Resource]
 	Environment fh.Extractor[*authz.Environment]
 
-	OnDenied func(c *fh.Ctx, decision *authz.Decision) error
-	OnError  func(c *fh.Ctx, err error) error
+	OnDenied func(c fh.Ctx, decision *authz.Decision) error
+	OnError  func(c fh.Ctx, err error) error
 
-	Next      func(c *fh.Ctx) bool
+	Next      func(c fh.Ctx) bool
 	SkipPaths []string
 
-	Context func(c *fh.Ctx) context.Context
+	Context func(c fh.Ctx) context.Context
 }
 
 func SubjectFromHeaders() fh.Extractor[*authz.Subject] {
-	return func(c *fh.Ctx) (*authz.Subject, bool, error) {
+	return func(c fh.Ctx) (*authz.Subject, bool, error) {
 		return FHDefaultSubjectExtractor(c), true, nil
 	}
 }
 
 func SubjectFromPrincipal() fh.Extractor[*authz.Subject] {
-	return func(c *fh.Ctx) (*authz.Subject, bool, error) {
+	return func(c fh.Ctx) (*authz.Subject, bool, error) {
 		p, ok := fh.PrincipalFrom(c)
 		if !ok {
 			return nil, false, nil
@@ -89,7 +89,7 @@ func SubjectFromPrincipal() fh.Extractor[*authz.Subject] {
 }
 
 func ActionFromMethod() fh.Extractor[authz.Action] {
-	return func(c *fh.Ctx) (authz.Action, bool, error) {
+	return func(c fh.Ctx) (authz.Action, bool, error) {
 		if c == nil {
 			return "", false, nil
 		}
@@ -99,13 +99,13 @@ func ActionFromMethod() fh.Extractor[authz.Action] {
 }
 
 func StaticAction(action authz.Action) fh.Extractor[authz.Action] {
-	return func(*fh.Ctx) (authz.Action, bool, error) {
+	return func(fh.Ctx) (authz.Action, bool, error) {
 		return action, action != "", nil
 	}
 }
 
 func ResourceFromRoute(resourceType, idParam string) fh.Extractor[*authz.Resource] {
-	return func(c *fh.Ctx) (*authz.Resource, bool, error) {
+	return func(c fh.Ctx) (*authz.Resource, bool, error) {
 		res := FHDefaultResourceExtractor(c)
 		if resourceType != "" {
 			res.Type = resourceType
@@ -120,12 +120,12 @@ func ResourceFromRoute(resourceType, idParam string) fh.Extractor[*authz.Resourc
 }
 
 func EnvironmentFromRequest() fh.Extractor[*authz.Environment] {
-	return func(c *fh.Ctx) (*authz.Environment, bool, error) {
+	return func(c fh.Ctx) (*authz.Environment, bool, error) {
 		return FHDefaultEnvironmentExtractor(c), true, nil
 	}
 }
 
-func FHDefaultSubjectExtractor(c *fh.Ctx) *authz.Subject {
+func FHDefaultSubjectExtractor(c fh.Ctx) *authz.Subject {
 	return &authz.Subject{
 		ID:       c.Get("X-Subject-ID"),
 		TenantID: c.Get("X-Tenant-ID"),
@@ -133,7 +133,7 @@ func FHDefaultSubjectExtractor(c *fh.Ctx) *authz.Subject {
 	}
 }
 
-func FHDefaultResourceExtractor(c *fh.Ctx) *authz.Resource {
+func FHDefaultResourceExtractor(c fh.Ctx) *authz.Resource {
 	tenant := c.Get("X-Tenant-ID")
 
 	return &authz.Resource{
@@ -143,21 +143,21 @@ func FHDefaultResourceExtractor(c *fh.Ctx) *authz.Resource {
 	}
 }
 
-func FHDefaultEnvironmentExtractor(c *fh.Ctx) *authz.Environment {
+func FHDefaultEnvironmentExtractor(c fh.Ctx) *authz.Environment {
 	return &authz.Environment{
 		Time:     time.Now(),
 		TenantID: c.Get("X-Tenant-ID"),
 	}
 }
 
-func FHDefaultDeniedHandler(c *fh.Ctx, decision *authz.Decision) error {
+func FHDefaultDeniedHandler(c fh.Ctx, decision *authz.Decision) error {
 	return c.Status(http.StatusForbidden).JSON(map[string]any{
 		"error":   "forbidden",
 		"message": "access denied",
 	})
 }
 
-func FHDefaultErrorHandler(c *fh.Ctx, err error) error {
+func FHDefaultErrorHandler(c fh.Ctx, err error) error {
 	return c.Status(http.StatusInternalServerError).JSON(map[string]any{
 		"error":   "internal_error",
 		"message": "authorization check failed",
@@ -173,7 +173,7 @@ func FHDefaultConfig(engine *authz.Engine) FHConfig {
 		Environment: EnvironmentFromRequest(),
 		OnDenied:    FHDefaultDeniedHandler,
 		OnError:     FHDefaultErrorHandler,
-		Context: func(c *fh.Ctx) context.Context {
+		Context: func(c fh.Ctx) context.Context {
 			return context.Background()
 		},
 	}
@@ -203,12 +203,12 @@ func FHWithConfig(cfg FHConfig) fh.HandlerFunc {
 		cfg.OnError = FHDefaultErrorHandler
 	}
 	if cfg.Context == nil {
-		cfg.Context = func(c *fh.Ctx) context.Context {
+		cfg.Context = func(c fh.Ctx) context.Context {
 			return context.Background()
 		}
 	}
 
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(c) {
 			return c.Next()
 		}
@@ -287,7 +287,7 @@ func FHWithConfig(cfg FHConfig) fh.HandlerFunc {
 	}
 }
 
-func FHDecision(c *fh.Ctx) *authz.Decision {
+func FHDecision(c fh.Ctx) *authz.Decision {
 	if decision, ok := c.Locals("authz_decision").(*authz.Decision); ok {
 		return decision
 	}
@@ -295,7 +295,7 @@ func FHDecision(c *fh.Ctx) *authz.Decision {
 }
 
 func FHParamResourceExtractor(paramMap map[string]string) fh.Extractor[*authz.Resource] {
-	return func(c *fh.Ctx) (*authz.Resource, bool, error) {
+	return func(c fh.Ctx) (*authz.Resource, bool, error) {
 		tenant := c.Get("X-Tenant-ID")
 
 		res := &authz.Resource{
@@ -330,7 +330,7 @@ func FHParamResourceExtractor(paramMap map[string]string) fh.Extractor[*authz.Re
 }
 
 func FHResourceFromPath() fh.Extractor[*authz.Resource] {
-	return func(c *fh.Ctx) (*authz.Resource, bool, error) {
+	return func(c fh.Ctx) (*authz.Resource, bool, error) {
 		tenant := c.Get("X-Tenant-ID")
 		path := strings.Trim(c.Path(), "/")
 		parts := strings.SplitN(path, "/", 3)
@@ -353,7 +353,7 @@ func FHResourceFromPath() fh.Extractor[*authz.Resource] {
 }
 
 func FHRouteOwnerResource() fh.Extractor[*authz.Resource] {
-	return func(c *fh.Ctx) (*authz.Resource, bool, error) {
+	return func(c fh.Ctx) (*authz.Resource, bool, error) {
 		tenant := c.Get("X-Tenant-ID")
 
 		res := &authz.Resource{

@@ -10,7 +10,7 @@ func New(manager *SessionManager) fh.HandlerFunc {
 	if manager == nil {
 		panic("session middleware requires a manager")
 	}
-	return func(ctx *fh.Ctx) error {
+	return func(ctx fh.Ctx) error {
 		s, complete, err := manager.Begin(ctx)
 		if err != nil {
 			return err
@@ -23,7 +23,7 @@ func New(manager *SessionManager) fh.HandlerFunc {
 
 // Get retrieves the session from the context. Panics if the middleware is not
 // registered.
-func Get(ctx *fh.Ctx) *Session {
+func Get(ctx fh.Ctx) *Session {
 	s, ok := ctx.Locals("session").(*Session)
 	if !ok {
 		panic("session middleware is not registered")

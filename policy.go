@@ -18,12 +18,12 @@ import (
 
 // SSE support.
 type SSE struct {
-	c   *Ctx
+	c   *DefaultCtx
 	buf bytes.Buffer
 	mu  sync.Mutex
 }
 
-func (c *Ctx) SSE(fn func(*SSE) error) error {
+func (c *DefaultCtx) SSE(fn func(*SSE) error) error {
 	c.Type("text/event-stream; charset=utf-8")
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
@@ -132,14 +132,14 @@ func (s *SecurityEventStream) Emit(e SecurityEvent) {
 	}
 }
 func (s *SecurityEventStream) Handler() HandlerFunc {
-	return func(c *Ctx) error {
+	return func(c Ctx) error {
 		s.mu.RLock()
 		out := append([]SecurityEvent(nil), s.recent...)
 		s.mu.RUnlock()
 		return c.JSON(out)
 	}
 }
-func EmitSecurityEvent(c *Ctx, typ string, data map[string]any) {
+func EmitSecurityEvent(c Ctx, typ string, data map[string]any) {
 	rid, _ := c.Locals("request_id").(string)
 	defaultSecurityEvents.Emit(SecurityEvent{Type: typ, RequestID: rid, Path: c.Path(), Method: c.Method(), IP: c.IP(), Data: data, Time: time.Now().UTC()})
 }
@@ -173,7 +173,7 @@ type RequestLifecycle struct {
 	compensations []func(context.Context) error
 }
 
-func (c *Ctx) Lifecycle() *RequestLifecycle {
+func (c *DefaultCtx) Lifecycle() *RequestLifecycle {
 	if v, ok := c.Locals("fh.lifecycle").(*RequestLifecycle); ok {
 		return v
 	}
@@ -181,19 +181,19 @@ func (c *Ctx) Lifecycle() *RequestLifecycle {
 	c.Locals("fh.lifecycle", l)
 	return l
 }
-func (l *RequestLifecycle) Mark(c *Ctx, state LifecycleState) {
+func (l *RequestLifecycle) Mark(c *DefaultCtx, state LifecycleState) {
 	l.mu.Lock()
 	l.State = state
 	l.Events = append(l.Events, RequestJournalEntry{RequestID: fmt.Sprint(c.Locals("request_id")), Event: string(state), Method: c.Method(), Path: c.Path(), Status: c.StatusCode(), Time: time.Now().UTC()})
 	l.mu.Unlock()
 }
-func (c *Ctx) Compensate(fn func(context.Context) error) {
+func (c *DefaultCtx) Compensate(fn func(context.Context) error) {
 	l := c.Lifecycle()
 	l.mu.Lock()
 	l.compensations = append(l.compensations, fn)
 	l.mu.Unlock()
 }
-func (c *Ctx) RunCompensations() error {
+func (c *DefaultCtx) RunCompensations() error {
 	l := c.Lifecycle()
 	l.mu.Lock()
 	list := append([]func(context.Context) error(nil), l.compensations...)

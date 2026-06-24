@@ -11,7 +11,7 @@ type Config struct {
 	AllowMethods            []string
 	AllowWithIdempotencyKey bool
 	IdempotencyHeader       string
-	Next                    func(*fh.Ctx) bool
+	Next                    func(fh.Ctx) bool
 }
 
 var DefaultConfig = Config{
@@ -36,7 +36,7 @@ func New(config ...Config) fh.HandlerFunc {
 	for _, method := range cfg.AllowMethods {
 		allowed[strings.ToUpper(method)] = struct{}{}
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(c) {
 			return c.Next()
 		}

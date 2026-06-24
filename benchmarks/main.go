@@ -14,13 +14,13 @@ import (
 )
 
 type Server struct {
-	Name    string
-	Lang    string
-	Port    int
-	Start   func() *exec.Cmd
-	Setup   func() error
-	Ready   func() bool
-	RunDir  string
+	Name   string
+	Lang   string
+	Port   int
+	Start  func() *exec.Cmd
+	Setup  func() error
+	Ready  func() bool
+	RunDir string
 }
 
 type BenchmarkResult struct {

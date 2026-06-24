@@ -22,7 +22,7 @@ type Metrics struct {
 func New() *Metrics { return &Metrics{started: time.Now()} }
 
 func (m *Metrics) Middleware() fh.HandlerFunc {
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		m.requests.Add(1)
 		m.inflight.Add(1)
 		start := time.Now()
@@ -39,7 +39,7 @@ func (m *Metrics) Middleware() fh.HandlerFunc {
 }
 
 func (m *Metrics) Handler() fh.HandlerFunc {
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if c.Query("format") == "prometheus" {
 			var b strings.Builder
 			fmt.Fprintf(&b, "fh_requests_total %d\nfh_requests_inflight %d\n", m.requests.Load(), m.inflight.Load())

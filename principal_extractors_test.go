@@ -5,10 +5,10 @@ import "testing"
 func TestPrincipalExtractorFromCtxSources(t *testing.T) {
 	c := &Ctx{}
 	c.reset()
-	c.Header.Set("X-Subject-ID", "u1")
-	c.Header.Set("X-Tenant-ID", "t1")
-	c.Header.Set("X-Roles", "admin, editor")
-	c.Header.Set("X-Scopes", "orders:create")
+	c.RequestHeader().Set("X-Subject-ID", "u1")
+	c.RequestHeader().Set("X-Tenant-ID", "t1")
+	c.RequestHeader().Set("X-Roles", "admin, editor")
+	c.RequestHeader().Set("X-Scopes", "orders:create")
 	c.body = []byte(`{"auth":{"permissions":["orders:read","orders:write"],"claims":{"tier":"gold"}}}`)
 
 	ex := PrincipalExtractor(PrincipalExtractors{
@@ -17,7 +17,7 @@ func TestPrincipalExtractorFromCtxSources(t *testing.T) {
 		Roles:       HeaderCSV("X-Roles"),
 		Scopes:      HeaderCSV("X-Scopes"),
 		Permissions: BodyCSV("auth.permissions"),
-		Claims: func(c *Ctx) (map[string]any, bool, error) {
+		Claims: func(c Ctx) (map[string]any, bool, error) {
 			v, ok, err := BodyField("auth.claims")(c)
 			if err != nil || !ok {
 				return nil, ok, err

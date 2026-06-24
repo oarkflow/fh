@@ -20,11 +20,11 @@ const (
 
 var ErrLimitReached = errors.New("ratelimiter: limit reached")
 
-type KeyFunc func(ctx *fh.Ctx) string
+type KeyFunc func(ctx fh.Ctx) string
 
-type LimitReachedHandler func(ctx *fh.Ctx, result Result) error
+type LimitReachedHandler func(ctx fh.Ctx, result Result) error
 
-type SkipFunc func(ctx *fh.Ctx) bool
+type SkipFunc func(ctx fh.Ctx) bool
 
 type Result struct {
 	Allowed    bool
@@ -58,7 +58,7 @@ func New(config Config) fh.HandlerFunc {
 
 	limitStr := strconv.Itoa(cfg.Max)
 
-	return func(ctx *fh.Ctx) error {
+	return func(ctx fh.Ctx) error {
 		if cfg.Skip != nil && cfg.Skip(ctx) {
 			return ctx.Next()
 		}
@@ -105,7 +105,7 @@ func normalize(cfg Config) Config {
 		cfg.Window = time.Minute
 	}
 	if cfg.KeyFunc == nil {
-		cfg.KeyFunc = func(ctx *fh.Ctx) string {
+		cfg.KeyFunc = func(ctx fh.Ctx) string {
 			return ctx.IP()
 		}
 	}
@@ -121,7 +121,7 @@ func normalize(cfg Config) Config {
 	return cfg
 }
 
-func DefaultLimitReachedHandler(ctx *fh.Ctx, result Result) error {
+func DefaultLimitReachedHandler(ctx fh.Ctx, result Result) error {
 	retry := int(result.RetryAfter.Seconds())
 	if retry < 1 {
 		retry = 1

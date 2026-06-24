@@ -259,7 +259,7 @@ func TestMultipartCodecWithAny(t *testing.T) {
 
 func TestBodyParserMultipart(t *testing.T) {
 	srv := New()
-	srv.Post("/upload", func(c *Ctx) error {
+	srv.Post("/upload", func(c Ctx) error {
 		var data map[string]any
 		if err := c.BodyParser(&data); err != nil {
 			return c.Status(400).SendString(err.Error())
@@ -281,7 +281,7 @@ func TestBodyParserMultipart(t *testing.T) {
 
 func TestBodyParserXML(t *testing.T) {
 	srv := New()
-	srv.Post("/xml", func(c *Ctx) error {
+	srv.Post("/xml", func(c Ctx) error {
 		var data struct {
 			Name string `xml:"name"`
 			Age  int    `xml:"age"`
@@ -508,7 +508,7 @@ func TestDecodeFormToStructNotPointer(t *testing.T) {
 
 func TestBodyParserToStruct(t *testing.T) {
 	srv := New()
-	srv.Post("/submit", func(c *Ctx) error {
+	srv.Post("/submit", func(c Ctx) error {
 		var s structDecodeTarget
 		if err := c.BodyParser(&s); err != nil {
 			return c.Status(400).SendString("error: " + err.Error())
@@ -530,7 +530,7 @@ func TestBodyParserToStruct(t *testing.T) {
 
 func TestQueryParserToStruct(t *testing.T) {
 	srv := New()
-	srv.Get("/search", func(c *Ctx) error {
+	srv.Get("/search", func(c Ctx) error {
 		var s structDecodeTarget
 		if err := c.QueryParser(&s); err != nil {
 			return c.Status(400).SendString("error: " + err.Error())

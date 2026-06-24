@@ -19,7 +19,7 @@ import (
 )
 
 // Predicate returns true when the wrapped middleware should be skipped.
-type Predicate func(*fh.Ctx) bool
+type Predicate func(fh.Ctx) bool
 
 // Logic controls how multiple predicates are combined.
 type Logic uint8
@@ -49,7 +49,7 @@ type Config struct {
 	RecoverPredicatePanic bool
 
 	// OnPredicatePanic is called after a predicate panic is recovered.
-	OnPredicatePanic func(*fh.Ctx, any)
+	OnPredicatePanic func(fh.Ctx, any)
 }
 
 // New wraps middleware and skips it when predicate returns true.
@@ -91,7 +91,7 @@ func NewWithConfig(middleware fh.HandlerFunc, cfg Config) fh.HandlerFunc {
 		recoverPanics = true
 	}
 
-	shouldSkip := func(c *fh.Ctx) bool {
+	shouldSkip := func(c fh.Ctx) bool {
 		switch cfg.Logic {
 		case LogicAll:
 			for _, p := range predicates {
@@ -110,7 +110,7 @@ func NewWithConfig(middleware fh.HandlerFunc, cfg Config) fh.HandlerFunc {
 		}
 	}
 
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if shouldSkip(c) {
 			return c.Next()
 		}
@@ -118,7 +118,7 @@ func NewWithConfig(middleware fh.HandlerFunc, cfg Config) fh.HandlerFunc {
 	}
 }
 
-func safeEval(c *fh.Ctx, p Predicate, recoverPanics bool, onPanic func(*fh.Ctx, any)) (ok bool) {
+func safeEval(c fh.Ctx, p Predicate, recoverPanics bool, onPanic func(fh.Ctx, any)) (ok bool) {
 	if p == nil {
 		return false
 	}
@@ -141,12 +141,12 @@ func safeEval(c *fh.Ctx, p Predicate, recoverPanics bool, onPanic func(*fh.Ctx, 
 
 // Always always skips middleware.
 func Always() Predicate {
-	return func(*fh.Ctx) bool { return true }
+	return func(fh.Ctx) bool { return true }
 }
 
 // Never never skips middleware.
 func Never() Predicate {
-	return func(*fh.Ctx) bool { return false }
+	return func(fh.Ctx) bool { return false }
 }
 
 // Not negates a predicate.
@@ -154,7 +154,7 @@ func Not(p Predicate) Predicate {
 	if p == nil {
 		return Never()
 	}
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		return !p(c)
 	}
 }
@@ -165,7 +165,7 @@ func Any(predicates ...Predicate) Predicate {
 	if len(ps) == 0 {
 		return Never()
 	}
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		for _, p := range ps {
 			if p(c) {
 				return true
@@ -181,7 +181,7 @@ func All(predicates ...Predicate) Predicate {
 	if len(ps) == 0 {
 		return Never()
 	}
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		for _, p := range ps {
 			if !p(c) {
 				return false
@@ -205,7 +205,7 @@ func Paths(paths ...string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		_, ok := set[c.Path()]
 		return ok
 	}
@@ -225,7 +225,7 @@ func PathCI(paths ...string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		_, ok := set[strings.ToLower(c.Path())]
 		return ok
 	}
@@ -238,7 +238,7 @@ func Prefixes(prefixes ...string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		p := c.Path()
 		for _, prefix := range items {
 			if strings.HasPrefix(p, prefix) {
@@ -256,7 +256,7 @@ func Suffixes(suffixes ...string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		p := c.Path()
 		for _, suffix := range items {
 			if strings.HasSuffix(p, suffix) {
@@ -274,7 +274,7 @@ func Contains(parts ...string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		p := c.Path()
 		for _, part := range items {
 			if strings.Contains(p, part) {
@@ -298,7 +298,7 @@ func Globs(patterns ...string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		p := c.Path()
 		for _, pattern := range items {
 			if ok, _ := path.Match(pattern, p); ok {
@@ -325,7 +325,7 @@ func Methods(methods ...string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		_, ok := set[strings.ToUpper(c.Method())]
 		return ok
 	}
@@ -346,7 +346,7 @@ func HeaderExists(name string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		return c.Get(name) != ""
 	}
 }
@@ -358,7 +358,7 @@ func HeaderEquals(name, value string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		return c.Get(name) == value
 	}
 }
@@ -370,7 +370,7 @@ func HeaderContains(name, value string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		return strings.Contains(c.Get(name), value)
 	}
 }
@@ -382,7 +382,7 @@ func HeaderPrefix(name, prefix string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		return strings.HasPrefix(c.Get(name), prefix)
 	}
 }
@@ -394,7 +394,7 @@ func HeaderSuffix(name, suffix string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		return strings.HasSuffix(c.Get(name), suffix)
 	}
 }
@@ -406,7 +406,7 @@ func QueryExists(name string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		return c.Query(name) != ""
 	}
 }
@@ -418,7 +418,7 @@ func QueryEquals(name, value string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		return c.Query(name) == value
 	}
 }
@@ -430,7 +430,7 @@ func QueryContains(name, value string) Predicate {
 		return Never()
 	}
 
-	return func(c *fh.Ctx) bool {
+	return func(c fh.Ctx) bool {
 		return strings.Contains(c.Query(name), value)
 	}
 }

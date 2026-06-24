@@ -21,7 +21,7 @@ type Config struct {
 	CookieSameSite fh.SameSite
 	CookieMaxAge   time.Duration
 	TrustedOrigins []string
-	Next           func(*fh.Ctx) bool
+	Next           func(fh.Ctx) bool
 }
 
 var DefaultConfig = Config{
@@ -38,7 +38,7 @@ func New(config ...Config) fh.HandlerFunc {
 	for _, origin := range cfg.TrustedOrigins {
 		trusted[strings.ToLower(strings.TrimRight(origin, "/"))] = struct{}{}
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(c) {
 			return c.Next()
 		}
@@ -102,7 +102,7 @@ func csrfError(message string) *fh.HTTPError {
 	return fh.NewHTTPError(fh.StatusForbidden, "CSRF_INVALID", message)
 }
 
-func validOrigin(c *fh.Ctx, trusted map[string]struct{}) bool {
+func validOrigin(c fh.Ctx, trusted map[string]struct{}) bool {
 	raw := c.Get("Origin")
 	if raw == "" {
 		raw = c.Get("Referer")
@@ -118,5 +118,5 @@ func validOrigin(c *fh.Ctx, trusted map[string]struct{}) bool {
 	if _, ok := trusted[origin]; ok {
 		return true
 	}
-	return strings.EqualFold(u.Host, string(c.Header.Host))
+	return strings.EqualFold(u.Host, string(c.RequestHeader().Host))
 }

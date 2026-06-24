@@ -9,19 +9,19 @@ import (
 
 // New applies a core reliability policy to a route.
 func New(policy fh.ReliabilityPolicy) fh.HandlerFunc {
-	return func(c *fh.Ctx) error { return c.Reliability().ApplyPolicy(c, policy) }
+	return func(c fh.Ctx) error { return c.Reliability().ApplyPolicy(c, policy) }
 }
 
 type EndpointOptions[Req any, Res any] struct {
 	Policy    fh.ReliabilityPolicy
-	Validate  func(*fh.Ctx, *Req) error
-	Handle    func(context.Context, *fh.Ctx, Req) (Res, error)
+	Validate  func(fh.Ctx, *Req) error
+	Handle    func(context.Context, fh.Ctx, Req) (Res, error)
 	QueueType string
 	Async     bool
 }
 
 func Endpoint[Req any, Res any](opt EndpointOptions[Req, Res]) fh.HandlerFunc {
-	endpoint := func(c *fh.Ctx) error {
+	endpoint := func(c fh.Ctx) error {
 		var req Req
 		if err := c.BodyParser(&req); err != nil {
 			return err
@@ -53,5 +53,5 @@ func Endpoint[Req any, Res any](opt EndpointOptions[Req, Res]) fh.HandlerFunc {
 		c.Lifecycle().Mark(c, fh.LifecycleCompleted)
 		return c.JSON(res)
 	}
-	return func(c *fh.Ctx) error { return c.RunReliableEndpoint(opt.Policy, endpoint) }
+	return func(c fh.Ctx) error { return c.RunReliableEndpoint(opt.Policy, endpoint) }
 }

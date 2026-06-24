@@ -269,10 +269,10 @@ func (a *App) EnableComplianceEndpoints(prefix string) *App {
 		prefix = "/_fh"
 	}
 	prefix = strings.TrimRight(prefix, "/")
-	a.Get(prefix+"/compliance", func(c *Ctx) error { return c.JSON(a.ComplianceReport()) })
-	a.Get(prefix+"/compliance/controls", func(c *Ctx) error { return c.JSON(a.ComplianceControls()) })
-	a.Get(prefix+"/compliance/findings", func(c *Ctx) error { return c.JSON(a.ValidateSecurity()) })
-	a.Get(prefix+"/config/safe", func(c *Ctx) error { return c.JSON(a.SafeConfig()) })
+	a.Get(prefix+"/compliance", func(c Ctx) error { return c.JSON(a.ComplianceReport()) })
+	a.Get(prefix+"/compliance/controls", func(c Ctx) error { return c.JSON(a.ComplianceControls()) })
+	a.Get(prefix+"/compliance/findings", func(c Ctx) error { return c.JSON(a.ValidateSecurity()) })
+	a.Get(prefix+"/config/safe", func(c Ctx) error { return c.JSON(a.SafeConfig()) })
 	return a
 }
 

@@ -14,7 +14,7 @@ type Config struct {
 // New records data policy metadata and applies API version policy.
 func New(cfg Config) fh.HandlerFunc {
 	version := apiversion.New(cfg.Version)
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Data.Sensitivity != "" {
 			c.Locals("fh.data_policy", cfg.Data)
 		}

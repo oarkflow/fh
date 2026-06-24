@@ -291,7 +291,7 @@ func (h *h2Conn) serve(initial []byte, prefaceConsumed bool) {
 
 // prepareUpgrade converts the HTTP/1.1 upgrade request into HTTP/2 stream 1
 // and applies the settings carried in HTTP2-Settings (RFC 7540 section 3.2).
-func (h *h2Conn) prepareUpgrade(c *Ctx) error {
+func (h *h2Conn) prepareUpgrade(c *DefaultCtx) error {
 	settings, err := base64.RawURLEncoding.DecodeString(string(trimOWS(c.Header.Peek([]byte("HTTP2-Settings")))))
 	if err != nil || len(settings)%6 != 0 {
 		return h2ConnError{h2ProtocolError}
@@ -1026,7 +1026,7 @@ func lowerHeaderName(b []byte) string {
 	return strings.ToLower(string(b))
 }
 
-func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
+func (r *h2Response) writeResponse(c *DefaultCtx, body []byte) error {
 	c.responseBody = append(c.responseBody[:0], body...)
 	if c.responded || r.ended.Load() {
 		return nil
@@ -1067,7 +1067,7 @@ func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
 	return r.sendTrailers()
 }
 
-func (r *h2Response) beginStream(c *Ctx) error {
+func (r *h2Response) beginStream(c *DefaultCtx) error {
 	if r.ended.Load() {
 		return net.ErrClosed
 	}
@@ -1133,7 +1133,7 @@ func (r *h2Response) finish() {
 	}
 }
 
-func (h *h2Conn) sendResponseHeaders(s *h2Stream, c *Ctx, contentLength *int, end bool) error {
+func (h *h2Conn) sendResponseHeaders(s *h2Stream, c *DefaultCtx, contentLength *int, end bool) error {
 	h.writeMu.Lock()
 	defer h.writeMu.Unlock()
 	h.encBuf.Reset()

@@ -56,7 +56,7 @@ func runPipeApp(t *testing.T, app *App) net.Conn {
 
 func TestChunkedRequestAndTrailers(t *testing.T) {
 	app := New()
-	app.Post("/upload", func(c *Ctx) error {
+	app.Post("/upload", func(c Ctx) error {
 		return c.SendString(string(c.Body()) + ":" + c.Trailer("X-Checksum"))
 	})
 	client := runPipeApp(t, app)
@@ -74,7 +74,7 @@ func TestChunkedRequestAndTrailers(t *testing.T) {
 
 func TestExpect100Continue(t *testing.T) {
 	app := New()
-	app.Post("/expect", func(c *Ctx) error { return c.SendString(string(c.Body())) })
+	app.Post("/expect", func(c Ctx) error { return c.SendString(string(c.Body())) })
 	client := runPipeApp(t, app)
 	if _, err := io.WriteString(client, "POST /expect HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n"); err != nil {
 		t.Fatal(err)
@@ -99,8 +99,8 @@ func TestExpect100Continue(t *testing.T) {
 
 func TestPipelinedRequestAfterFixedBody(t *testing.T) {
 	app := New()
-	app.Post("/echo", func(c *Ctx) error { return c.SendString(string(c.Body())) })
-	app.Get("/next", func(c *Ctx) error { return c.SendString("next") })
+	app.Post("/echo", func(c Ctx) error { return c.SendString(string(c.Body())) })
+	app.Get("/next", func(c Ctx) error { return c.SendString("next") })
 	client := runPipeApp(t, app)
 	requests := "POST /echo HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\nbody" +
 		"GET /next HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n"
@@ -116,7 +116,7 @@ func TestPipelinedRequestAfterFixedBody(t *testing.T) {
 
 func TestStreamingChunkedResponse(t *testing.T) {
 	app := New()
-	app.Get("/stream", func(c *Ctx) error {
+	app.Get("/stream", func(c Ctx) error {
 		return c.Stream(func(w *StreamWriter) error {
 			if _, err := w.Write([]byte("alpha")); err != nil {
 				return err
@@ -141,7 +141,7 @@ func TestStreamingChunkedResponse(t *testing.T) {
 
 func TestUpgradePreservesBufferedBytes(t *testing.T) {
 	app := New()
-	app.Get("/upgrade", func(c *Ctx) error {
+	app.Get("/upgrade", func(c Ctx) error {
 		return c.Upgrade("echo", func(conn net.Conn) error {
 			var p [4]byte
 			if _, err := io.ReadFull(conn, p[:]); err != nil {
@@ -179,9 +179,9 @@ func TestUpgradePreservesBufferedBytes(t *testing.T) {
 
 func TestHTTP2PriorKnowledgeRequest(t *testing.T) {
 	app := New()
-	app.Get("/h2", func(c *Ctx) error {
-		if string(c.Header.Proto) != "HTTP/2.0" {
-			t.Errorf("unexpected protocol %q", c.Header.Proto)
+	app.Get("/h2", func(c Ctx) error {
+		if string(c.RequestHeader().Proto) != "HTTP/2.0" {
+			t.Errorf("unexpected protocol %q", c.RequestHeader().Proto)
 		}
 		return c.SendString("hello-h2")
 	})
@@ -251,9 +251,9 @@ func TestHTTP2PriorKnowledgeRequest(t *testing.T) {
 
 func TestHTTP2CleartextUpgradeRequestBecomesStreamOne(t *testing.T) {
 	app := New()
-	app.Post("/upgrade-h2", func(c *Ctx) error {
-		if string(c.Header.Proto) != "HTTP/2.0" {
-			t.Fatalf("unexpected protocol %q", c.Header.Proto)
+	app.Post("/upgrade-h2", func(c Ctx) error {
+		if string(c.RequestHeader().Proto) != "HTTP/2.0" {
+			t.Fatalf("unexpected protocol %q", c.RequestHeader().Proto)
 		}
 		return c.SendString("upgraded:" + string(c.Body()))
 	})
@@ -322,7 +322,7 @@ func TestHTTP2CleartextUpgradeRequestBecomesStreamOne(t *testing.T) {
 func TestHTTP2GracefulGoAway(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	app := New()
-	app.Get("/slow-h2", func(c *Ctx) error { close(started); <-release; return c.SendString("done") })
+	app.Get("/slow-h2", func(c Ctx) error { close(started); <-release; return c.SendString("done") })
 	client := runPipeApp(t, app)
 	if _, err := client.Write(h2ClientPreface); err != nil {
 		t.Fatal(err)
@@ -390,7 +390,7 @@ func encodeTestH2Headers(t *testing.T, method, path string) []byte {
 func TestHTTP2TLSInteroperability(t *testing.T) {
 	cert := testTLSCertificate(t)
 	app := New()
-	app.Get("/interop", func(c *Ctx) error { return c.SendString("native-h2") })
+	app.Get("/interop", func(c Ctx) error { return c.SendString("native-h2") })
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -420,9 +420,9 @@ func TestHTTP2FlowControlAndMultiplexing(t *testing.T) {
 	cert := testTLSCertificate(t)
 	large := bytes.Repeat([]byte("flow-control-"), 20000)
 	app := New()
-	app.Get("/large", func(c *Ctx) error { return c.SendBytes(large) })
-	app.Post("/echo", func(c *Ctx) error { return c.SendBytes(c.Body()) })
-	app.Get("/parallel/:id", func(c *Ctx) error { return c.SendString(c.Param("id")) })
+	app.Get("/large", func(c Ctx) error { return c.SendBytes(large) })
+	app.Post("/echo", func(c Ctx) error { return c.SendBytes(c.Body()) })
+	app.Get("/parallel/:id", func(c Ctx) error { return c.SendString(c.Param("id")) })
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -532,7 +532,7 @@ func readTestH2Frame(conn net.Conn) (h2Frame, error) {
 func TestGracefulShutdownWaitsForActiveRequest(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	app := New()
-	app.Get("/slow", func(c *Ctx) error {
+	app.Get("/slow", func(c Ctx) error {
 		close(started)
 		<-release
 		return c.SendString("done")
@@ -564,7 +564,7 @@ func TestGracefulShutdownWaitsForActiveRequest(t *testing.T) {
 func TestAutomaticHEADOptionsAndMethodNotAllowed(t *testing.T) {
 	makeApp := func() *App {
 		app := New()
-		app.Get("/resource", func(c *Ctx) error { return c.SendString("payload") })
+		app.Get("/resource", func(c Ctx) error { return c.SendString("payload") })
 		return app
 	}
 	tests := []struct {
@@ -604,18 +604,18 @@ func TestAutomaticHEADOptionsAndMethodNotAllowed(t *testing.T) {
 func TestConfigurableFallbackHandlers(t *testing.T) {
 	makeApp := func() *App {
 		app := NewWithConfig(Config{
-			NotFoundHandler: func(c *Ctx) error {
+			NotFoundHandler: func(c Ctx) error {
 				return c.Status(StatusTeapot).SendString("custom missing")
 			},
-			MethodNotAllowed: func(c *Ctx, allowed []string) error {
+			MethodNotAllowed: func(c Ctx, allowed []string) error {
 				return c.Status(StatusMethodNotAllowed).SendString("custom methods: " + strings.Join(allowed, "|"))
 			},
-			OptionsHandler: func(c *Ctx, allowed []string) error {
+			OptionsHandler: func(c Ctx, allowed []string) error {
 				c.Set("X-Allowed-Count", strconv.Itoa(len(allowed)))
 				return c.Status(StatusOK).SendString("custom options")
 			},
 		})
-		app.Get("/resource", func(c *Ctx) error { return c.SendString("payload") })
+		app.Get("/resource", func(c Ctx) error { return c.SendString("payload") })
 		return app
 	}
 

@@ -29,8 +29,8 @@ type Config struct {
 	VaryHeaders         []string
 	AllowRequestCookies bool
 	Store               Store
-	KeyGenerator        func(*fh.Ctx) string
-	Next                func(*fh.Ctx) bool
+	KeyGenerator        func(fh.Ctx) string
+	Next                func(fh.Ctx) bool
 }
 
 var DefaultConfig = Config{TTL: time.Minute, MaxBodySize: 1 << 20, MaxEntries: 1024, Methods: []string{"GET", "HEAD"}}
@@ -44,13 +44,15 @@ func New(config ...Config) fh.HandlerFunc {
 		cfg.Store = NewMemoryStore(cfg.MaxEntries)
 	}
 	if cfg.KeyGenerator == nil {
-		cfg.KeyGenerator = func(c *fh.Ctx) string { return c.Method() + " " + string(c.Header.Host) + " " + string(c.Header.URI) }
+		cfg.KeyGenerator = func(c fh.Ctx) string {
+			return c.Method() + " " + string(c.RequestHeader().Host) + " " + string(c.RequestHeader().URI)
+		}
 	}
 	methods := make(map[string]struct{}, len(cfg.Methods))
 	for _, m := range cfg.Methods {
 		methods[strings.ToUpper(m)] = struct{}{}
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(c) {
 			return c.Next()
 		}

@@ -110,9 +110,9 @@ func stringsTrimReq(s string) string {
 	return s
 }
 
-type AuditRecorder struct{ c *Ctx }
+type AuditRecorder struct{ c *DefaultCtx }
 
-func (c *Ctx) Audit() AuditRecorder { return AuditRecorder{c: c} }
+func (c *DefaultCtx) Audit() AuditRecorder { return AuditRecorder{c: c} }
 
 func (r AuditRecorder) Record(action, resource, resourceID string, meta ...map[string]any) error {
 	if r.c == nil || r.c.server == nil {
@@ -135,7 +135,7 @@ func (a *App) WriteAudit(ctx context.Context, e AuditEvent) error {
 	return a.audit.WriteAudit(ctx, e)
 }
 
-func enrichAuditFromCtx(c *Ctx, e AuditEvent) AuditEvent {
+func enrichAuditFromCtx(c *DefaultCtx, e AuditEvent) AuditEvent {
 	if e.Time.IsZero() {
 		e.Time = time.Now().UTC()
 	}
@@ -193,11 +193,11 @@ type LedgerEntry struct {
 	CreatedAt                                                                                       time.Time
 }
 
-func (c *Ctx) Ledger(action, resource, resourceID string, before, after []byte) error {
+func (c *DefaultCtx) Ledger(action, resource, resourceID string, before, after []byte) error {
 	return c.Audit().Record(action, resource, resourceID, map[string]any{"before_hash": hashBody(before), "after_hash": hashBody(after), "ledger": true})
 }
 
-func safeCtxIP(c *Ctx) (ip string) {
+func safeCtxIP(c *DefaultCtx) (ip string) {
 	defer func() {
 		if recover() != nil {
 			ip = ""

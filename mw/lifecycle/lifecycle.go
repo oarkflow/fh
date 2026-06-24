@@ -7,11 +7,11 @@ import (
 )
 
 type Hooks struct {
-	OnRequestStart  func(*fh.Ctx) error
-	OnBeforeHandler func(*fh.Ctx) error
-	OnAfterHandler  func(*fh.Ctx) error
-	OnError         func(*fh.Ctx, error) error
-	OnRequestEnd    func(*fh.Ctx, error) error
+	OnRequestStart  func(fh.Ctx) error
+	OnBeforeHandler func(fh.Ctx) error
+	OnAfterHandler  func(fh.Ctx) error
+	OnError         func(fh.Ctx, error) error
+	OnRequestEnd    func(fh.Ctx, error) error
 }
 
 type Config struct {
@@ -33,7 +33,7 @@ func New(h Hooks) fh.HandlerFunc {
 func NewWithConfig(cfg Config) fh.HandlerFunc {
 	h := cfg.Hooks
 
-	return func(c *fh.Ctx) (err error) {
+	return func(c fh.Ctx) (err error) {
 		defer func() {
 			if h.OnRequestEnd != nil {
 				endErr := h.OnRequestEnd(c, err)

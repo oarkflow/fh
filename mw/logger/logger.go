@@ -56,11 +56,11 @@ type Config struct {
 
 	// Skip allows custom skipping before logging.
 	// It runs before ctx.Next(). If true, no log is written.
-	Skip func(*fh.Ctx) bool
+	Skip func(fh.Ctx) bool
 
 	// SkipAfter allows custom skipping after ctx.Next().
 	// Useful for status-code based rules.
-	SkipAfter func(*fh.Ctx, error) bool
+	SkipAfter func(fh.Ctx, error) bool
 
 	// SkipDefaultStatic skips common static asset types.
 	// Defaults to true.
@@ -240,13 +240,13 @@ func NewMiddleware(config ...Config) *Middleware {
 }
 
 func (m *Middleware) Handler() fh.HandlerFunc {
-	return func(ctx *fh.Ctx) error {
+	return func(ctx fh.Ctx) error {
 		if m.cfg.Skip != nil && m.cfg.Skip(ctx) {
 			return ctx.Next()
 		}
 
-		method := ctx.Header.Method
-		uri := ctx.Header.URI
+		method := ctx.RequestHeader().Method
+		uri := ctx.RequestHeader().URI
 
 		if m.skip.pre(method, uri) {
 			return ctx.Next()

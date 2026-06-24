@@ -12,7 +12,7 @@ type Logger interface {
 	Printf(format string, args ...any)
 }
 
-type PanicHandler func(ctx *fh.Ctx, recovered any, stack []byte) error
+type PanicHandler func(ctx fh.Ctx, recovered any, stack []byte) error
 
 type Config struct {
 	EnableStackTrace bool
@@ -28,7 +28,7 @@ func New(config ...Config) fh.HandlerFunc {
 		cfg = mergeConfig(cfg, config[0])
 	}
 
-	return func(ctx *fh.Ctx) (err error) {
+	return func(ctx fh.Ctx) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				var stack []byte
@@ -80,7 +80,7 @@ func mergeConfig(base Config, override Config) Config {
 	return base
 }
 
-func DefaultHandler(ctx *fh.Ctx, recovered any, stack []byte) error {
+func DefaultHandler(ctx fh.Ctx, recovered any, stack []byte) error {
 	ctx.Set("Content-Type", "text/plain; charset=utf-8")
 	return ctx.Status(500).SendString("Internal Server Error")
 }

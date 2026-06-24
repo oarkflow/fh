@@ -16,7 +16,7 @@ func TestH2SpecIntegration(t *testing.T) {
 
 	cert := testTLSCertificate(t)
 	app := New()
-	app.Get("/", func(c *Ctx) error { return c.SendString("ok") })
+	app.Get("/", func(c Ctx) error { return c.SendString("ok") })
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

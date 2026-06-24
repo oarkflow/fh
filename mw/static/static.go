@@ -41,7 +41,7 @@ func New(root string, config ...Config) fh.HandlerFunc {
 		}
 	}
 	root = filepath.Clean(cfg.Root)
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		rel := strings.TrimPrefix(c.Param("*"), "/")
 		if rel == "" {
 			rel = strings.TrimPrefix(c.Path(), cfg.Prefix)

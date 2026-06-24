@@ -6,7 +6,7 @@ import (
 	"github.com/oarkflow/fh"
 )
 
-type Config struct{ Key func(*fh.Ctx) string }
+type Config struct{ Key func(fh.Ctx) string }
 
 var registry = struct {
 	sync.Mutex
@@ -14,7 +14,7 @@ var registry = struct {
 }{locks: map[string]*sync.Mutex{}}
 
 func New(cfg Config) fh.HandlerFunc {
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Key == nil {
 			return c.Next()
 		}

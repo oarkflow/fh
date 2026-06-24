@@ -62,7 +62,7 @@ func pipePair() (client, server net.Conn) {
 
 func BenchmarkFH_HelloWorld(b *testing.B) {
 	app := fh.New()
-	app.Get("/bench", func(ctx *fh.Ctx) error {
+	app.Get("/bench", func(ctx fh.Ctx) error {
 		return ctx.SendString("hello")
 	})
 
@@ -91,7 +91,7 @@ func BenchmarkFH_ParallelRequests(b *testing.B) {
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		app := fh.New()
-		app.Get("/bench", func(ctx *fh.Ctx) error {
+		app.Get("/bench", func(ctx fh.Ctx) error {
 			return ctx.SendString("hello")
 		})
 		ln := newPipeListener()
@@ -113,7 +113,7 @@ func BenchmarkFH_ParallelRequests(b *testing.B) {
 
 func BenchmarkFH_RouteWithParams(b *testing.B) {
 	app := fh.New()
-	app.Get("/users/:id/posts/:post", func(ctx *fh.Ctx) error {
+	app.Get("/users/:id/posts/:post", func(ctx fh.Ctx) error {
 		return ctx.SendString(ctx.Param("id") + ctx.Param("post"))
 	})
 

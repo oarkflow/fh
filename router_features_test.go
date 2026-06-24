@@ -41,10 +41,10 @@ func TestCompiledRoutePatternUsesRouterSemantics(t *testing.T) {
 
 func TestNamedRouteURLAndRedirectTo(t *testing.T) {
 	app := fh.New()
-	app.Get("/users/:id", func(c *fh.Ctx) error {
+	app.Get("/users/:id", func(c fh.Ctx) error {
 		return c.SendString(c.Param("id"))
 	}).Name("users.show")
-	app.Get("/go", func(c *fh.Ctx) error {
+	app.Get("/go", func(c fh.Ctx) error {
 		return c.RedirectTo("users.show", map[string]string{"id": "a/b", "tab": "activity"}, http.StatusSeeOther)
 	})
 
@@ -70,7 +70,7 @@ func TestNamedRouteURLAndRedirectTo(t *testing.T) {
 
 func TestRedirectBackRejectsCrossOriginReferer(t *testing.T) {
 	app := fh.New()
-	app.Get("/back", func(c *fh.Ctx) error { return c.RedirectBack("/safe") })
+	app.Get("/back", func(c fh.Ctx) error { return c.RedirectBack("/safe") })
 	addr := testServer(t, app)
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
@@ -99,11 +99,11 @@ func TestFlashPersistsForOneRequest(t *testing.T) {
 	)
 	app := fh.New()
 	app.Use(session.New(manager))
-	app.Get("/set", func(c *fh.Ctx) error {
+	app.Get("/set", func(c fh.Ctx) error {
 		c.Flash("notice", "saved")
 		return c.Redirect("/read")
 	})
-	app.Get("/read", func(c *fh.Ctx) error {
+	app.Get("/read", func(c fh.Ctx) error {
 		value, _ := c.Flash("notice").(string)
 		return c.SendString(value)
 	})
@@ -145,7 +145,7 @@ type typedGetRes struct {
 
 func TestGetTyped(t *testing.T) {
 	app := fh.New()
-	app.GetTyped("/users/:id", func(c *fh.Ctx, req typedGetReq) (typedGetRes, error) {
+	app.GetTyped("/users/:id", func(c fh.Ctx, req typedGetReq) (typedGetRes, error) {
 		return typedGetRes{ID: req.ID, Name: req.Name}, nil
 	})
 	addr := testServer(t, app)
@@ -165,7 +165,7 @@ type typedHeadRes struct {
 
 func TestHeadTyped(t *testing.T) {
 	app := fh.New()
-	app.HeadTyped("/items", func(c *fh.Ctx, req struct{}) (typedHeadRes, error) {
+	app.HeadTyped("/items", func(c fh.Ctx, req struct{}) (typedHeadRes, error) {
 		return typedHeadRes{Count: 10}, nil
 	})
 	addr := testServer(t, app)
@@ -185,7 +185,7 @@ type typedOptsRes struct {
 
 func TestOptionsTyped(t *testing.T) {
 	app := fh.New()
-	app.OptionsTyped("/resource", func(c *fh.Ctx, req struct{}) (typedOptsRes, error) {
+	app.OptionsTyped("/resource", func(c fh.Ctx, req struct{}) (typedOptsRes, error) {
 		return typedOptsRes{Methods: []string{"GET", "POST"}}, nil
 	})
 	addr := testServer(t, app)
@@ -205,7 +205,7 @@ type typedTraceRes struct {
 
 func TestTraceTyped(t *testing.T) {
 	app := fh.New()
-	app.TraceTyped("/debug", func(c *fh.Ctx, req struct{}) (typedTraceRes, error) {
+	app.TraceTyped("/debug", func(c fh.Ctx, req struct{}) (typedTraceRes, error) {
 		return typedTraceRes{Method: "TRACE"}, nil
 	})
 	addr := testServer(t, app)
@@ -225,7 +225,7 @@ type typedConnectRes struct {
 
 func TestConnectTyped(t *testing.T) {
 	app := fh.New()
-	app.ConnectTyped("/tunnel", func(c *fh.Ctx, req struct{}) (typedConnectRes, error) {
+	app.ConnectTyped("/tunnel", func(c fh.Ctx, req struct{}) (typedConnectRes, error) {
 		return typedConnectRes{Status: "connected"}, nil
 	})
 	addr := testServer(t, app)
@@ -249,7 +249,7 @@ type typedAllRes struct {
 
 func TestAllTyped(t *testing.T) {
 	app := fh.New()
-	app.AllTyped("/webhook", func(c *fh.Ctx, req typedAllReq) (typedAllRes, error) {
+	app.AllTyped("/webhook", func(c fh.Ctx, req typedAllReq) (typedAllRes, error) {
 		return typedAllRes{Method: c.Method(), Source: req.Source}, nil
 	})
 	addr := testServer(t, app)
@@ -284,10 +284,10 @@ type typedGroupRes struct {
 func TestGroupTyped(t *testing.T) {
 	app := fh.New()
 	grp := app.Group("/api")
-	grp.GetTyped("/users/:id", func(c *fh.Ctx, req typedGroupReq) (typedGroupRes, error) {
+	grp.GetTyped("/users/:id", func(c fh.Ctx, req typedGroupReq) (typedGroupRes, error) {
 		return typedGroupRes{ID: req.ID, Prefix: "api"}, nil
 	})
-	grp.PostTyped("/users", func(c *fh.Ctx, req struct {
+	grp.PostTyped("/users", func(c fh.Ctx, req struct {
 		Name string `json:"name"`
 	}) (typedGroupRes, error) {
 		return typedGroupRes{ID: "new", Prefix: "api"}, nil
@@ -328,7 +328,7 @@ type typedValidationRes struct {
 
 func TestTypedValidation(t *testing.T) {
 	app := fh.New()
-	app.PostTyped("/validate", func(c *fh.Ctx, req typedValidationReq) (typedValidationRes, error) {
+	app.PostTyped("/validate", func(c fh.Ctx, req typedValidationReq) (typedValidationRes, error) {
 		return typedValidationRes{OK: true}, nil
 	})
 	addr := testServer(t, app)
@@ -352,11 +352,11 @@ type typedMiddlewareRes struct {
 
 func TestTypedWithMiddleware(t *testing.T) {
 	app := fh.New()
-	mw := func(c *fh.Ctx) error {
+	mw := func(c fh.Ctx) error {
 		c.Locals("logged_by", "middleware")
 		return c.Next()
 	}
-	app.PostTyped("/with-mw", func(c *fh.Ctx, req typedMiddlewareReq) (typedMiddlewareRes, error) {
+	app.PostTyped("/with-mw", func(c fh.Ctx, req typedMiddlewareReq) (typedMiddlewareRes, error) {
 		return typedMiddlewareRes{Name: req.Name, LoggedBy: c.Locals("logged_by").(string)}, nil
 	}, mw)
 	addr := testServer(t, app)

@@ -34,15 +34,15 @@ type Config struct {
 
 	// Skip bypasses TCPGuard for framework-only endpoints such as local health,
 	// metrics, or a datasource callback. Returning true calls c.Next().
-	Skip func(*fh.Ctx) bool
+	Skip func(fh.Ctx) bool
 
 	// OnDecision is called after each successful evaluation. Use it for logs,
 	// metrics, traces, or SOC event fan-out that should live at adapter level.
-	OnDecision func(*fh.Ctx, guard.HTTPRequestResult)
+	OnDecision func(fh.Ctx, guard.HTTPRequestResult)
 
 	// OnError customizes evaluation/build errors. If nil, the error is returned
 	// to fh's normal error handling.
-	OnError func(*fh.Ctx, error) error
+	OnError func(fh.Ctx, error) error
 
 	// HeaderPrefix controls adapter response metadata header names. Empty uses
 	// X-TCPGuard.
@@ -74,7 +74,7 @@ func MiddlewareWithConfig(cfg Config) fh.HandlerFunc {
 		prefix = "X-TCPGuard"
 	}
 	responsePolicy := cfg.ResponsePolicy
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Skip != nil && cfg.Skip(c) {
 			return c.Next()
 		}
@@ -116,14 +116,14 @@ func MiddlewareWithConfig(cfg Config) fh.HandlerFunc {
 // use Middleware or MiddlewareWithConfig for consistency with other adapters.
 func New(g *guard.Guard) fh.HandlerFunc { return Middleware(g) }
 
-func handleError(cfg Config, c *fh.Ctx, err error) error {
+func handleError(cfg Config, c fh.Ctx, err error) error {
 	if cfg.OnError != nil {
 		return cfg.OnError(c, err)
 	}
 	return err
 }
 
-func setDecisionHeaders(c *fh.Ctx, prefix string, result guard.HTTPRequestResult, policy guard.ResponseMessagePolicy, mode HeaderMode) {
+func setDecisionHeaders(c fh.Ctx, prefix string, result guard.HTTPRequestResult, policy guard.ResponseMessagePolicy, mode HeaderMode) {
 	if mode == "" {
 		mode = HeaderModeStandard
 	}

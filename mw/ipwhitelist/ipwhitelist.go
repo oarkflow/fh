@@ -11,9 +11,9 @@ import (
 
 var ErrForbidden = errors.New("ipwhitelist: forbidden")
 
-type KeyFunc func(ctx *fh.Ctx) string
+type KeyFunc func(ctx fh.Ctx) string
 
-type ForbiddenHandler func(ctx *fh.Ctx) error
+type ForbiddenHandler func(ctx fh.Ctx) error
 
 type Store interface {
 	Allowed(ip net.IP) bool
@@ -46,7 +46,7 @@ func NewWithConfig(config Config) fh.HandlerFunc {
 		panic(err)
 	}
 
-	return func(ctx *fh.Ctx) error {
+	return func(ctx fh.Ctx) error {
 		rawIP := ""
 
 		if cfg.KeyFunc != nil {
@@ -95,12 +95,12 @@ func normalize(cfg Config) (Config, error) {
 	return cfg, nil
 }
 
-func DefaultForbiddenHandler(ctx *fh.Ctx) error {
+func DefaultForbiddenHandler(ctx fh.Ctx) error {
 	ctx.Set("Content-Type", "text/plain; charset=utf-8")
 	return ctx.Status(403).SendString("Forbidden")
 }
 
-func clientIP(ctx *fh.Ctx, trustProxy bool) string {
+func clientIP(ctx fh.Ctx, trustProxy bool) string {
 	if trustProxy {
 		if ip := firstForwardedIP(ctx.Get("X-Forwarded-For")); ip != "" {
 			return ip

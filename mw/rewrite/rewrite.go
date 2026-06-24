@@ -20,12 +20,12 @@ type Rule struct {
 	Host    string            // exact host or *.example.com; port is optional
 	Headers map[string]string // "*" means the header only needs to exist
 	Query   map[string]string // "*" means the query key only needs to exist
-	When    func(*fh.Ctx) bool
+	When    func(fh.Ctx) bool
 }
 
 type Config struct {
 	Rules         []Rule
-	Next          func(*fh.Ctx) bool
+	Next          func(fh.Ctx) bool
 	PreserveQuery bool
 }
 
@@ -44,7 +44,7 @@ func WithConfig(cfg Config) fh.HandlerFunc {
 	for i, rule := range cfg.Rules {
 		compiled[i] = compile(rule)
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(c) {
 			return c.Next()
 		}
@@ -55,7 +55,7 @@ func WithConfig(cfg Config) fh.HandlerFunc {
 			}
 			target := expandTarget(rule.rule.To, params)
 			if cfg.PreserveQuery && !strings.Contains(target, "?") {
-				if uri := string(c.Header.URI); len(uri) > len(c.Path()) {
+				if uri := string(c.RequestHeader().URI); len(uri) > len(c.Path()) {
 					target += uri[len(c.Path()):]
 				}
 			}
@@ -76,13 +76,13 @@ func compile(rule Rule) compiledRule {
 	return compiledRule{rule: rule, pattern: fh.CompileRoutePattern(rule.From), methods: methods}
 }
 
-func constraintsMatch(rule compiledRule, c *fh.Ctx) bool {
+func constraintsMatch(rule compiledRule, c fh.Ctx) bool {
 	if len(rule.methods) > 0 {
 		if _, ok := rule.methods[c.Method()]; !ok {
 			return false
 		}
 	}
-	if rule.rule.Host != "" && !matchHost(rule.rule.Host, string(c.Header.Host)) {
+	if rule.rule.Host != "" && !matchHost(rule.rule.Host, string(c.RequestHeader().Host)) {
 		return false
 	}
 	for key, want := range rule.rule.Headers {

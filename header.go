@@ -137,7 +137,7 @@ func (h *RequestHeader) Init() {
 	h.reset()
 }
 
-func (h *RequestHeader) SetCookie(c *Ctx, name, value string) {
+func (h *RequestHeader) SetCookie(c *DefaultCtx, name, value string) {
 	c.Header.headers[0] = Header{Key: []byte("Cookie"), Value: []byte(name + "=" + value)}
 	c.Header.hcount = 1
 }

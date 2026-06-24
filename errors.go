@@ -304,7 +304,7 @@ func (p Problem) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m)
 }
 
-func (c *Ctx) Problem(p Problem) error {
+func (c *DefaultCtx) Problem(p Problem) error {
 	if p.Status == 0 {
 		p.Status = StatusInternalServerError
 	}
@@ -394,7 +394,7 @@ func classifyError(err error, opts ErrorOptions) (*HTTPError, Problem, []byte) {
 	return he, Problem{Status: he.Status, Code: he.Code, Detail: detail}, nil
 }
 
-func (c *Ctx) ErrorReport(err error) ErrorReport {
+func (c *DefaultCtx) ErrorReport(err error) ErrorReport {
 	opts := ErrorOptions{}
 	if c.server != nil {
 		opts = c.server.cfg.ErrorOptions.normalize(c.server.cfg.Debug)
@@ -406,10 +406,10 @@ func (c *Ctx) ErrorReport(err error) ErrorReport {
 	return ErrorReport{Error: he, Problem: p, RequestID: errorRequestIDFromCtx(c), Timestamp: time.Now().UTC(), Path: c.Path(), Method: c.Method(), RemoteIP: c.IP(), Stack: stack, Cause: he.Error()}
 }
 
-func (c *Ctx) ErrorResponse(err error) error { return c.SafeErrorResponse(err) }
+func (c *DefaultCtx) ErrorResponse(err error) error { return c.SafeErrorResponse(err) }
 
 // SafeErrorResponse classifies and writes err. It never lets a secondary render failure escape to the client.
-func (c *Ctx) SafeErrorResponse(err error) error {
+func (c *DefaultCtx) SafeErrorResponse(err error) error {
 	if err == nil || c.responded {
 		return nil
 	}
@@ -437,7 +437,7 @@ func (c *Ctx) SafeErrorResponse(err error) error {
 	return nil
 }
 
-func decorateProblem(c *Ctx, p *Problem, he *HTTPError, raw error, opts ErrorOptions, stack []byte) {
+func decorateProblem(c *DefaultCtx, p *Problem, he *HTTPError, raw error, opts ErrorOptions, stack []byte) {
 	if p.Status == 0 {
 		p.Status = he.Status
 	}
@@ -478,7 +478,7 @@ func decorateProblem(c *Ctx, p *Problem, he *HTTPError, raw error, opts ErrorOpt
 	}
 }
 
-func (c *Ctx) fallbackErrorResponse(status int, code, title string) error {
+func (c *DefaultCtx) fallbackErrorResponse(status int, code, title string) error {
 	if status < 400 {
 		status = StatusInternalServerError
 	}
@@ -491,7 +491,7 @@ func (c *Ctx) fallbackErrorResponse(status int, code, title string) error {
 	return c.writeResponseString(body)
 }
 
-func errorRequestIDFromCtx(c *Ctx) string {
+func errorRequestIDFromCtx(c *DefaultCtx) string {
 	if c == nil {
 		return ""
 	}

@@ -13,8 +13,8 @@ import (
 func TestRouterStaticPrecedenceAndFallback(t *testing.T) {
 	r := newRouter()
 	called := ""
-	static := func(*Ctx) error { called = "static"; return nil }
-	param := func(*Ctx) error { called = "param"; return nil }
+	static := func(Ctx) error { called = "static"; return nil }
+	param := func(Ctx) error { called = "param"; return nil }
 	r.Add("GET", "/files/:name/edit", param)
 	r.Add("GET", "/files/new", static)
 
@@ -37,8 +37,8 @@ func TestRouterStaticPrecedenceAndFallback(t *testing.T) {
 
 func TestRouterKeepsEndpointParameterNames(t *testing.T) {
 	r := newRouter()
-	r.Add("GET", "/items/:first/one", func(*Ctx) error { return nil })
-	r.Add("GET", "/items/:second/two", func(*Ctx) error { return nil })
+	r.Add("GET", "/items/:first/one", func(Ctx) error { return nil })
+	r.Add("GET", "/items/:second/two", func(Ctx) error { return nil })
 	for path, key := range map[string]string{"/items/a/one": "first", "/items/b/two": "second"} {
 		var params []Param
 		if r.Find("GET", path, &params) == nil {

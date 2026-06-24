@@ -78,7 +78,7 @@ func New(config ...Config) fh.HandlerFunc {
 		static = append(static, [2]string{"Strict-Transport-Security", hsts})
 	}
 
-	return func(ctx *fh.Ctx) error {
+	return func(ctx fh.Ctx) error {
 		for _, h := range static {
 			ctx.Set(h[0], h[1])
 		}

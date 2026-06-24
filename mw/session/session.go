@@ -258,13 +258,13 @@ func (m *SessionManager) Store() SessionStore { return m.store }
 // Begin serializes a request against other requests carrying the same session
 // token and returns a one-shot completion hook that persists and unlocks it.
 // Middleware should register complete with Ctx.OnBeforeResponse.
-func (m *SessionManager) Begin(ctx *fh.Ctx) (*Session, func(*fh.Ctx) error, error) {
+func (m *SessionManager) Begin(ctx fh.Ctx) (*Session, func(fh.Ctx) error, error) {
 	raw := ctx.GetCookie(m.cookieName)
 	if raw == "" {
 		session := m.NewSession()
 		var once sync.Once
 		var completeErr error
-		return session, func(responseCtx *fh.Ctx) error {
+		return session, func(responseCtx fh.Ctx) error {
 			once.Do(func() { completeErr = m.Save(responseCtx, session) })
 			return completeErr
 		}, nil
@@ -283,7 +283,7 @@ func (m *SessionManager) Begin(ctx *fh.Ctx) (*Session, func(*fh.Ctx) error, erro
 	}
 	var once sync.Once
 	var completeErr error
-	complete := func(responseCtx *fh.Ctx) error {
+	complete := func(responseCtx fh.Ctx) error {
 		once.Do(func() { completeErr = m.Save(responseCtx, session); lock.Unlock() })
 		return completeErr
 	}
@@ -303,7 +303,7 @@ func (m *SessionManager) NewSession() *Session {
 
 // Get retrieves the session from the request cookie. Returns a new session
 // when the cookie is missing, invalid, or the stored session has expired.
-func (m *SessionManager) Get(ctx *fh.Ctx) *Session {
+func (m *SessionManager) Get(ctx fh.Ctx) *Session {
 	session, err := m.Load(ctx)
 	if err != nil {
 		return m.NewSession()
@@ -313,7 +313,7 @@ func (m *SessionManager) Get(ctx *fh.Ctx) *Session {
 
 // Load retrieves a session while preserving backend errors for production
 // middleware and callers that must fail closed.
-func (m *SessionManager) Load(ctx *fh.Ctx) (*Session, error) {
+func (m *SessionManager) Load(ctx fh.Ctx) (*Session, error) {
 	raw := ctx.GetCookie(m.cookieName)
 	if raw == "" {
 		return m.NewSession(), nil
@@ -339,7 +339,7 @@ func (m *SessionManager) Load(ctx *fh.Ctx) (*Session, error) {
 }
 
 // Save persists the session to the store and sets the session cookie on the response.
-func (m *SessionManager) Save(ctx *fh.Ctx, session *Session) error {
+func (m *SessionManager) Save(ctx fh.Ctx, session *Session) error {
 	if session == nil {
 		return ErrInvalidSession
 	}
@@ -375,7 +375,7 @@ func (m *SessionManager) Save(ctx *fh.Ctx, session *Session) error {
 }
 
 // Destroy removes the session from the store and clears the session cookie.
-func (m *SessionManager) Destroy(ctx *fh.Ctx, session *Session) error {
+func (m *SessionManager) Destroy(ctx fh.Ctx, session *Session) error {
 	if session == nil {
 		return ErrInvalidSession
 	}
@@ -407,7 +407,7 @@ func (m *SessionManager) Destroy(ctx *fh.Ctx, session *Session) error {
 
 // Regenerate creates a new session ID while preserving the session data.
 // Call after login to prevent session fixation.
-func (m *SessionManager) Regenerate(ctx *fh.Ctx, session *Session) error {
+func (m *SessionManager) Regenerate(ctx fh.Ctx, session *Session) error {
 	if session == nil {
 		return ErrInvalidSession
 	}

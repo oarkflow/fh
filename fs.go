@@ -92,7 +92,7 @@ func (a *App) addStatic(prefix string, filesystem fs.FS, cfg StaticConfig) {
 		if cfg.StripSlash {
 			a.Get(cleanPrefix, fsc.serve)
 		} else {
-			a.Get(cleanPrefix, func(c *Ctx) error {
+			a.Get(cleanPrefix, func(c Ctx) error {
 				if strings.HasSuffix(c.Path(), "/") {
 					return fsc.serve(c)
 				}
@@ -142,7 +142,7 @@ func (g *Group) addStatic(prefix string, filesystem fs.FS, cfg StaticConfig) {
 		if cfg.StripSlash {
 			g.Get(cleanPrefix, fsc.serve)
 		} else {
-			g.Get(cleanPrefix, func(c *Ctx) error {
+			g.Get(cleanPrefix, func(c Ctx) error {
 				if strings.HasSuffix(c.Path(), "/") {
 					return fsc.serve(c)
 				}
@@ -172,7 +172,7 @@ var fsGzipPool = sync.Pool{
 
 const httpTimeFormat = "Mon, 02 Jan 2006 15:04:05 GMT"
 
-func (s *staticFS) serve(c *Ctx) error {
+func (s *staticFS) serve(c Ctx) error {
 	upath := c.Param("*")
 	if upath == "" {
 		return s.servePath(c, ".")
@@ -184,7 +184,7 @@ func (s *staticFS) serve(c *Ctx) error {
 	return s.servePath(c, upath[1:])
 }
 
-func (s *staticFS) servePath(c *Ctx, upath string) error {
+func (s *staticFS) servePath(c Ctx, upath string) error {
 	info, err := fs.Stat(s.fs, upath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -199,7 +199,7 @@ func (s *staticFS) servePath(c *Ctx, upath string) error {
 	return s.writeFile(c, upath, info)
 }
 
-func (s *staticFS) serveDir(c *Ctx, upath string) error {
+func (s *staticFS) serveDir(c Ctx, upath string) error {
 	if !s.cfg.StripSlash && !strings.HasSuffix(c.Path(), "/") {
 		return c.Redirect(c.Path()+"/", 301)
 	}
@@ -217,7 +217,7 @@ func (s *staticFS) serveDir(c *Ctx, upath string) error {
 	return c.Status(403).SendString("Forbidden")
 }
 
-func (s *staticFS) writeFile(c *Ctx, upath string, info fs.FileInfo) error {
+func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
 	fi := s.fileInfo(upath, info)
 
 	if match := c.Get("If-Match"); match != "" && !etagListMatches(match, fi.etag, false) {
@@ -370,7 +370,7 @@ func isCompressible(mimeType string) bool {
 
 // ── Directory listing ───────────────────────────────────────────────────────
 
-func (s *staticFS) listDir(c *Ctx, upath string) error {
+func (s *staticFS) listDir(c Ctx, upath string) error {
 	entries, err := fs.ReadDir(s.fs, upath)
 	if err != nil {
 		return c.Status(500).SendString("Internal Server Error")

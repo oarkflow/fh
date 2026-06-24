@@ -42,8 +42,8 @@ func request(t *testing.T, addr, method, path, body string, headers map[string]s
 func TestBodyLimitGlobalAndEndpoint(t *testing.T) {
 	app := fh.New()
 	app.Use(bodylimit.New(8))
-	app.Post("/global", func(c *fh.Ctx) error { return c.SendString("ok") })
-	app.Post("/small", bodylimit.New(3), func(c *fh.Ctx) error { return c.SendString("ok") })
+	app.Post("/global", func(c fh.Ctx) error { return c.SendString("ok") })
+	app.Post("/small", bodylimit.New(3), func(c fh.Ctx) error { return c.SendString("ok") })
 	addr := testServer(t, app)
 	code, _, _ := request(t, addr, "POST", "/global", "123456789", nil)
 	if code != fh.StatusPayloadTooLarge {
@@ -59,7 +59,7 @@ func TestBodyLimitGlobalAndEndpoint(t *testing.T) {
 	}
 
 	boundary := fh.New()
-	boundary.Post("/json", bodylimit.New(100), func(c *fh.Ctx) error { return c.SendString("ok") })
+	boundary.Post("/json", bodylimit.New(100), func(c fh.Ctx) error { return c.SendString("ok") })
 	boundaryAddr := testServer(t, boundary)
 	code, _, _ = request(t, boundaryAddr, "POST", "/json", strings.Repeat("a", 100), map[string]string{"Content-Type": "application/json"})
 	if code != fh.StatusOK {
@@ -79,8 +79,8 @@ func TestRewriteAndLoopProtection(t *testing.T) {
 		rewrite.Rule{From: "/old/:name", To: "/new/{name}", Headers: map[string]string{"X-Rewrite": "yes"}},
 		rewrite.Rule{From: "/docs/*path", To: "/tree/*path"},
 	))
-	app.Get("/new/:name", func(c *fh.Ctx) error { return c.SendString(c.Param("name") + "?" + c.Query("v")) })
-	app.Get("/tree/*", func(c *fh.Ctx) error { return c.SendString(c.Param("*")) })
+	app.Get("/new/:name", func(c fh.Ctx) error { return c.SendString(c.Param("name") + "?" + c.Query("v")) })
+	app.Get("/tree/*", func(c fh.Ctx) error { return c.SendString(c.Param("*")) })
 	addr := testServer(t, app)
 	code, body, _ := request(t, addr, "GET", "/old/alice?v=2", "", map[string]string{"X-Rewrite": "yes"})
 	if code != 200 || body != "alice?2" {
@@ -101,7 +101,7 @@ func TestRewriteAndLoopProtection(t *testing.T) {
 
 	loop := fh.New()
 	loop.Use(rewrite.New(rewrite.Rule{From: "/a", To: "/b"}, rewrite.Rule{From: "/b", To: "/a"}))
-	loop.Get("/a", func(c *fh.Ctx) error { return c.SendString("unreachable") })
+	loop.Get("/a", func(c fh.Ctx) error { return c.SendString("unreachable") })
 	loopAddr := testServer(t, loop)
 	code, body, _ = request(t, loopAddr, "GET", "/a", "", nil)
 	if code != fh.StatusLoopDetected || !strings.Contains(body, "REWRITE_LOOP") {
@@ -112,8 +112,8 @@ func TestRewriteAndLoopProtection(t *testing.T) {
 func TestSkipMiddleware(t *testing.T) {
 	app := fh.New()
 	app.Use(skip.New(bodylimit.New(2), skip.Paths("/health")))
-	app.Post("/health", func(c *fh.Ctx) error { return c.SendString("healthy") })
-	app.Post("/data", func(c *fh.Ctx) error { return c.SendString("ok") })
+	app.Post("/health", func(c fh.Ctx) error { return c.SendString("healthy") })
+	app.Post("/data", func(c fh.Ctx) error { return c.SendString("ok") })
 	addr := testServer(t, app)
 	code, _, _ := request(t, addr, "POST", "/health", "large", nil)
 	if code != 200 {
@@ -128,8 +128,8 @@ func TestSkipMiddleware(t *testing.T) {
 func TestCSRFMiddleware(t *testing.T) {
 	app := fh.New()
 	app.Use(csrf.New())
-	app.Get("/token", func(c *fh.Ctx) error { return c.SendString(c.Locals("csrf_token").(string)) })
-	app.Post("/change", func(c *fh.Ctx) error { return c.SendString("changed") })
+	app.Get("/token", func(c fh.Ctx) error { return c.SendString(c.Locals("csrf_token").(string)) })
+	app.Post("/change", func(c fh.Ctx) error { return c.SendString("changed") })
 	addr := testServer(t, app)
 	code, token, headers := request(t, addr, "GET", "/token", "", nil)
 	if code != 200 || token == "" {
@@ -150,7 +150,7 @@ func TestCacheMiddleware(t *testing.T) {
 	var calls atomic.Int32
 	app := fh.New()
 	app.Use(cachemw.New(cachemw.Config{TTL: time.Minute}))
-	app.Get("/value", func(c *fh.Ctx) error { return c.SendString("call-" + string(rune('0'+calls.Add(1)))) })
+	app.Get("/value", func(c fh.Ctx) error { return c.SendString("call-" + string(rune('0'+calls.Add(1)))) })
 	addr := testServer(t, app)
 	_, first, h1 := request(t, addr, "GET", "/value", "", nil)
 	_, second, h2 := request(t, addr, "GET", "/value", "", nil)
@@ -163,7 +163,7 @@ func TestEarlyDataAndPreflight(t *testing.T) {
 	app := fh.New()
 	app.Use(earlydata.New())
 	app.Use(cors.New(cors.Config{AllowOrigins: []string{"https://app.example"}, AllowMethods: []string{"GET", "POST"}, AllowHeaders: []string{"Content-Type", "X-CSRF-Token"}}))
-	app.Post("/change", func(c *fh.Ctx) error { return c.SendString("ok") })
+	app.Post("/change", func(c fh.Ctx) error { return c.SendString("ok") })
 	addr := testServer(t, app)
 	code, _, _ := request(t, addr, "POST", "/change", "", map[string]string{"Early-Data": "1"})
 	if code != fh.StatusTooEarly {

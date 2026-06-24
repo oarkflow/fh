@@ -10,7 +10,7 @@ type Config struct {
 
 func New(cfg Config) fh.HandlerFunc {
 	sec := fh.RouteSecurity(cfg.Security)
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Data.Sensitivity != "" {
 			c.Locals("fh.data_policy", cfg.Data)
 		}

@@ -33,7 +33,7 @@ func TestRenderWithEngine(t *testing.T) {
 	app := fh.NewWithConfig(fh.Config{
 		TemplateEngine: &mockEngine{},
 	})
-	app.Get("/", func(c *fh.Ctx) error {
+	app.Get("/", func(c fh.Ctx) error {
 		return c.Render("hello", nil)
 	})
 	addr := testServer(t, app)
@@ -59,7 +59,7 @@ func TestRenderWithData(t *testing.T) {
 			},
 		},
 	})
-	app.Get("/", func(c *fh.Ctx) error {
+	app.Get("/", func(c fh.Ctx) error {
 		return c.Render("hello", map[string]any{"name": "world"})
 	})
 	addr := testServer(t, app)
@@ -86,7 +86,7 @@ func TestRenderWithLayout(t *testing.T) {
 			},
 		},
 	})
-	app.Get("/", func(c *fh.Ctx) error {
+	app.Get("/", func(c fh.Ctx) error {
 		return c.Render("page", nil, "main")
 	})
 	addr := testServer(t, app)
@@ -104,7 +104,7 @@ func TestRenderHTMLEscape(t *testing.T) {
 	app := fh.NewWithConfig(fh.Config{
 		TemplateEngine: &mockEngine{},
 	})
-	app.Get("/", func(c *fh.Ctx) error {
+	app.Get("/", func(c fh.Ctx) error {
 		return c.Render("test", nil)
 	})
 	addr := testServer(t, app)
@@ -120,7 +120,7 @@ func TestRenderHTMLEscape(t *testing.T) {
 
 func TestRenderNoEngineError(t *testing.T) {
 	app := fh.New()
-	app.Get("/", func(c *fh.Ctx) error {
+	app.Get("/", func(c fh.Ctx) error {
 		return c.Render("hello", nil)
 	})
 	addr := testServer(t, app)
@@ -138,7 +138,7 @@ func TestRenderContentType(t *testing.T) {
 	app := fh.NewWithConfig(fh.Config{
 		TemplateEngine: &mockEngine{},
 	})
-	app.Get("/", func(c *fh.Ctx) error {
+	app.Get("/", func(c fh.Ctx) error {
 		return c.Render("page", nil)
 	})
 	addr := testServer(t, app)

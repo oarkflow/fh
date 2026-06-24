@@ -12,8 +12,8 @@ type Config struct {
 	FailureThreshold int
 	SuccessThreshold int
 	ResetAfter       time.Duration
-	IsFailure        func(*fh.Ctx, error) bool
-	OnOpen           func(*fh.Ctx) error
+	IsFailure        func(fh.Ctx, error) bool
+	OnOpen           func(fh.Ctx) error
 }
 
 type Breaker struct {
@@ -40,7 +40,7 @@ func New(cfg Config) *Breaker {
 func Middleware(cfg Config) fh.HandlerFunc { return New(cfg).Handler() }
 
 func (b *Breaker) Handler() fh.HandlerFunc {
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		b.mu.Lock()
 		if b.state == "open" {
 			if time.Since(b.opened) < b.cfg.ResetAfter {

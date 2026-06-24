@@ -213,7 +213,7 @@ func ParseCookie(header string) map[string]string {
 }
 
 // SetCookie adds a Set-Cookie header to the response.
-func (c *Ctx) SetCookie(cookie *Cookie) {
+func (c *DefaultCtx) SetCookie(cookie *Cookie) {
 	if cookie == nil || cookie.Valid() != nil {
 		return
 	}
@@ -221,7 +221,7 @@ func (c *Ctx) SetCookie(cookie *Cookie) {
 }
 
 // GetCookie returns the value of a named cookie from the request.
-func (c *Ctx) GetCookie(name string) string {
+func (c *DefaultCtx) GetCookie(name string) string {
 	if !validToken([]byte(name)) {
 		return ""
 	}
@@ -263,7 +263,7 @@ func findCookie(header, want string) (string, bool) {
 }
 
 // DelCookie deletes a cookie by name (sets MaxAge=-1 with an expired date).
-func (c *Ctx) DelCookie(name string) {
+func (c *DefaultCtx) DelCookie(name string) {
 	c.SetCookie(&Cookie{
 		Name:     name,
 		Value:    "",

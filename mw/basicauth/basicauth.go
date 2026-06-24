@@ -73,10 +73,10 @@ type PasswordHasher interface {
 }
 
 // UnauthorizedHandler allows custom unauthorized responses.
-type UnauthorizedHandler func(ctx *fh.Ctx, realm string) error
+type UnauthorizedHandler func(ctx fh.Ctx, realm string) error
 
 // AuthenticatedHandler runs after successful authentication and before ctx.Next().
-type AuthenticatedHandler func(ctx *fh.Ctx, principal Principal) error
+type AuthenticatedHandler func(ctx fh.Ctx, principal Principal) error
 
 // Config controls the middleware behavior.
 type Config struct {
@@ -131,7 +131,7 @@ func New(username, password string) fh.HandlerFunc {
 func NewWithConfig(config Config) fh.HandlerFunc {
 	cfg := normalizeConfig(config)
 
-	return func(ctx *fh.Ctx) error {
+	return func(ctx fh.Ctx) error {
 		if cfg.RequireTLS && !isHTTPS(ctx, cfg.TrustProxyHeaders) {
 			return cfg.UnauthorizedHandler(ctx, cfg.Realm)
 		}
@@ -208,7 +208,7 @@ func normalizeConfig(cfg Config) Config {
 	return cfg
 }
 
-func DefaultUnauthorizedHandler(ctx *fh.Ctx, realm string) error {
+func DefaultUnauthorizedHandler(ctx fh.Ctx, realm string) error {
 	ctx.Set("WWW-Authenticate", `Basic realm="`+escapeRealm(realm)+`", charset="UTF-8"`)
 	return ctx.Status(401).SendString("Unauthorized")
 }
@@ -280,7 +280,7 @@ func equalFoldASCII(a, b string) bool {
 	return true
 }
 
-func isHTTPS(ctx *fh.Ctx, trustProxy bool) bool {
+func isHTTPS(ctx fh.Ctx, trustProxy bool) bool {
 	// This keeps compatibility with custom fasthttp-like contexts.
 	// If your Ctx exposes TLS state directly, you can customize this logic.
 

@@ -26,7 +26,7 @@ type StructuredError struct {
 // PostTyped registers a typed JSON endpoint. Go does not support generic methods,
 // so the handler is supplied as a typed function with this shape:
 //
-//	func(*fh.Ctx, CreateUserRequest) (UserResponse, error)
+//	func(fh.Ctx, CreateUserRequest) (UserResponse, error)
 //
 // fh validates that shape at registration time and builds the parsing/encoding wrapper.
 func (a *App) GetTyped(path string, handler any, middleware ...HandlerFunc) *App {
@@ -66,13 +66,13 @@ func (a *App) AllTyped(path string, handler any, middleware ...HandlerFunc) *App
 func (a *App) addTyped(method, path string, handler any, middleware ...HandlerFunc) *App {
 	hv := reflect.ValueOf(handler)
 	ht := hv.Type()
-	ctxType := reflect.TypeFor[*Ctx]()
+	ctxType := reflect.TypeFor[Ctx]()
 	errType := reflect.TypeFor[error]()
 	if ht.Kind() != reflect.Func || ht.NumIn() != 2 || ht.In(0) != ctxType || ht.NumOut() != 2 || !ht.Out(1).Implements(errType) {
-		panic("fh: typed handler must be func(*fh.Ctx, Req) (Res, error)")
+		panic("fh: typed handler must be func(fh.Ctx, Req) (Res, error)")
 	}
 	reqType, resType := ht.In(1), ht.Out(0)
-	h := func(c *Ctx) error {
+	h := func(c Ctx) error {
 		reqPtr := reflect.New(reqType)
 		if len(c.Body()) != 0 {
 			if err := c.BodyParser(reqPtr.Interface()); err != nil {
@@ -113,7 +113,7 @@ func (a *App) addTyped(method, path string, handler any, middleware ...HandlerFu
 	return a
 }
 
-func bindTaggedFields(c *Ctx, v reflect.Value) error {
+func bindTaggedFields(c Ctx, v reflect.Value) error {
 	for v.Kind() == reflect.Pointer {
 		if v.IsNil() {
 			v.Set(reflect.New(v.Type().Elem()))
@@ -221,10 +221,10 @@ func niceTypeName(t reflect.Type) string {
 	}
 	return t.Name()
 }
-func typedValidationError(c *Ctx, err error) error {
+func typedValidationError(c Ctx, err error) error {
 	return c.Status(StatusUnprocessableEntity).JSON(StructuredError{Error: "validation_failed", Message: err.Error(), RequestID: requestIDFromCtx(c)})
 }
-func requestIDFromCtx(c *Ctx) string {
+func requestIDFromCtx(c Ctx) string {
 	if v := c.Get(HeaderRequestID); v != "" {
 		return v
 	}
@@ -361,14 +361,14 @@ func (a *App) EnableOpenAPI(path string, cfg OpenAPIConfig) *App {
 		path = "/openapi.json"
 	}
 	a.openapi = cfg
-	a.Get(path, func(c *Ctx) error { return c.JSON(a.OpenAPI()) })
+	a.Get(path, func(c Ctx) error { return c.JSON(a.OpenAPI()) })
 	return a
 }
 func (a *App) EnableDocs(path string) *App {
 	if path == "" {
 		path = "/docs"
 	}
-	a.Get(path, func(c *Ctx) error { c.Type("text/html; charset=utf-8"); return c.SendString(docsHTML) })
+	a.Get(path, func(c Ctx) error { c.Type("text/html; charset=utf-8"); return c.SendString(docsHTML) })
 	return a
 }
 func (a *App) OpenAPI() map[string]any {
@@ -426,7 +426,7 @@ func (a *App) EnableRouteList(path string) *App {
 	if path == "" {
 		path = "/_fh/routes"
 	}
-	a.Get(path, func(c *Ctx) error { return c.JSON(a.Routes()) })
+	a.Get(path, func(c Ctx) error { return c.JSON(a.Routes()) })
 	return a
 }
 
@@ -480,8 +480,12 @@ const (
 	PriorityHigh   = 10
 )
 
-func AtomicJob(c *Ctx, opt AtomicJobOptions) (*AtomicJobResult, error) {
-	if c == nil || c.server == nil || c.server.reliability == nil || c.server.reliability.queue == nil {
+func AtomicJob(c Ctx, opt AtomicJobOptions) (*AtomicJobResult, error) {
+	if c == nil {
+		return nil, errors.New("fh: reliability queue is not enabled")
+	}
+	app := c.App()
+	if app == nil || app.reliability == nil || app.reliability.queue == nil {
 		return nil, errors.New("fh: reliability queue is not enabled")
 	}
 	spec := QueueJob{Type: opt.Type, Payload: opt.Body, Priority: opt.Priority, RunAt: opt.RunAt, VisibleAt: opt.RunAt, ConcurrencyKey: opt.ConcurrencyKey, MaxAttempts: opt.MaxAttempts, Headers: opt.Headers}
@@ -489,7 +493,7 @@ func AtomicJob(c *Ctx, opt AtomicJobOptions) (*AtomicJobResult, error) {
 		spec.VisibleAt = time.Now().UTC().Add(opt.Delay)
 		spec.RunAt = spec.VisibleAt
 	}
-	id, err := c.server.reliability.queue.EnqueueJob(spec, opt.Body, opt.Headers)
+	id, err := app.reliability.queue.EnqueueJob(spec, opt.Body, opt.Headers)
 	if err != nil {
 		return nil, err
 	}

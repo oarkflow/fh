@@ -27,7 +27,7 @@ func pipeRequest(t *testing.T, app *App, request string) string {
 func TestMultipartFormFileAndAtomicSave(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "saved.txt")
 	app := New()
-	app.Post("/upload", func(c *Ctx) error {
+	app.Post("/upload", func(c Ctx) error {
 		file, err := c.FormFile("document")
 		if err != nil {
 			return err
@@ -61,7 +61,7 @@ func TestDownloadAndRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := New()
-	app.Get("/download", func(c *Ctx) error { return c.Download(file, "report 2026.txt") })
+	app.Get("/download", func(c Ctx) error { return c.Download(file, "report 2026.txt") })
 	resp := pipeRequest(t, app, "GET /download HTTP/1.1\r\nHost: local\r\nRange: bytes=2-5\r\nConnection: close\r\n\r\n")
 	for _, want := range []string{"206 Partial Content", "Content-Disposition: attachment; filename=\"report 2026.txt\"", "Content-Range: bytes 2-5/10", "\r\n\r\n2345"} {
 		if !strings.Contains(resp, want) {
@@ -72,7 +72,7 @@ func TestDownloadAndRange(t *testing.T) {
 
 func TestTypedAndValidationProblemResponses(t *testing.T) {
 	app := New()
-	app.Get("/typed", func(*Ctx) error {
+	app.Get("/typed", func(Ctx) error {
 		e := Conflict("Version already exists")
 		e.Headers = map[string]string{"Retry-After": "2"}
 		return e
@@ -85,7 +85,7 @@ func TestTypedAndValidationProblemResponses(t *testing.T) {
 		t.Fatalf("conflict metric = %d", app.ErrorCount("CONFLICT"))
 	}
 	validationApp := New()
-	validationApp.Get("/validation", func(*Ctx) error {
+	validationApp.Get("/validation", func(Ctx) error {
 		return &ValidationError{Fields: []FieldError{{Field: "email", Code: "FORMAT", Message: "must be an email"}}}
 	})
 	resp = pipeRequest(t, validationApp, "GET /validation HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
@@ -98,7 +98,7 @@ func TestInternalErrorsMaskedUnlessDebug(t *testing.T) {
 	secret := "database password is secret"
 	for _, tc := range []struct{ debug, exposed bool }{{false, false}, {true, true}} {
 		app := NewWithConfig(Config{Debug: tc.debug})
-		app.Get("/", func(*Ctx) error { return errors.New(secret) })
+		app.Get("/", func(Ctx) error { return errors.New(secret) })
 		resp := pipeRequest(t, app, "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
 		if bytes.Contains([]byte(resp), []byte(secret)) != tc.exposed {
 			t.Fatalf("debug=%v response=%s", tc.debug, resp)

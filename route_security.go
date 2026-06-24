@@ -20,7 +20,7 @@ type RouteSecurityConfig struct {
 // RouteSecurity attaches route-local security metadata and enforces common
 // principal/scope/role checks. Register it as route middleware.
 func RouteSecurity(cfg RouteSecurityConfig) HandlerFunc {
-	return func(c *Ctx) error {
+	return func(c Ctx) error {
 		c.Locals("fh.route_security", cfg)
 		if cfg.AuthRequired {
 			if _, ok := PrincipalFrom(c); !ok {
@@ -45,7 +45,7 @@ func RouteSecurity(cfg RouteSecurityConfig) HandlerFunc {
 }
 
 func DataClass(sensitivity string, categories ...string) HandlerFunc {
-	return func(c *Ctx) error {
+	return func(c Ctx) error {
 		p := DataPolicy{Sensitivity: sensitivity, RedactLogs: true}
 		c.Locals("fh.data_policy", p)
 		return c.Next()

@@ -30,7 +30,7 @@ type Config struct {
 
 	Encoder Encoder
 
-	Next func(ctx *fh.Ctx) bool
+	Next func(ctx fh.Ctx) bool
 }
 
 var DefaultConfig = Config{
@@ -59,7 +59,7 @@ func New(config ...Config) fh.HandlerFunc {
 
 	encoding := cfg.Encoder.Encoding()
 
-	return func(ctx *fh.Ctx) error {
+	return func(ctx fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(ctx) {
 			return ctx.Next()
 		}

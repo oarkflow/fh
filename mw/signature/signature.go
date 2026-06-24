@@ -11,7 +11,7 @@ import (
 	"github.com/oarkflow/fh"
 )
 
-type SecretResolver func(ctx *fh.Ctx, keyID string) [][]byte
+type SecretResolver func(ctx fh.Ctx, keyID string) [][]byte
 
 type Config struct {
 	Secrets         [][]byte
@@ -22,8 +22,8 @@ type Config struct {
 	KeyIDHeader     string
 	Scheme          string
 	Tolerance       time.Duration
-	SignedPayload   func(*fh.Ctx, string) []byte
-	Next            func(*fh.Ctx) bool
+	SignedPayload   func(fh.Ctx, string) []byte
+	Next            func(fh.Ctx) bool
 }
 
 func New(config Config) fh.HandlerFunc {
@@ -39,7 +39,7 @@ func New(config Config) fh.HandlerFunc {
 	if config.Tolerance <= 0 {
 		config.Tolerance = 5 * time.Minute
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if config.Next != nil && config.Next(c) {
 			return c.Next()
 		}

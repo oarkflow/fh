@@ -9,7 +9,7 @@ import (
 // StreamWriter writes an HTTP response incrementally. HTTP/1.1 uses chunked
 // transfer encoding; HTTP/1.0 falls back to a close-delimited body.
 type StreamWriter struct {
-	ctx      *Ctx
+	ctx      *DefaultCtx
 	chunked  bool
 	discard  bool
 	closed   bool
@@ -19,7 +19,7 @@ type StreamWriter struct {
 
 // Stream starts a streaming response and invokes fn synchronously. The final
 // chunk is always written, including when fn returns an error.
-func (c *Ctx) Stream(fn func(*StreamWriter) error) error {
+func (c *DefaultCtx) Stream(fn func(*StreamWriter) error) error {
 	if c.responded {
 		return nil
 	}
@@ -44,7 +44,7 @@ func (c *Ctx) Stream(fn func(*StreamWriter) error) error {
 }
 
 // SendStream copies r to a streamed response using a fixed scratch buffer.
-func (c *Ctx) SendStream(r io.Reader) error {
+func (c *DefaultCtx) SendStream(r io.Reader) error {
 	return c.Stream(func(w *StreamWriter) error {
 		var scratch [32 << 10]byte
 		_, err := io.CopyBuffer(w, r, scratch[:])
@@ -52,7 +52,7 @@ func (c *Ctx) SendStream(r io.Reader) error {
 	})
 }
 
-func (c *Ctx) beginStream() (*StreamWriter, error) {
+func (c *DefaultCtx) beginStream() (*StreamWriter, error) {
 	if err := c.runBeforeResponse(); err != nil {
 		return nil, err
 	}

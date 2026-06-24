@@ -72,7 +72,7 @@ type Config struct {
 	// - Set AllowAllOrigins=true only for trusted/internal/dev use.
 	AllowAllOrigins bool
 	AllowedOrigins  []string
-	CheckOrigin     func(*fh.Ctx) bool
+	CheckOrigin     func(fh.Ctx) bool
 
 	Subprotocols []string
 
@@ -182,7 +182,7 @@ func New(handler func(*Conn) error) fh.HandlerFunc {
 func NewWithConfig(cfg Config, handler func(*Conn) error) fh.HandlerFunc {
 	cfg = normalizeConfig(cfg)
 
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if handler == nil {
 			return ErrWebSocketHandshake
 		}
@@ -195,7 +195,7 @@ func NewWithConfig(cfg Config, handler func(*Conn) error) fh.HandlerFunc {
 			return ErrWebSocketHandshake
 		}
 
-		key := fh.TrimOWS(c.Header.Peek([]byte("Sec-WebSocket-Key")))
+		key := fh.TrimOWS(c.RequestHeader().Peek([]byte("Sec-WebSocket-Key")))
 
 		decoded, err := base64.StdEncoding.DecodeString(string(key))
 		if err != nil || len(decoded) != 16 {
@@ -203,7 +203,7 @@ func NewWithConfig(cfg Config, handler func(*Conn) error) fh.HandlerFunc {
 		}
 
 		selectedProtocol := selectSubprotocol(
-			string(c.Header.Peek([]byte("Sec-WebSocket-Protocol"))),
+			string(c.RequestHeader().Peek([]byte("Sec-WebSocket-Protocol"))),
 			cfg.Subprotocols,
 		)
 
@@ -250,22 +250,22 @@ func NewWithConfig(cfg Config, handler func(*Conn) error) fh.HandlerFunc {
 	}
 }
 
-func isValidWebSocketRequest(c *fh.Ctx) bool {
-	return fh.BytesEqualFold(c.Header.Method, fh.MethodGETBytes) &&
-		c.Header.ContentLength == 0 &&
-		!c.Header.Chunked &&
-		fh.StrEqFold(fh.TrimOWS(c.Header.Peek([]byte("Upgrade"))), "websocket") &&
-		fh.HasHeaderToken(c.Header.Peek(fh.HeaderConnectionBytes), "upgrade") &&
-		fh.StrEqFold(fh.TrimOWS(c.Header.Peek([]byte("Sec-WebSocket-Version"))), "13") &&
-		len(fh.TrimOWS(c.Header.Peek([]byte("Sec-WebSocket-Key")))) > 0
+func isValidWebSocketRequest(c fh.Ctx) bool {
+	return fh.BytesEqualFold(c.RequestHeader().Method, fh.MethodGETBytes) &&
+		c.RequestHeader().ContentLength == 0 &&
+		!c.RequestHeader().Chunked &&
+		fh.StrEqFold(fh.TrimOWS(c.RequestHeader().Peek([]byte("Upgrade"))), "websocket") &&
+		fh.HasHeaderToken(c.RequestHeader().Peek(fh.HeaderConnectionBytes), "upgrade") &&
+		fh.StrEqFold(fh.TrimOWS(c.RequestHeader().Peek([]byte("Sec-WebSocket-Version"))), "13") &&
+		len(fh.TrimOWS(c.RequestHeader().Peek([]byte("Sec-WebSocket-Key")))) > 0
 }
 
-func checkWebSocketOrigin(c *fh.Ctx, cfg Config) bool {
+func checkWebSocketOrigin(c fh.Ctx, cfg Config) bool {
 	if cfg.CheckOrigin != nil {
 		return cfg.CheckOrigin(c)
 	}
 
-	origin := string(fh.TrimOWS(c.Header.Peek([]byte("Origin"))))
+	origin := string(fh.TrimOWS(c.RequestHeader().Peek([]byte("Origin"))))
 
 	if cfg.AllowAllOrigins {
 		return true

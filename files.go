@@ -10,7 +10,7 @@ import (
 )
 
 // MultipartForm parses and caches the request's multipart form.
-func (c *Ctx) MultipartForm() (*MultipartForm, error) {
+func (c *DefaultCtx) MultipartForm() (*MultipartForm, error) {
 	if c.multipartParsed {
 		return c.multipartForm, c.multipartErr
 	}
@@ -31,7 +31,7 @@ func (c *Ctx) MultipartForm() (*MultipartForm, error) {
 }
 
 // FormFile returns the first uploaded file for field.
-func (c *Ctx) FormFile(field string) (*MultipartFile, error) {
+func (c *DefaultCtx) FormFile(field string) (*MultipartFile, error) {
 	form, err := c.MultipartForm()
 	if err != nil {
 		return nil, err
@@ -40,7 +40,7 @@ func (c *Ctx) FormFile(field string) (*MultipartFile, error) {
 }
 
 // SaveFile persists an uploaded file to an explicit destination.
-func (c *Ctx) SaveFile(file *MultipartFile, dst string) error {
+func (c *DefaultCtx) SaveFile(file *MultipartFile, dst string) error {
 	if file == nil {
 		return errors.New("fasthttp: nil uploaded file")
 	}
@@ -84,7 +84,7 @@ func saveUploadedFile(dst string, data []byte, mode fs.FileMode) error {
 }
 
 // Attachment marks a response as a download using a safely encoded filename.
-func (c *Ctx) Attachment(filename string) *Ctx {
+func (c *DefaultCtx) Attachment(filename string) Ctx {
 	name := filepath.Base(filename)
 	if name == "." || name == string(filepath.Separator) {
 		name = "download"
@@ -96,7 +96,7 @@ func (c *Ctx) Attachment(filename string) *Ctx {
 
 // SendFile serves one file from disk with MIME detection, ETag,
 // Last-Modified, conditional requests, and byte ranges.
-func (c *Ctx) SendFile(filename string) error {
+func (c *DefaultCtx) SendFile(filename string) error {
 	info, err := os.Stat(filename)
 	if err != nil {
 		return err
@@ -114,11 +114,11 @@ func (c *Ctx) SendFile(filename string) error {
 }
 
 // File is an alias for SendFile.
-func (c *Ctx) File(filename string) error { return c.SendFile(filename) }
+func (c *DefaultCtx) File(filename string) error { return c.SendFile(filename) }
 
 // Download serves a file as an attachment. The optional filename controls the
 // client-visible name without changing the source path.
-func (c *Ctx) Download(filename string, downloadName ...string) error {
+func (c *DefaultCtx) Download(filename string, downloadName ...string) error {
 	name := filepath.Base(filename)
 	if len(downloadName) > 0 && downloadName[0] != "" {
 		name = downloadName[0]

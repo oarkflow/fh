@@ -136,7 +136,7 @@ type Middleware func(Handler) Handler
 // MetadataFunc extracts metadata from the HTTP upgrade request. Store only safe,
 // trusted server-side fields here. Do not trust user controlled values unless
 // verified in this function.
-type MetadataFunc func(*fh.Ctx) map[string]string
+type MetadataFunc func(fh.Ctx) map[string]string
 
 // AuthFunc runs for every non-ack envelope. Use it for session/JWT checks.
 type AuthFunc func(*EventConn, Envelope) error
@@ -146,7 +146,7 @@ type AuthorizeFunc func(*EventConn, string, string, string) error
 
 // ClientIDFunc can derive a stable client ID from metadata. Return empty to use
 // a generated random ID.
-type ClientIDFunc func(*fh.Ctx, map[string]string) string
+type ClientIDFunc func(fh.Ctx, map[string]string) string
 
 // Clock exists to simplify deterministic testing.
 type Clock func() time.Time
@@ -350,7 +350,7 @@ func (h *EventHub) HandlerWithContext(wsCfg Config, metadata MetadataFunc) fh.Ha
 
 // NewEventHandler is the production-ready combined HTTP upgrade + event hub
 // integration. It intentionally mirrors NewWithConfig from the low-level layer
-// so metadata and client IDs can be derived from *fh.Ctx before the context is
+// so metadata and client IDs can be derived from fh.Ctx before the context is
 // no longer safe to read.
 func NewEventHandler(h *EventHub, wsCfg Config, metadata MetadataFunc) fh.HandlerFunc {
 	if h == nil {
@@ -361,7 +361,7 @@ func NewEventHandler(h *EventHub, wsCfg Config, metadata MetadataFunc) fh.Handle
 		wsCfg.Manager = NewManager()
 	}
 
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if h.closed.Load() {
 			return ErrEventClosed
 		}
@@ -372,14 +372,14 @@ func NewEventHandler(h *EventHub, wsCfg Config, metadata MetadataFunc) fh.Handle
 			return ErrWebSocketHandshake
 		}
 
-		key := fh.TrimOWS(c.Header.Peek([]byte("Sec-WebSocket-Key")))
+		key := fh.TrimOWS(c.RequestHeader().Peek([]byte("Sec-WebSocket-Key")))
 		decoded, err := base64.StdEncoding.DecodeString(string(key))
 		if err != nil || len(decoded) != 16 {
 			return ErrWebSocketHandshake
 		}
 
 		selectedProtocol := selectSubprotocol(
-			string(c.Header.Peek([]byte("Sec-WebSocket-Protocol"))),
+			string(c.RequestHeader().Peek([]byte("Sec-WebSocket-Protocol"))),
 			wsCfg.Subprotocols,
 		)
 		c.Set("Sec-WebSocket-Accept", Accept(key))

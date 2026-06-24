@@ -14,7 +14,7 @@ type Config struct {
 }
 
 func New(cfg Config) fh.HandlerFunc {
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if len(cfg.Methods) > 0 && !equal(cfg.Methods, c.Method()) {
 			return fh.NewHTTPError(fh.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
 		}

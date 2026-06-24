@@ -20,13 +20,13 @@ type Step struct {
 	Type      StepType
 	Handler   fh.HandlerFunc
 	JobType   string
-	Condition func(*fh.Ctx) bool
+	Condition func(fh.Ctx) bool
 	Branches  []*Workflow
 }
 
 type Workflow struct {
 	Name      string
-	condition func(*fh.Ctx) bool
+	condition func(fh.Ctx) bool
 	Steps     []Step
 }
 
@@ -34,12 +34,12 @@ func New(name string) *Workflow {
 	return &Workflow{Name: name}
 }
 
-func (w *Workflow) Condition(fn func(*fh.Ctx) bool) *Workflow {
+func (w *Workflow) Condition(fn func(fh.Ctx) bool) *Workflow {
 	w.condition = fn
 	return w
 }
 
-func (w *Workflow) Use(name string, handler fh.HandlerFunc, conditions ...func(*fh.Ctx) bool) *Workflow {
+func (w *Workflow) Use(name string, handler fh.HandlerFunc, conditions ...func(fh.Ctx) bool) *Workflow {
 	step := Step{Name: name, Type: StepSync, Handler: handler}
 	if len(conditions) > 0 {
 		step.Condition = conditions[0]
@@ -48,7 +48,7 @@ func (w *Workflow) Use(name string, handler fh.HandlerFunc, conditions ...func(*
 	return w
 }
 
-func (w *Workflow) Job(name, jobType string, conditions ...func(*fh.Ctx) bool) *Workflow {
+func (w *Workflow) Job(name, jobType string, conditions ...func(fh.Ctx) bool) *Workflow {
 	step := Step{Name: name, Type: StepAsync, JobType: jobType}
 	if len(conditions) > 0 {
 		step.Condition = conditions[0]
@@ -68,12 +68,12 @@ func (w *Workflow) Parallel(name string, branches ...*Workflow) *Workflow {
 }
 
 func (w *Workflow) Handler() fh.HandlerFunc {
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		return w.execute(c)
 	}
 }
 
-func (w *Workflow) execute(c *fh.Ctx) error {
+func (w *Workflow) execute(c fh.Ctx) error {
 	if w.condition != nil && !w.condition(c) {
 		return nil
 	}
@@ -113,7 +113,7 @@ func (w *Workflow) execute(c *fh.Ctx) error {
 	return nil
 }
 
-func executeBranch(c *fh.Ctx, step Step) error {
+func executeBranch(c fh.Ctx, step Step) error {
 	for _, branch := range step.Branches {
 		if branch.condition != nil && !branch.condition(c) {
 			continue
@@ -126,7 +126,7 @@ func executeBranch(c *fh.Ctx, step Step) error {
 	return nil
 }
 
-func executeParallel(c *fh.Ctx, step Step) error {
+func executeParallel(c fh.Ctx, step Step) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(step.Branches))
 

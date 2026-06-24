@@ -34,7 +34,7 @@ func WriteAll(w io.Writer, b []byte) error {
 // The handler owns the protocol conversation until it returns.
 // The provided ResponseConn has WriteHeader, SetHeader, and Write methods for
 // clean HTTP response construction — use StatusText and header constants.
-func (c *Ctx) Hijack(handler func(*ResponseConn) error) error {
+func (c *DefaultCtx) Hijack(handler func(*ResponseConn) error) error {
 	if c.h2 != nil {
 		return ErrHijackHTTP2
 	}
@@ -60,7 +60,7 @@ func (c *Ctx) Hijack(handler func(*ResponseConn) error) error {
 }
 
 // Upgrade switches an HTTP/1.1 connection to another protocol.
-func (c *Ctx) Upgrade(protocol string, handler func(net.Conn) error) error {
+func (c *DefaultCtx) Upgrade(protocol string, handler func(net.Conn) error) error {
 	if c.h2 != nil {
 		return ErrHijackHTTP2
 	}

@@ -11,7 +11,7 @@ import (
 // intentionally small functions so applications can compose identity and
 // authorization inputs from headers, route params, query strings, body fields,
 // locals, sessions, JWT claims, or any other Ctx-backed source.
-type Extractor[T any] func(*Ctx) (T, bool, error)
+type Extractor[T any] func(Ctx) (T, bool, error)
 
 type Principal struct {
 	ID          string         `json:"id"`
@@ -32,7 +32,7 @@ const (
 	tenantLocalKey    = "tenant_id"
 )
 
-func SetPrincipal(c *Ctx, p Principal) {
+func SetPrincipal(c Ctx, p Principal) {
 	if c == nil {
 		return
 	}
@@ -44,7 +44,7 @@ func SetPrincipal(c *Ctx, p Principal) {
 	c.SetContext(ctx)
 }
 
-func PrincipalFrom(c *Ctx) (Principal, bool) {
+func PrincipalFrom(c Ctx) (Principal, bool) {
 	if c == nil {
 		return Principal{}, false
 	}
@@ -72,7 +72,7 @@ type PrincipalExtractors struct {
 }
 
 // ExtractPrincipal builds a Principal from the configured field extractors.
-func ExtractPrincipal(c *Ctx, ex PrincipalExtractors) (Principal, bool, error) {
+func ExtractPrincipal(c Ctx, ex PrincipalExtractors) (Principal, bool, error) {
 	var p Principal
 	var found bool
 	var err error
@@ -124,14 +124,14 @@ func ExtractPrincipal(c *Ctx, ex PrincipalExtractors) (Principal, bool, error) {
 // PrincipalExtractor returns a reusable extractor for a Principal composed from
 // field extractors.
 func PrincipalExtractor(ex PrincipalExtractors) Extractor[Principal] {
-	return func(c *Ctx) (Principal, bool, error) {
+	return func(c Ctx) (Principal, bool, error) {
 		return ExtractPrincipal(c, ex)
 	}
 }
 
 // UsePrincipal resolves and stores a Principal for downstream middleware.
 func UsePrincipal(ex Extractor[Principal], required ...bool) HandlerFunc {
-	return func(c *Ctx) error {
+	return func(c Ctx) error {
 		if ex != nil {
 			p, ok, err := ex(c)
 			if err != nil {
@@ -149,7 +149,7 @@ func UsePrincipal(ex Extractor[Principal], required ...bool) HandlerFunc {
 	}
 }
 
-func TenantID(c *Ctx) string {
+func TenantID(c Ctx) string {
 	tenant, _, _ := TenantExtractor()(c)
 	return tenant
 }
@@ -166,7 +166,7 @@ func TenantExtractor(sources ...Extractor[string]) Extractor[string] {
 }
 
 func RequireAuth() HandlerFunc {
-	return func(c *Ctx) error {
+	return func(c Ctx) error {
 		if _, ok := PrincipalFrom(c); !ok {
 			EmitSecurityEvent(c, "auth.required_missing", nil)
 			return NewHTTPError(StatusUnauthorized, "AUTH_REQUIRED", "authentication is required")
@@ -188,7 +188,7 @@ func RequirePermission(permissions ...string) HandlerFunc {
 }
 
 func RequireValues(ex Extractor[[]string], code, message, event string, required ...string) HandlerFunc {
-	return func(c *Ctx) error {
+	return func(c Ctx) error {
 		values, ok, err := extractStrings(c, ex)
 		if err != nil {
 			return err
@@ -214,7 +214,7 @@ func TenantResolver(header string, required bool) HandlerFunc {
 }
 
 func TenantResolverWith(ex Extractor[string], required bool) HandlerFunc {
-	return func(c *Ctx) error {
+	return func(c Ctx) error {
 		tenant, _, err := extractString(c, ex)
 		if err != nil {
 			return err
@@ -239,11 +239,11 @@ func hasString(list []string, want string) bool {
 }
 
 func StaticString(value string) Extractor[string] {
-	return func(*Ctx) (string, bool, error) { return value, value != "", nil }
+	return func(Ctx) (string, bool, error) { return value, value != "", nil }
 }
 
 func HeaderString(name string) Extractor[string] {
-	return func(c *Ctx) (string, bool, error) {
+	return func(c Ctx) (string, bool, error) {
 		if c == nil {
 			return "", false, nil
 		}
@@ -253,7 +253,7 @@ func HeaderString(name string) Extractor[string] {
 }
 
 func QueryString(name string) Extractor[string] {
-	return func(c *Ctx) (string, bool, error) {
+	return func(c Ctx) (string, bool, error) {
 		if c == nil {
 			return "", false, nil
 		}
@@ -263,7 +263,7 @@ func QueryString(name string) Extractor[string] {
 }
 
 func ParamString(name string) Extractor[string] {
-	return func(c *Ctx) (string, bool, error) {
+	return func(c Ctx) (string, bool, error) {
 		if c == nil {
 			return "", false, nil
 		}
@@ -273,7 +273,7 @@ func ParamString(name string) Extractor[string] {
 }
 
 func LocalString(key string) Extractor[string] {
-	return func(c *Ctx) (string, bool, error) {
+	return func(c Ctx) (string, bool, error) {
 		if c == nil {
 			return "", false, nil
 		}
@@ -291,7 +291,7 @@ func LocalString(key string) Extractor[string] {
 }
 
 func HeaderCSV(name string) Extractor[[]string] {
-	return func(c *Ctx) ([]string, bool, error) {
+	return func(c Ctx) ([]string, bool, error) {
 		if c == nil {
 			return nil, false, nil
 		}
@@ -301,7 +301,7 @@ func HeaderCSV(name string) Extractor[[]string] {
 }
 
 func QueryCSV(name string) Extractor[[]string] {
-	return func(c *Ctx) ([]string, bool, error) {
+	return func(c Ctx) ([]string, bool, error) {
 		if c == nil {
 			return nil, false, nil
 		}
@@ -312,7 +312,7 @@ func QueryCSV(name string) Extractor[[]string] {
 
 func BodyField(path string) Extractor[any] {
 	parts := splitPath(path)
-	return func(c *Ctx) (any, bool, error) {
+	return func(c Ctx) (any, bool, error) {
 		if c == nil || len(c.Body()) == 0 || len(parts) == 0 {
 			return nil, false, nil
 		}
@@ -333,7 +333,7 @@ func BodyCSV(path string) Extractor[[]string] {
 }
 
 func StringFrom(ex Extractor[any]) Extractor[string] {
-	return func(c *Ctx) (string, bool, error) {
+	return func(c Ctx) (string, bool, error) {
 		v, ok, err := extractAny(c, ex)
 		if err != nil || !ok || v == nil {
 			return "", false, err
@@ -353,7 +353,7 @@ func StringFrom(ex Extractor[any]) Extractor[string] {
 }
 
 func StringsFrom(ex Extractor[any]) Extractor[[]string] {
-	return func(c *Ctx) ([]string, bool, error) {
+	return func(c Ctx) ([]string, bool, error) {
 		v, ok, err := extractAny(c, ex)
 		if err != nil || !ok || v == nil {
 			return nil, false, err
@@ -364,7 +364,7 @@ func StringsFrom(ex Extractor[any]) Extractor[[]string] {
 }
 
 func FirstString(extractors ...Extractor[string]) Extractor[string] {
-	return func(c *Ctx) (string, bool, error) {
+	return func(c Ctx) (string, bool, error) {
 		for _, ex := range extractors {
 			value, ok, err := extractString(c, ex)
 			if err != nil || ok {
@@ -376,7 +376,7 @@ func FirstString(extractors ...Extractor[string]) Extractor[string] {
 }
 
 func FirstStrings(extractors ...Extractor[[]string]) Extractor[[]string] {
-	return func(c *Ctx) ([]string, bool, error) {
+	return func(c Ctx) ([]string, bool, error) {
 		for _, ex := range extractors {
 			value, ok, err := extractStrings(c, ex)
 			if err != nil || ok {
@@ -388,7 +388,7 @@ func FirstStrings(extractors ...Extractor[[]string]) Extractor[[]string] {
 }
 
 func PrincipalTenantExtractor() Extractor[string] {
-	return func(c *Ctx) (string, bool, error) {
+	return func(c Ctx) (string, bool, error) {
 		if p, ok := PrincipalFrom(c); ok && p.TenantID != "" {
 			return p.TenantID, true, nil
 		}
@@ -397,7 +397,7 @@ func PrincipalTenantExtractor() Extractor[string] {
 }
 
 func PrincipalRolesExtractor() Extractor[[]string] {
-	return func(c *Ctx) ([]string, bool, error) {
+	return func(c Ctx) ([]string, bool, error) {
 		p, ok := PrincipalFrom(c)
 		if !ok {
 			return nil, false, nil
@@ -407,7 +407,7 @@ func PrincipalRolesExtractor() Extractor[[]string] {
 }
 
 func PrincipalScopesExtractor() Extractor[[]string] {
-	return func(c *Ctx) ([]string, bool, error) {
+	return func(c Ctx) ([]string, bool, error) {
 		p, ok := PrincipalFrom(c)
 		if !ok {
 			return nil, false, nil
@@ -417,7 +417,7 @@ func PrincipalScopesExtractor() Extractor[[]string] {
 }
 
 func PrincipalPermissionsExtractor() Extractor[[]string] {
-	return func(c *Ctx) ([]string, bool, error) {
+	return func(c Ctx) ([]string, bool, error) {
 		p, ok := PrincipalFrom(c)
 		if !ok {
 			return nil, false, nil
@@ -426,7 +426,7 @@ func PrincipalPermissionsExtractor() Extractor[[]string] {
 	}
 }
 
-func extractString(c *Ctx, ex Extractor[string]) (string, bool, error) {
+func extractString(c Ctx, ex Extractor[string]) (string, bool, error) {
 	if ex == nil {
 		return "", false, nil
 	}
@@ -438,7 +438,7 @@ func extractString(c *Ctx, ex Extractor[string]) (string, bool, error) {
 	return v, v != "", err
 }
 
-func extractStrings(c *Ctx, ex Extractor[[]string]) ([]string, bool, error) {
+func extractStrings(c Ctx, ex Extractor[[]string]) ([]string, bool, error) {
 	if ex == nil {
 		return nil, false, nil
 	}
@@ -450,14 +450,14 @@ func extractStrings(c *Ctx, ex Extractor[[]string]) ([]string, bool, error) {
 	return values, len(values) > 0, nil
 }
 
-func extractAny(c *Ctx, ex Extractor[any]) (any, bool, error) {
+func extractAny(c Ctx, ex Extractor[any]) (any, bool, error) {
 	if ex == nil {
 		return nil, false, nil
 	}
 	return ex(c)
 }
 
-func extractMap(c *Ctx, ex Extractor[map[string]any]) (map[string]any, bool, error) {
+func extractMap(c Ctx, ex Extractor[map[string]any]) (map[string]any, bool, error) {
 	if ex == nil {
 		return nil, false, nil
 	}

@@ -153,12 +153,12 @@ func TestFileStoreAtomicRoundTripAndValidation(t *testing.T) {
 	}
 }
 
-func newTestCookieCtx() *fh.Ctx {
+func newTestCookieCtx() fh.Ctx {
 	c := &fh.Ctx{}
-	c.Header.Init()
+	c.RequestHeader().Init()
 	return c
 }
 
-func setRequestCookie(c *fh.Ctx, name, value string) {
-	c.Header.SetCookie(c, name, value)
+func setRequestCookie(c fh.Ctx, name, value string) {
+	c.RequestHeader().SetCookie(c, name, value)
 }

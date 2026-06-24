@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 )
 
-type HandlerFunc func(*Ctx) error
+type HandlerFunc func(Ctx) error
 
 // Handler is the Fiber-compatible name for a request handler.
 type Handler = HandlerFunc
@@ -100,7 +100,7 @@ type RoutePattern struct{ root *node }
 func CompileRoutePattern(pattern string) *RoutePattern {
 	pattern = normalizeRoutePath("MATCH", pattern)
 	root := &node{}
-	insertRoute(root, "MATCH", pattern, splitRouteSegments(pattern), 0, func(*Ctx) error { return nil }, nil)
+	insertRoute(root, "MATCH", pattern, splitRouteSegments(pattern), 0, func(Ctx) error { return nil }, nil)
 	return &RoutePattern{root: root}
 }
 
@@ -934,10 +934,10 @@ func (a *App) GetJSONStatic(path, body string) *App {
 // StaticText returns a handler for immutable text/plain responses.
 func StaticText(body string) HandlerFunc {
 	pre := prebuildStatic200(plainTextCT, []byte(body))
-	return func(c *Ctx) error {
-		if c.canStaticPrebuilt() {
-			c.responded = true
-			return writeAll(c.conn, pre)
+	return func(c Ctx) error {
+		if dc, ok := c.(*DefaultCtx); ok && dc.canStaticPrebuilt() {
+			dc.responded = true
+			return writeAll(dc.conn, pre)
 		}
 		return c.SendString(body)
 	}
@@ -946,10 +946,10 @@ func StaticText(body string) HandlerFunc {
 // StaticJSON returns a handler for immutable application/json responses.
 func StaticJSON(body string) HandlerFunc {
 	pre := prebuildStatic200(jsonCT, []byte(body))
-	return func(c *Ctx) error {
-		if c.canStaticPrebuilt() {
-			c.responded = true
-			return writeAll(c.conn, pre)
+	return func(c Ctx) error {
+		if dc, ok := c.(*DefaultCtx); ok && dc.canStaticPrebuilt() {
+			dc.responded = true
+			return writeAll(dc.conn, pre)
 		}
 		return c.JSONString(body)
 	}
@@ -966,7 +966,7 @@ func prebuildStatic200(contentType, body []byte) []byte {
 	return buf
 }
 
-func (c *Ctx) canStaticPrebuilt() bool {
+func (c *DefaultCtx) canStaticPrebuilt() bool {
 	return c.status == StatusOK &&
 		!c.responded &&
 		c.h2 == nil &&

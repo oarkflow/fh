@@ -22,12 +22,12 @@ const (
 var ErrInvalidRequestID = errors.New("requestid: invalid request id")
 
 type Generator interface {
-	Generate(ctx *fh.Ctx) string
+	Generate(ctx fh.Ctx) string
 }
 
 type Validator func(id string) bool
 
-type ErrorHandler func(ctx *fh.Ctx, err error) error
+type ErrorHandler func(ctx fh.Ctx, err error) error
 
 type Config struct {
 	Header   string
@@ -51,11 +51,11 @@ func New(config ...Config) fh.HandlerFunc {
 		cfg = mergeConfig(cfg, config[0])
 	}
 
-	return func(ctx *fh.Ctx) error {
+	return func(ctx fh.Ctx) error {
 		id := ""
 
 		if cfg.TrustIncoming {
-			incoming := ctx.Get(cfg.Header)
+			incoming := ctx.Get(cfg.RequestHeader())
 			if incoming != "" {
 				if len(incoming) > cfg.MaxIncomingLength || !cfg.Validator(incoming) {
 					return cfg.ErrorHandler(ctx, ErrInvalidRequestID)
@@ -68,7 +68,7 @@ func New(config ...Config) fh.HandlerFunc {
 			id = cfg.Generator.Generate(ctx)
 		}
 
-		ctx.Set(cfg.Header, id)
+		ctx.Set(cfg.RequestHeader(), id)
 		ctx.Locals(cfg.LocalKey, id)
 
 		return ctx.Next()
@@ -83,15 +83,15 @@ func defaultConfig() Config {
 		MaxIncomingLength: defaultMaxIncomingLen,
 		Generator:         NewAtomicGenerator(),
 		Validator:         DefaultValidator,
-		ErrorHandler: func(ctx *fh.Ctx, err error) error {
+		ErrorHandler: func(ctx fh.Ctx, err error) error {
 			return ctx.Status(400).SendString("Invalid Request ID")
 		},
 	}
 }
 
 func mergeConfig(base Config, override Config) Config {
-	if override.Header != "" {
-		base.Header = override.Header
+	if override.RequestHeader() != "" {
+		base.RequestHeader() = override.RequestHeader()
 	}
 	if override.LocalKey != "" {
 		base.LocalKey = override.LocalKey
@@ -162,7 +162,7 @@ func NewAtomicGeneratorWithPrefix(prefix string) *AtomicGenerator {
 	}
 }
 
-func (g *AtomicGenerator) Generate(ctx *fh.Ctx) string {
+func (g *AtomicGenerator) Generate(ctx fh.Ctx) string {
 	n := g.counter.Add(1)
 
 	var buf [128]byte

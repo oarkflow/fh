@@ -5,16 +5,16 @@ import "github.com/oarkflow/fh"
 type Config struct {
 	Action     string
 	Resource   string
-	ResourceID func(*fh.Ctx) string
+	ResourceID func(fh.Ctx) string
 	OnError    bool
-	Next       func(*fh.Ctx) bool
+	Next       func(fh.Ctx) bool
 }
 
 func New(cfg Config) fh.HandlerFunc {
 	if cfg.Action == "" {
 		cfg.Action = "http.request"
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(c) {
 			return c.Next()
 		}

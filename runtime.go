@@ -30,9 +30,9 @@ func (a *App) EnableHealth(prefix string) *App {
 		prefix = "/_fh"
 	}
 	prefix = trimRightSlash(prefix)
-	a.Get(prefix+"/health", func(c *Ctx) error { return c.JSON(Map{"status": "ok", "time": time.Now().UTC()}) })
-	a.Get(prefix+"/live", func(c *Ctx) error { return c.JSON(Map{"status": "alive"}) })
-	a.Get(prefix+"/ready", func(c *Ctx) error {
+	a.Get(prefix+"/health", func(c Ctx) error { return c.JSON(Map{"status": "ok", "time": time.Now().UTC()}) })
+	a.Get(prefix+"/live", func(c Ctx) error { return c.JSON(Map{"status": "alive"}) })
+	a.Get(prefix+"/ready", func(c Ctx) error {
 		if a.IsDraining() {
 			return c.Status(StatusServiceUnavailable).JSON(Map{"status": "draining"})
 		}
@@ -46,10 +46,10 @@ func (a *App) EnableRuntime(prefix string) *App {
 		prefix = "/_fh"
 	}
 	prefix = trimRightSlash(prefix)
-	a.Get(prefix+"/runtime", func(c *Ctx) error { return c.JSON(a.RuntimeInfo()) })
+	a.Get(prefix+"/runtime", func(c Ctx) error { return c.JSON(a.RuntimeInfo()) })
 	a.EnableRouteList(prefix + "/routes")
 	if a.reliability != nil && a.reliability.queue != nil {
-		a.Get(prefix+"/queue/stats", func(c *Ctx) error {
+		a.Get(prefix+"/queue/stats", func(c Ctx) error {
 			st, err := a.reliability.queue.Stats()
 			if err != nil {
 				return err

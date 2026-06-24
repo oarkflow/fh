@@ -21,13 +21,13 @@ const (
 )
 
 // Skipper allows selectively skipping timeout middleware.
-type Skipper func(*fh.Ctx) bool
+type Skipper func(fh.Ctx) bool
 
 // TimeoutHandler writes the timeout response.
-type TimeoutHandler func(*fh.Ctx, error) error
+type TimeoutHandler func(fh.Ctx, error) error
 
 // ErrorHandler handles non-timeout errors returned by downstream handlers.
-type ErrorHandler func(*fh.Ctx, error) error
+type ErrorHandler func(fh.Ctx, error) error
 
 // Config configures timeout middleware.
 //
@@ -89,12 +89,12 @@ func NewWithConfig(cfg Config) fh.HandlerFunc {
 	cfg = normalize(cfg)
 
 	if cfg.RejectInvalidTimeout && cfg.Timeout <= 0 {
-		return func(c *fh.Ctx) error {
+		return func(c fh.Ctx) error {
 			return c.Status(500).SendString(ErrInvalidTimeout.Error())
 		}
 	}
 
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if cfg.Skipper != nil && cfg.Skipper(c) {
 			return c.Next()
 		}
@@ -176,7 +176,7 @@ func isTimedOut(ctx context.Context, err error) bool {
 	return false
 }
 
-func handleTimeout(c *fh.Ctx, cfg Config, err error) error {
+func handleTimeout(c fh.Ctx, cfg Config, err error) error {
 	if cfg.HeaderName != "" {
 		value := cfg.HeaderValue
 		if value == "" {

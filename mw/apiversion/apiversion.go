@@ -14,11 +14,11 @@ type Config struct {
 }
 
 func New(cfg Config) fh.HandlerFunc {
-	if cfg.Header == "" {
-		cfg.Header = "Accept-Version"
+	if cfg.RequestHeader() == "" {
+		cfg.RequestHeader() = "Accept-Version"
 	}
-	return func(c *fh.Ctx) error {
-		v := c.Get(cfg.Header)
+	return func(c fh.Ctx) error {
+		v := c.Get(cfg.RequestHeader())
 		if v == "" {
 			v = cfg.Default
 		}

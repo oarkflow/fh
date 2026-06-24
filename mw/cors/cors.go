@@ -25,9 +25,9 @@ type Config struct {
 	PreflightStatus int
 
 	OriginStore     OriginStore
-	AllowOriginFunc func(ctx *fh.Ctx, origin string) bool
+	AllowOriginFunc func(ctx fh.Ctx, origin string) bool
 
-	Next func(ctx *fh.Ctx) bool
+	Next func(ctx fh.Ctx) bool
 }
 
 var DefaultConfig = Config{
@@ -69,7 +69,7 @@ func New(config ...Config) fh.HandlerFunc {
 	exposeHeaders := strings.Join(cfg.ExposeHeaders, ", ")
 	maxAge := strconv.Itoa(cfg.MaxAge)
 
-	return func(ctx *fh.Ctx) error {
+	return func(ctx fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(ctx) {
 			return ctx.Next()
 		}
@@ -198,8 +198,8 @@ func headersAllowed(allowed []string, requested string) bool {
 	return true
 }
 
-func isPreflight(ctx *fh.Ctx) bool {
-	m := ctx.Header.Method
+func isPreflight(ctx fh.Ctx) bool {
+	m := ctx.RequestHeader().Method
 	return len(m) == 7 &&
 		m[0] == 'O' &&
 		m[1] == 'P' &&

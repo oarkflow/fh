@@ -13,7 +13,7 @@ import (
 
 func TestProblemDetailsProductionMasksInternalError(t *testing.T) {
 	app := fh.NewWithConfig(fh.Config{Environment: fh.EnvProduction})
-	app.Get("/", func(c *fh.Ctx) error { return errors.New("database password=secret") })
+	app.Get("/", func(c fh.Ctx) error { return errors.New("database password=secret") })
 	resp := rawRequest(t, app, "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
 	if !strings.Contains(resp, "500 Internal Server Error") || !strings.Contains(resp, "application/problem+json") {
 		t.Fatalf("unexpected response: %s", resp)
@@ -28,7 +28,7 @@ func TestProblemDetailsProductionMasksInternalError(t *testing.T) {
 
 func TestProblemDetailsDevelopmentIncludesRedactedDebug(t *testing.T) {
 	app := fh.NewWithConfig(fh.Config{Environment: fh.EnvDevelopment, ErrorOptions: fh.ErrorOptions{Environment: fh.EnvDevelopment, ExposeCauses: true}})
-	app.Get("/", func(c *fh.Ctx) error { return errors.New("database password=secret") })
+	app.Get("/", func(c fh.Ctx) error { return errors.New("database password=secret") })
 	resp := rawRequest(t, app, "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
 	if !strings.Contains(resp, "debug") || !strings.Contains(resp, "[REDACTED]") {
 		t.Fatalf("debug response missing redacted diagnostic detail: %s", resp)
@@ -40,7 +40,7 @@ func TestProblemDetailsDevelopmentIncludesRedactedDebug(t *testing.T) {
 
 func TestValidationProblemDetails(t *testing.T) {
 	app := fh.New()
-	app.Get("/", func(c *fh.Ctx) error {
+	app.Get("/", func(c fh.Ctx) error {
 		return &fh.ValidationError{Fields: []fh.FieldError{{Field: "email", Code: "required", Message: "email is required"}}}
 	})
 	resp := rawRequest(t, app, "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
