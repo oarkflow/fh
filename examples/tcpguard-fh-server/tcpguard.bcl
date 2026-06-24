@@ -1,9 +1,9 @@
-pack "tcpguard-fiber-server-demo" {
+pack "tcpguard-fh-server-demo" {
   version "1.0.0"
   mode enforce
 }
 
-guard "tcpguard-fiber-server" {
+guard "tcpguard-fh-server" {
   mode enforce
   version "2026.05.13"
   timezone "Asia/Kathmandu"
@@ -13,6 +13,27 @@ guard "tcpguard-fiber-server" {
     enforce_http true
     timeout 25ms
     error_policy deny
+  }
+
+  response {
+    # Set TCPGUARD_ENV=development for full rule/value details during local debugging.
+    # Production output is intentionally compact and avoids noisy details arrays.
+    environment production
+    detail_level none
+    include_risk_score false
+    include_finding_messages true
+    include_actions false
+    include_evidence false
+    include_trace true
+    include_headers true
+    include_rule_ids false
+    include_values false
+    include_description false
+    log_level compact
+    support_message "Contact support with the request_id if this legitimate request was blocked."
+    code_prefix "TCPGUARD"
+    max_details 0
+    redact_fields ["authorization", "cookie", "token", "secret", "password", "api_key", "signature", "nonce", "card", "cvv", "email", "phone", "address", "body", "payload"]
   }
 
   include "./rules/*/*.bcl"
@@ -55,7 +76,7 @@ datasource "account-db" {
 
 datasource "external-risk-api" {
   type http
-  url "http://127.0.0.1:18181/_demo/risk-source"
+  url "http://127.0.0.1:18186/risk-source"
   method POST
   timeout 40ms
   allow_private_url true
@@ -141,7 +162,7 @@ action "notify_admin" {
       severity "{{severity}}"
       risk "{{risk.score}}"
       include findings
-      field source "tcpguard-fiber-server"
+      field source "tcpguard-fh-server"
     }
   }
 }
@@ -171,7 +192,7 @@ action "notify_soc" {
       risk "{{risk.score}}"
       include matched_rules
       include findings
-      field source "tcpguard-fiber-server"
+      field source "tcpguard-fh-server"
     }
   }
 }
@@ -297,4 +318,61 @@ trigger "business.high_value_payment" {
     }
   }
   emit "business.high_value_payment"
+}
+
+# Enterprise-registry detectors: these show BCL-configurable detector modules
+# using TCPGuard's detector factory registry. Defaults are still active, but
+# these blocks prove deployment-specific tuning can live in policy instead of Go.
+detector "enterprise-rate-profile" {
+  type rate
+  algorithm sliding_window
+  window 1m
+  ip_limit 60
+  user_limit 120
+  tenant_limit 1000
+  endpoint_limit 80
+  ip_user_limit 50
+  tenant_endpoint_limit 200
+}
+
+detector "enterprise-replay-profile" {
+  type replay
+  clock_skew 60s
+  nonce_ttl 10m
+}
+
+detector "enterprise-header-profile" {
+  type header_anomaly
+}
+
+# Correlation/sequence example: several failed auth events followed by a
+# successful login turns into an account_takeover_chain trigger.
+rule "account-takeover-correlation-chain" {
+  name "Challenge failed-logins followed by a successful login"
+  status active
+  priority 945
+
+  trigger {
+    sequence within 15m {
+      auth.login_failed count 3
+      auth.login_success count 1
+    }
+  }
+
+  risk {
+    base 88
+    max 95
+  }
+
+  severity {
+    high when risk.score greater_or_equal 75
+  }
+
+  actions {
+    high {
+      run mfa_challenge
+      run notify_soc
+      run create_incident
+    }
+  }
 }

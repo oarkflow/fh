@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	github.com/oarkflow/authz v0.0.3
 	github.com/oarkflow/fh v0.0.0
-	github.com/oarkflow/tcpguard v0.0.12
+	github.com/oarkflow/tcpguard v0.0.14
 )
 
 require (
