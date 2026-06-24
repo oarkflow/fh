@@ -19,7 +19,7 @@ type Config struct {
 	AddPrefix    string
 	Timeout      time.Duration
 	Director     func(*http.Request)
-	ErrorHandler func(fh.Ctx, error) error
+	ErrorHandler func(*fh.Ctx, error) error
 }
 
 func New(cfg Config) fh.HandlerFunc {
@@ -47,12 +47,12 @@ func New(cfg Config) fh.HandlerFunc {
 			cfg.Director(r)
 		}
 	}
-	return func(c fh.Ctx) error {
+	return func(c *fh.Ctx) error {
 		req, err := request(c, target)
 		if err != nil {
 			return err
 		}
-		writer := &responseWriter{ctx: c, header: http.RequestHeader(){}, status: fh.StatusOK}
+		writer := &responseWriter{ctx: c, header: http.Header{}, status: fh.StatusOK}
 		proxy.ServeHTTP(writer, req)
 		if writer.err != nil && cfg.ErrorHandler != nil {
 			return cfg.ErrorHandler(c, writer.err)
@@ -65,7 +65,7 @@ func New(cfg Config) fh.HandlerFunc {
 }
 
 func Gateway(routes map[string]Config) fh.HandlerFunc {
-	return func(c fh.Ctx) error {
+	return func(c *fh.Ctx) error {
 		var best string
 		var cfg Config
 		for prefix, candidate := range routes {
@@ -83,14 +83,14 @@ func Gateway(routes map[string]Config) fh.HandlerFunc {
 	}
 }
 
-func request(c fh.Ctx, target *url.URL) (*http.Request, error) {
+func request(c *fh.Ctx, target *url.URL) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(c.Context(), c.Method(), target.String()+c.OriginalURL(), io.NopCloser(bytes.NewReader(c.Body())))
 	if err != nil {
 		return nil, err
 	}
 	for key, values := range c.GetReqHeaders() {
 		for _, value := range values {
-			req.RequestHeader().Add(key, value)
+			req.Header.Add(key, value)
 		}
 	}
 	req.RemoteAddr = c.IP()
@@ -98,14 +98,14 @@ func request(c fh.Ctx, target *url.URL) (*http.Request, error) {
 }
 
 type responseWriter struct {
-	ctx         fh.Ctx
-	header      http.RequestHeader()
+	ctx         *fh.Ctx
+	header      http.Header
 	status      int
 	err         error
 	wroteHeader bool
 }
 
-func (w *responseWriter) Header() http.RequestHeader() { return w.header }
+func (w *responseWriter) Header() http.Header { return w.header }
 func (w *responseWriter) WriteHeader(status int) {
 	w.wroteHeader = true
 	w.status = status

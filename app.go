@@ -20,20 +20,20 @@ import (
 type Map map[string]any
 
 // ErrorHandler handles errors returned from route handlers and middleware.
-type ErrorHandler func(Ctx, error)
+type ErrorHandler func(*Ctx, error)
 
 // NotFoundHandler handles requests that do not match any route.
-type NotFoundHandler func(Ctx) error
+type NotFoundHandler func(*Ctx) error
 
 // MethodNotAllowedHandler handles requests whose path matches one or more
 // routes but whose method is not allowed. allowed is already ordered for the
 // Allow header.
-type MethodNotAllowedHandler func(Ctx, []string) error
+type MethodNotAllowedHandler func(*Ctx, []string) error
 
 // OptionsHandler handles automatic OPTIONS responses for matched routes and
 // server-wide OPTIONS * requests. allowed is already ordered for the Allow
 // header.
-type OptionsHandler func(Ctx, []string) error
+type OptionsHandler func(*Ctx, []string) error
 
 // ── Lifecycle events ───────────────────────────────────────────────────────
 
@@ -1125,7 +1125,7 @@ func (a *App) serveConn(conn net.Conn) {
 	}
 }
 
-func (a *App) dispatch(ctx *DefaultCtx) {
+func (a *App) dispatch(ctx *Ctx) {
 	defer func() {
 		if r := recover(); r != nil {
 			if a.cfg.Debug {
@@ -1158,12 +1158,12 @@ func (a *App) dispatch(ctx *DefaultCtx) {
 			if bytesEqualFold(ctx.Header.Method, MethodOPTIONSBytes) && len(path) == 1 && path[0] == '*' {
 				allowed = a.router.Methods()
 			}
-			fallback := func(ctx Ctx) error {
+			fallback := func(ctx *Ctx) error {
 				if len(allowed) == 0 {
 					return a.cfg.NotFoundHandler(ctx)
 				}
 				ctx.Set("Allow", strings.Join(allowed, ", "))
-				if bytesEqualFold(ctx.RequestHeader().Method, MethodOPTIONSBytes) {
+				if bytesEqualFold(ctx.Header.Method, MethodOPTIONSBytes) {
 					return a.cfg.OptionsHandler(ctx, allowed)
 				}
 				return a.cfg.MethodNotAllowed(ctx, allowed)
@@ -1204,14 +1204,10 @@ func (a *App) chain(handlers []HandlerFunc) HandlerFunc {
 	all = append(all, a.middleware...)
 	all = append(all, handlers...)
 
-	return func(ctx Ctx) error {
-		dc, ok := ctx.(*DefaultCtx)
-		if !ok {
-			return errors.New("fh: handler chain requires *DefaultCtx")
-		}
-		dc.handlers = all
-		dc.handlerIndex = 0
-		return dc.Next()
+	return func(ctx *Ctx) error {
+		ctx.handlers = all
+		ctx.handlerIndex = 0
+		return ctx.Next()
 	}
 }
 
@@ -1229,7 +1225,7 @@ func (a *App) emitError(err error) {
 	}
 }
 
-func hasUpgradeH2C(ctx *DefaultCtx) bool {
+func hasUpgradeH2C(ctx *Ctx) bool {
 	upgrade := trimOWS(ctx.Header.Upgrade)
 	if len(upgrade) == 0 || !strEqFold(upgrade, "h2c") {
 		return false
@@ -1242,7 +1238,7 @@ func hasUpgradeH2C(ctx *DefaultCtx) bool {
 	return hasHeaderToken(conn, "upgrade") && hasHeaderToken(conn, "http2-settings")
 }
 
-func readH2CUpgradeBody(conn net.Conn, ctx *DefaultCtx, buffered []byte, bodyStart, maxBody int, timeout time.Duration) ([]byte, error) {
+func readH2CUpgradeBody(conn net.Conn, ctx *Ctx, buffered []byte, bodyStart, maxBody int, timeout time.Duration) ([]byte, error) {
 	data := buffered[bodyStart:]
 	if ctx.Header.Chunked {
 		body, leftover, trailers, err := readChunkedBody(conn, data, maxBody, timeout)
@@ -1284,23 +1280,23 @@ func isTimeoutErr(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
-func defaultErrorHandler(ctx Ctx, err error) {
-	if dc, ok := ctx.(*DefaultCtx); ok && dc.server != nil && dc.server.logger != nil {
-		dc.server.logger.Printf("[fasthttp] request error: %v", err)
+func defaultErrorHandler(ctx *Ctx, err error) {
+	if ctx.server != nil && ctx.server.logger != nil {
+		ctx.server.logger.Printf("[fasthttp] request error: %v", err)
 	}
 	_ = ctx.SafeErrorResponse(err)
 }
 
-func defaultNotFoundHandler(ctx Ctx) error {
+func defaultNotFoundHandler(ctx *Ctx) error {
 	return NotFound("Resource not found")
 }
 
-func defaultMethodNotAllowedHandler(ctx Ctx, allowed []string) error {
+func defaultMethodNotAllowedHandler(ctx *Ctx, allowed []string) error {
 	ctx.Set("Allow", strings.Join(allowed, ", "))
 	return MethodNotAllowed("Method not allowed")
 }
 
-func defaultOptionsHandler(ctx Ctx, allowed []string) error {
+func defaultOptionsHandler(ctx *Ctx, allowed []string) error {
 	ctx.Set("Allow", strings.Join(allowed, ", "))
 	return ctx.SendStatus(StatusNoContent)
 }

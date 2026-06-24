@@ -11,7 +11,7 @@ import (
 func TestComplianceDefaultsAndReport(t *testing.T) {
 	dir := t.TempDir()
 	app := NewWithConfig(Config{Compliance: ComplianceConfig{Enabled: true, Profile: ComplianceEnterprise, ExposeEndpoints: true}, Reliability: ReliabilityConfig{DataDir: filepath.Join(dir, "rel")}, Audit: AuditConfig{FilePath: filepath.Join(dir, "audit.jsonl")}})
-	app.Post("/orders", func(c Ctx) error { return c.JSON(Map{"ok": true}) }).WithRouteSecurity(RouteSecurityConfig{AuthRequired: true, IdempotencyRequired: true, Scopes: []string{"orders:create"}, DataClass: "confidential"})
+	app.Post("/orders", func(c *Ctx) error { return c.JSON(Map{"ok": true}) }).WithRouteSecurity(RouteSecurityConfig{AuthRequired: true, IdempotencyRequired: true, Scopes: []string{"orders:create"}, DataClass: "confidential"})
 	rep := app.ComplianceReport()
 	if rep.Profile != ComplianceEnterprise {
 		t.Fatalf("profile = %q", rep.Profile)

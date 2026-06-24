@@ -80,7 +80,7 @@ func doRequest(t *testing.T, addr, method, path, body string, headers map[string
 
 func TestGetRoute(t *testing.T) {
 	app := fh.New()
-	app.Get("/hello", func(ctx fh.Ctx) error {
+	app.Get("/hello", func(ctx *fh.Ctx) error {
 		return ctx.SendString("hello world")
 	})
 	addr := testServer(t, app)
@@ -104,7 +104,7 @@ func TestNotFound(t *testing.T) {
 
 func TestRouteParams(t *testing.T) {
 	app := fh.New()
-	app.Get("/users/:id", func(ctx fh.Ctx) error {
+	app.Get("/users/:id", func(ctx *fh.Ctx) error {
 		return ctx.SendString(ctx.Param("id"))
 	})
 	addr := testServer(t, app)
@@ -116,7 +116,7 @@ func TestRouteParams(t *testing.T) {
 
 func TestNestedParams(t *testing.T) {
 	app := fh.New()
-	app.Get("/a/:x/b/:y", func(ctx fh.Ctx) error {
+	app.Get("/a/:x/b/:y", func(ctx *fh.Ctx) error {
 		return ctx.SendString(ctx.Param("x") + "-" + ctx.Param("y"))
 	})
 	addr := testServer(t, app)
@@ -128,7 +128,7 @@ func TestNestedParams(t *testing.T) {
 
 func TestWildcard(t *testing.T) {
 	app := fh.New()
-	app.Get("/static/*", func(ctx fh.Ctx) error {
+	app.Get("/static/*", func(ctx *fh.Ctx) error {
 		return ctx.SendString(ctx.Param("*"))
 	})
 	addr := testServer(t, app)
@@ -143,7 +143,7 @@ func TestPostJSON(t *testing.T) {
 		Name string `json:"name"`
 	}
 	app := fh.New()
-	app.Post("/echo", func(ctx fh.Ctx) error {
+	app.Post("/echo", func(ctx *fh.Ctx) error {
 		var p payload
 		if err := ctx.BodyParser(&p); err != nil {
 			return ctx.Status(400).SendString(err.Error())
@@ -164,7 +164,7 @@ func TestPostJSON(t *testing.T) {
 
 func TestQueryParams(t *testing.T) {
 	app := fh.New()
-	app.Get("/search", func(ctx fh.Ctx) error {
+	app.Get("/search", func(ctx *fh.Ctx) error {
 		return ctx.SendString(ctx.Query("q"))
 	})
 	addr := testServer(t, app)
@@ -179,7 +179,7 @@ func TestMiddlewareChain(t *testing.T) {
 	var order []string
 	done := make(chan struct{})
 
-	app.Use(func(ctx fh.Ctx) error {
+	app.Use(func(ctx *fh.Ctx) error {
 		order = append(order, "mw1")
 		err := ctx.Next()
 		order = append(order, "mw1-after")
@@ -187,12 +187,12 @@ func TestMiddlewareChain(t *testing.T) {
 		return err
 	})
 
-	app.Use(func(ctx fh.Ctx) error {
+	app.Use(func(ctx *fh.Ctx) error {
 		order = append(order, "mw2")
 		return ctx.Next()
 	})
 
-	app.Get("/", func(ctx fh.Ctx) error {
+	app.Get("/", func(ctx *fh.Ctx) error {
 		order = append(order, "handler")
 		return ctx.SendString("ok")
 	})
@@ -212,7 +212,7 @@ func TestMiddlewareChain(t *testing.T) {
 func TestGroupRoutes(t *testing.T) {
 	app := fh.New()
 	v1 := app.Group("/v1")
-	v1.Get("/ping", func(ctx fh.Ctx) error {
+	v1.Get("/ping", func(ctx *fh.Ctx) error {
 		return ctx.SendString("pong")
 	})
 
@@ -227,11 +227,11 @@ func TestGroupMiddleware(t *testing.T) {
 	app := fh.New()
 	var called atomic.Bool
 
-	admin := app.Group("/admin", func(ctx fh.Ctx) error {
+	admin := app.Group("/admin", func(ctx *fh.Ctx) error {
 		called.Store(true)
 		return ctx.Next()
 	})
-	admin.Get("/secret", func(ctx fh.Ctx) error {
+	admin.Get("/secret", func(ctx *fh.Ctx) error {
 		return ctx.SendString("secret")
 	})
 
@@ -244,7 +244,7 @@ func TestGroupMiddleware(t *testing.T) {
 
 func TestKeepAlive(t *testing.T) {
 	app := fh.New()
-	app.Get("/ka", func(ctx fh.Ctx) error {
+	app.Get("/ka", func(ctx *fh.Ctx) error {
 		return ctx.SendString("ok")
 	})
 	addr := testServer(t, app)
@@ -271,10 +271,10 @@ func TestKeepAlive(t *testing.T) {
 
 func TestStatusCodes(t *testing.T) {
 	app := fh.New()
-	app.Get("/created", func(ctx fh.Ctx) error {
+	app.Get("/created", func(ctx *fh.Ctx) error {
 		return ctx.Status(201).SendString("created")
 	})
-	app.Get("/redirect", func(ctx fh.Ctx) error {
+	app.Get("/redirect", func(ctx *fh.Ctx) error {
 		return ctx.Redirect("/other", 301)
 	})
 
@@ -293,11 +293,11 @@ func TestStatusCodes(t *testing.T) {
 
 func TestLocals(t *testing.T) {
 	app := fh.New()
-	app.Use(func(ctx fh.Ctx) error {
+	app.Use(func(ctx *fh.Ctx) error {
 		ctx.Locals("user", "alice")
 		return ctx.Next()
 	})
-	app.Get("/whoami", func(ctx fh.Ctx) error {
+	app.Get("/whoami", func(ctx *fh.Ctx) error {
 		return ctx.SendString(ctx.Locals("user").(string))
 	})
 	addr := testServer(t, app)
@@ -310,7 +310,7 @@ func TestLocals(t *testing.T) {
 func TestPanicRecovery(t *testing.T) {
 	app := fh.New()
 	app.Use(recover.New())
-	app.Get("/panic", func(ctx fh.Ctx) error {
+	app.Get("/panic", func(ctx *fh.Ctx) error {
 		panic("test panic")
 	})
 	addr := testServer(t, app)
@@ -323,7 +323,7 @@ func TestPanicRecovery(t *testing.T) {
 func TestSecurityHeaders(t *testing.T) {
 	app := fh.New()
 	app.Use(security.New())
-	app.Get("/", func(ctx fh.Ctx) error {
+	app.Get("/", func(ctx *fh.Ctx) error {
 		return ctx.SendString("ok")
 	})
 	addr := testServer(t, app)
@@ -362,7 +362,7 @@ func TestSecurityHeadersCustom(t *testing.T) {
 		ContentTypeNosniff: false,
 		HSTSMaxAge:         0,
 	}))
-	app.Get("/", func(ctx fh.Ctx) error {
+	app.Get("/", func(ctx *fh.Ctx) error {
 		return ctx.SendString("ok")
 	})
 	addr := testServer(t, app)
@@ -387,7 +387,7 @@ func TestSecurityHeadersCustom(t *testing.T) {
 func TestCORS(t *testing.T) {
 	app := fh.New()
 	app.Use(cors.New())
-	app.Get("/", func(ctx fh.Ctx) error {
+	app.Get("/", func(ctx *fh.Ctx) error {
 		return ctx.SendString("ok")
 	})
 	addr := testServer(t, app)
@@ -404,7 +404,7 @@ func TestCORS(t *testing.T) {
 func TestRequestID(t *testing.T) {
 	app := fh.New()
 	app.Use(requestid.New())
-	app.Get("/", func(ctx fh.Ctx) error {
+	app.Get("/", func(ctx *fh.Ctx) error {
 		return ctx.SendString("ok")
 	})
 	addr := testServer(t, app)
@@ -422,7 +422,7 @@ func TestCompressionNegotiationAndStreaming(t *testing.T) {
 	app := fh.New()
 	app.Use(compress.New())
 	payload := strings.Repeat("hello world ", 60) // > 512 bytes to bypass MinSize check
-	app.Get("/compressed", func(ctx fh.Ctx) error {
+	app.Get("/compressed", func(ctx *fh.Ctx) error {
 		return ctx.Stream(func(w *fh.StreamWriter) error {
 			_, err := w.Write([]byte(payload))
 			return err
@@ -452,7 +452,7 @@ func TestCompressionNegotiationAndStreaming(t *testing.T) {
 func TestCooperativeTimeout(t *testing.T) {
 	app := fh.New()
 	app.Use(timeout.New(5 * time.Millisecond))
-	app.Get("/timeout", func(ctx fh.Ctx) error { <-ctx.Context().Done(); return nil })
+	app.Get("/timeout", func(ctx *fh.Ctx) error { <-ctx.Context().Done(); return nil })
 	addr := testServer(t, app)
 	code, _ := doRequest(t, addr, "GET", "/timeout", "", nil)
 	if code != 503 {
@@ -470,7 +470,7 @@ func TestSessionMiddlewarePersistsBeforeResponseAndDestroys(t *testing.T) {
 	)
 	app := fh.New()
 	app.Use(session.New(manager))
-	app.Get("/counter", func(ctx fh.Ctx) error {
+	app.Get("/counter", func(ctx *fh.Ctx) error {
 		s := session.Get(ctx)
 		count, _ := s.Get("count").(float64)
 		if count == 0 {
@@ -482,13 +482,13 @@ func TestSessionMiddlewarePersistsBeforeResponseAndDestroys(t *testing.T) {
 		s.Set("count", int(count))
 		return ctx.SendString(fmt.Sprintf("%d", int(count)))
 	})
-	app.Get("/logout", func(ctx fh.Ctx) error {
+	app.Get("/logout", func(ctx *fh.Ctx) error {
 		if err := manager.Destroy(ctx, session.Get(ctx)); err != nil {
 			return err
 		}
 		return ctx.SendStatus(204)
 	})
-	app.Get("/session-stream", func(ctx fh.Ctx) error {
+	app.Get("/session-stream", func(ctx *fh.Ctx) error {
 		session.Get(ctx).Set("streamed", true)
 		return ctx.Stream(func(w *fh.StreamWriter) error { _, err := w.Write([]byte("streamed")); return err })
 	})
@@ -552,7 +552,7 @@ func TestAllMethods(t *testing.T) {
 	app := fh.New()
 	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"} {
 		method := m // capture
-		app.Add(method, "/test", func(ctx fh.Ctx) error {
+		app.Add(method, "/test", func(ctx *fh.Ctx) error {
 			return ctx.SendString(method)
 		})
 	}
@@ -573,7 +573,7 @@ func TestAllMethods(t *testing.T) {
 
 func BenchmarkHelloWorld(b *testing.B) {
 	app := fh.New()
-	app.Get("/bench", func(ctx fh.Ctx) error {
+	app.Get("/bench", func(ctx *fh.Ctx) error {
 		return ctx.SendString("hello")
 	})
 
@@ -603,7 +603,7 @@ func BenchmarkHelloWorld(b *testing.B) {
 
 func BenchmarkParallelRequests(b *testing.B) {
 	app := fh.New()
-	app.Get("/bench", func(ctx fh.Ctx) error {
+	app.Get("/bench", func(ctx *fh.Ctx) error {
 		return ctx.SendString("hello")
 	})
 
@@ -630,7 +630,7 @@ func BenchmarkParallelRequests(b *testing.B) {
 
 func BenchmarkRouteWithParams(b *testing.B) {
 	app := fh.New()
-	app.Get("/users/:id/posts/:post", func(ctx fh.Ctx) error {
+	app.Get("/users/:id/posts/:post", func(ctx *fh.Ctx) error {
 		return ctx.SendString(ctx.Param("id") + ctx.Param("post"))
 	})
 

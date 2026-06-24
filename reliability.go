@@ -241,7 +241,7 @@ func (r *Reliability) IdempotencyStore() IdempotencyRepository {
 }
 
 func (r *Reliability) Middleware() HandlerFunc {
-	return func(c Ctx) error {
+	return func(c *Ctx) error {
 		requestID := c.Get(r.cfg.RequestIDHeader)
 		if !validExternalID(requestID) {
 			requestID = newRequestID()
@@ -251,14 +251,14 @@ func (r *Reliability) Middleware() HandlerFunc {
 
 		if r.journal != nil {
 			c.CaptureResponseBody()
-			meta := RequestJournalEntry{RequestID: requestID, Event: "received", Method: c.Method(), Path: c.Path(), BodyHash: hashBody(c.Body()), RemoteIP: c.IP(), Time: time.Now().UTC()}
+			meta := RequestJournalEntry{RequestID: requestID, Event: "received", Method: c.Method(), Path: c.Path(), BodyHash: hashBody(c.body), RemoteIP: c.IP(), Time: time.Now().UTC()}
 			_ = r.journal.Append(meta)
-			c.OnBeforeResponse(func(ctx Ctx) error {
+			c.OnBeforeResponse(func(ctx *Ctx) error {
 				return r.journal.Append(RequestJournalEntry{RequestID: requestID, Event: "completed", Method: ctx.Method(), Path: ctx.Path(), Status: ctx.StatusCode(), BodyHash: hashBody(ctx.ResponseBody()), Time: time.Now().UTC()})
 			})
 		}
 
-		if r.idem != nil && isUnsafeMethod(c.RequestHeader().Method) {
+		if r.idem != nil && isUnsafeMethod(c.Header.Method) {
 			key := c.Get(r.cfg.IdempotencyHeader)
 			if key == "" {
 				if r.cfg.RequireIdempotencyKey {
@@ -269,7 +269,7 @@ func (r *Reliability) Middleware() HandlerFunc {
 			if !validExternalID(key) {
 				return c.Status(StatusBadRequest).JSON(Map{"error": "invalid_idempotency_key", "request_id": requestID})
 			}
-			reqHash := hashRequest(c.RequestHeader().Method, []byte(c.Path()), c.Body())
+			reqHash := hashRequest(c.Header.Method, c.path(), c.body)
 			decision, rec, err := r.idem.Begin(key, reqHash, c.Method(), c.Path())
 			if err != nil {
 				return err
@@ -293,8 +293,8 @@ func (r *Reliability) Middleware() HandlerFunc {
 			}
 			c.Locals("fh.idem_started", true)
 			c.CaptureResponseBody()
-			c.OnBeforeResponse(func(ctx Ctx) error {
-				return r.idem.Complete(key, reqHash, ctx.StatusCode(), ctx.ResponseHeader(HeaderContentType), ctx.GetRespHeaders(), ctx.ResponseBody())
+			c.OnBeforeResponse(func(ctx *Ctx) error {
+				return r.idem.Complete(key, reqHash, ctx.StatusCode(), string(ctx.contentType), ctx.GetRespHeaders(), ctx.ResponseBody())
 			})
 		}
 		return c.Next()
@@ -304,7 +304,7 @@ func (r *Reliability) Middleware() HandlerFunc {
 func isUnsafeMethod(m []byte) bool {
 	return bytesEqualFold(m, MethodPOSTBytes) || bytesEqualFold(m, MethodPUTBytes) || bytesEqualFold(m, MethodPATCHBytes) || bytesEqualFold(m, MethodDELETEBytes)
 }
-func setReplayHeader(c Ctx, k, v string) {
+func setReplayHeader(c *Ctx, k, v string) {
 	if strings.EqualFold(k, HeaderContentLength) || strings.EqualFold(k, HeaderConnection) || strings.EqualFold(k, HeaderTransferEncoding) || strings.EqualFold(k, HeaderDate) || strings.EqualFold(k, "Trailer") {
 		return
 	}
@@ -1068,19 +1068,19 @@ type ReliabilityPolicy struct {
 	ReplayResponse         bool
 	ConflictOnBodyDrift    bool
 	MaxReplayAge           time.Duration
-	IdempotencyKey         func(*DefaultCtx) string
-	IdempotencyFingerprint func(*DefaultCtx) string
+	IdempotencyKey         func(*Ctx) string
+	IdempotencyFingerprint func(*Ctx) string
 	Data                   DataPolicy
 	Queue                  bool
 	QueueType              string
 	QueuePriority          int
 	QueueDelay             time.Duration
-	ConcurrencyKey         func(*DefaultCtx) string
+	ConcurrencyKey         func(*Ctx) string
 }
 
 // ApplyPolicy runs a route reliability policy against a request. Reusable
 // middleware construction lives in mw/reliability.
-func (r *Reliability) ApplyPolicy(c *DefaultCtx, p ReliabilityPolicy) error {
+func (r *Reliability) ApplyPolicy(c *Ctx, p ReliabilityPolicy) error {
 	if !p.Enabled {
 		return c.Next()
 	}
@@ -1146,8 +1146,8 @@ func (r *Reliability) ApplyPolicy(c *DefaultCtx, p ReliabilityPolicy) error {
 				return c.Status(r.cfg.IdempotencyProcessingStatus).JSON(Map{"error": "idempotency_key_processing", "request_id": requestID})
 			}
 			c.CaptureResponseBody()
-			c.OnBeforeResponse(func(ctx Ctx) error {
-				return r.idem.Complete(key, reqHash, ctx.StatusCode(), ctx.ResponseHeader(HeaderContentType), ctx.GetRespHeaders(), ctx.ResponseBody())
+			c.OnBeforeResponse(func(ctx *Ctx) error {
+				return r.idem.Complete(key, reqHash, ctx.StatusCode(), string(ctx.contentType), ctx.GetRespHeaders(), ctx.ResponseBody())
 			})
 		}
 	}
@@ -1155,7 +1155,7 @@ func (r *Reliability) ApplyPolicy(c *DefaultCtx, p ReliabilityPolicy) error {
 }
 
 // Reliability returns the request's configured reliability runtime.
-func (c *DefaultCtx) Reliability() *Reliability {
+func (c *Ctx) Reliability() *Reliability {
 	if c == nil || c.server == nil {
 		return nil
 	}
@@ -1298,7 +1298,7 @@ func (i *Inbox) Accept(ctx context.Context, ev InboxEvent, queueType string) (st
 
 // RunReliableEndpoint applies a reliability policy around an endpoint handler.
 // Endpoint construction itself lives in mw/reliability.
-func (c *DefaultCtx) RunReliableEndpoint(policy ReliabilityPolicy, endpoint HandlerFunc) error {
+func (c *Ctx) RunReliableEndpoint(policy ReliabilityPolicy, endpoint HandlerFunc) error {
 	if !policy.Enabled {
 		return endpoint(c)
 	}
@@ -1311,7 +1311,7 @@ func (c *DefaultCtx) RunReliableEndpoint(policy ReliabilityPolicy, endpoint Hand
 }
 
 // Queue returns the request's configured durable queue.
-func (c *DefaultCtx) Queue() Queue {
+func (c *Ctx) Queue() Queue {
 	if c == nil || c.server == nil {
 		return nil
 	}
@@ -1331,7 +1331,7 @@ func (a *App) Inbox() *Inbox {
 	return a.reliability.Inbox()
 }
 
-func AtomicHandoff(c *DefaultCtx, jobType string, payload any, opts ...QueueJob) (string, error) {
+func AtomicHandoff(c *Ctx, jobType string, payload any, opts ...QueueJob) (string, error) {
 	q := c.server.Queue()
 	if q == nil {
 		return "", errors.New("fh: queue disabled")

@@ -55,95 +55,7 @@ func refreshDateCache() {
 	atomic.StoreInt64(&dateValueCacheUnix, unix)
 }
 
-type Ctx interface {
-	App() *App
-	Append(key, value string)
-	Audit() AuditRecorder
-	Body() []byte
-	BodyCopy() []byte
-	BodyParser(v any) error
-	BodyRaw() []byte
-	CaptureResponseBody()
-	Context() context.Context
-	Deadline() (time.Time, bool)
-	DelCookie(name string)
-	Done() <-chan struct{}
-	EchoBody(contentType ...string) error
-	EchoJSON(validate ...bool) error
-	Err() error
-	ErrorReport(err error) ErrorReport
-	ErrorResponse(err error) error
-	File(filename string) error
-	FirstCookie() string
-	Flash(key string, value ...any) any
-	FormFile(field string) (*MultipartFile, error)
-	Get(name string, defaults ...string) string
-	GetCookie(name string) string
-	GetHeaders() map[string][]string
-	GetReqHeaders() map[string][]string
-	GetRespHeader(name string, defaults ...string) string
-	GetRespHeaders() map[string][]string
-	HasResponseCookies() bool
-	Hijack(handler func(*ResponseConn) error) error
-	Hostname() string
-	IP() string
-	JSON(v any) error
-	JSONAppend(fn JSONAppendFunc) error
-	JSONBytes(b []byte) error
-	JSONString(s string) error
-	Ledger(action, resource, resourceID string, before, after []byte) error
-	Lifecycle() *RequestLifecycle
-	Locals(key string, value ...any) any
-	Method() string
-	MultipartForm() (*MultipartForm, error)
-	Next() error
-	OnBeforeResponse(fn func(Ctx) error)
-	OriginalURL() string
-	Param(name string) string
-	Params(name string, defaults ...string) string
-	Path() string
-	Problem(p Problem) error
-	Query(name string, def ...string) string
-	QueryParser(v any) error
-	Queue() Queue
-	Redirect(location string, code ...int) error
-	RedirectBack(fallback string, code ...int) error
-	RedirectTo(name string, params map[string]string, code ...int) error
-	Reliability() *Reliability
-	Render(name string, data any, layout ...string) error
-	RequestHeader() *RequestHeader
-	Responded() bool
-	ResponseBody() []byte
-	ResponseHeader(name string) string
-	Rewrite(target string) error
-	RunCompensations() error
-	RunReliableEndpoint(policy ReliabilityPolicy, endpoint HandlerFunc) error
-	SSE(fn func(*SSE) error) error
-	SafeErrorResponse(err error) error
-	SaveFile(file *MultipartFile, dst string) error
-	Send(b []byte) error
-	SendBytes(b []byte) error
-	SendFile(filename string) error
-	SendStatus(code int) error
-	SendStream(r io.Reader) error
-	SendString(s string) error
-	ServerInbox() *Inbox
-	ServerOutbox() *Outbox
-	Set(key, value string)
-	SetContext(ctx context.Context)
-	SetCookie(cookie *Cookie)
-	SetTrailer(key, value string)
-	Status(code int) Ctx
-	StatusCode() int
-	Stream(fn func(*StreamWriter) error) error
-	Trailer(name string) string
-	TransformBody(fn func([]byte) ([]byte, error))
-	AddBodyTransform(fn func([]byte) ([]byte, error))
-	Type(mime string) Ctx
-	Upgrade(protocol string, handler func(net.Conn) error) error
-}
-
-type DefaultCtx struct {
+type Ctx struct {
 	conn   net.Conn
 	server *App
 
@@ -187,7 +99,7 @@ type DefaultCtx struct {
 
 	responseCookies     []Cookie
 	responseTime        time.Time
-	beforeResponse      []func(Ctx) error
+	beforeResponse      []func(*Ctx) error
 	beforeRan           bool
 	multipartForm       *MultipartForm
 	multipartErr        error
@@ -202,7 +114,7 @@ type localEntry struct {
 
 var ctxPool = sync.Pool{
 	New: func() any {
-		c := &DefaultCtx{
+		c := &Ctx{
 			params:      make([]Param, 0, 8),
 			queryParams: make([]Param, 0, 8),
 		}
@@ -210,15 +122,15 @@ var ctxPool = sync.Pool{
 	},
 }
 
-func acquireCtx(conn net.Conn, app *App) *DefaultCtx {
-	c := ctxPool.Get().(*DefaultCtx)
+func acquireCtx(conn net.Conn, app *App) *Ctx {
+	c := ctxPool.Get().(*Ctx)
 	c.conn = conn
 	c.server = app
 	c.reset()
 	return c
 }
 
-func releaseCtx(c *DefaultCtx) {
+func releaseCtx(c *Ctx) {
 	if c.writeBuf != nil {
 		putBytes(c.writeBuf)
 		c.writeBuf = nil
@@ -226,7 +138,7 @@ func releaseCtx(c *DefaultCtx) {
 	ctxPool.Put(c)
 }
 
-func (c *DefaultCtx) reset() {
+func (c *Ctx) reset() {
 	c.Header.reset()
 	clear(c.params)
 	c.params = c.params[:0]
@@ -279,18 +191,18 @@ func (c *DefaultCtx) reset() {
 // CaptureResponseBody enables a stable in-request response body snapshot for
 // middleware that must inspect or persist the final response (cache, idempotency,
 // request journal). It is intentionally opt-in to keep the hot path zero-copy.
-func (c *DefaultCtx) CaptureResponseBody() { c.captureResponseBody = true }
+func (c *Ctx) CaptureResponseBody() { c.captureResponseBody = true }
 
 // OnBeforeResponse registers a one-shot hook run immediately before response
 // headers are encoded. It is intended for transactional middleware such as
 // sessions that must persist before Set-Cookie reaches the wire.
-func (c *DefaultCtx) OnBeforeResponse(fn func(Ctx) error) {
+func (c *Ctx) OnBeforeResponse(fn func(*Ctx) error) {
 	if fn != nil && !c.responded && !c.beforeRan {
 		c.beforeResponse = append(c.beforeResponse, fn)
 	}
 }
 
-func (c *DefaultCtx) runBeforeResponse() error {
+func (c *Ctx) runBeforeResponse() error {
 	if c.beforeRan {
 		return nil
 	}
@@ -307,7 +219,7 @@ func (c *DefaultCtx) runBeforeResponse() error {
 // Next continues the current middleware chain. A handler may return without
 // calling Next to stop the chain. The index-based implementation avoids the
 // per-request recursive closure used by many small middleware implementations.
-func (c *DefaultCtx) Next() error {
+func (c *Ctx) Next() error {
 	if c.handlerIndex >= len(c.handlers) {
 		return nil
 	}
@@ -318,20 +230,18 @@ func (c *DefaultCtx) Next() error {
 
 // ── Request accessors ──────────────────────────────────────────────────────
 
-func (c *DefaultCtx) RequestHeader() *RequestHeader { return &c.Header }
-
-func (c *DefaultCtx) Method() string { return string(c.Header.Method) }
+func (c *Ctx) Method() string { return string(c.Header.Method) }
 
 // OriginalURL returns the request target as it arrived, before any Rewrite.
 // The name mirrors Fiber's Ctx API.
-func (c *DefaultCtx) OriginalURL() string {
+func (c *Ctx) OriginalURL() string {
 	if len(c.originalURI) != 0 {
 		return string(c.originalURI)
 	}
 	return string(c.Header.URI)
 }
 
-func (c *DefaultCtx) path() []byte {
+func (c *Ctx) path() []byte {
 	uri := c.Header.URI
 	for i, v := range uri {
 		if v == '?' {
@@ -341,12 +251,12 @@ func (c *DefaultCtx) path() []byte {
 	return uri
 }
 
-func (c *DefaultCtx) Path() string { return string(c.path()) }
+func (c *Ctx) Path() string { return string(c.path()) }
 
 // Rewrite updates the request URI and asks the application to route it again.
 // It is intended for rewrite middleware and is bounded by the application to
 // prevent rewrite loops.
-func (c *DefaultCtx) Rewrite(target string) error {
+func (c *Ctx) Rewrite(target string) error {
 	if target == "" || target[0] != '/' || strings.ContainsAny(target, "\x00\r\n") {
 		return BadRequest("Invalid rewrite target")
 	}
@@ -358,7 +268,7 @@ func (c *DefaultCtx) Rewrite(target string) error {
 	return ErrRewrite
 }
 
-func (c *DefaultCtx) Param(name string) string {
+func (c *Ctx) Param(name string) string {
 	for i := range c.params {
 		if c.params[i].Key == name {
 			return c.params[i].Value
@@ -369,7 +279,7 @@ func (c *DefaultCtx) Param(name string) string {
 
 // Params is the Fiber-compatible alias for Param. If the parameter is absent,
 // the optional default value is returned.
-func (c *DefaultCtx) Params(name string, defaults ...string) string {
+func (c *Ctx) Params(name string, defaults ...string) string {
 	value := c.Param(name)
 	if value == "" && len(defaults) != 0 {
 		return defaults[0]
@@ -377,7 +287,7 @@ func (c *DefaultCtx) Params(name string, defaults ...string) string {
 	return value
 }
 
-func (c *DefaultCtx) Query(name string, def ...string) string {
+func (c *Ctx) Query(name string, def ...string) string {
 	if !c.queryParsed {
 		if v, ok := c.peekQuery(name); ok {
 			return v
@@ -398,7 +308,7 @@ func (c *DefaultCtx) Query(name string, def ...string) string {
 	return ""
 }
 
-func (c *DefaultCtx) peekQuery(name string) (string, bool) {
+func (c *Ctx) peekQuery(name string) (string, bool) {
 	uri := c.Header.URI
 	qi := indexByte(uri, '?')
 	if qi < 0 || qi+1 >= len(uri) {
@@ -443,7 +353,7 @@ func rawQueryKeyEqual(key []byte, name string) bool {
 	return true
 }
 
-func (c *DefaultCtx) parseQuery() {
+func (c *Ctx) parseQuery() {
 	c.queryParsed = true
 	uri := c.Header.URI
 	n := len(uri)
@@ -507,11 +417,11 @@ func (c *DefaultCtx) parseQuery() {
 	}
 }
 
-func (c *DefaultCtx) Body() []byte { return c.body }
+func (c *Ctx) Body() []byte { return c.body }
 
 // BodyCopy returns a stable copy of the request body. Use it when data must
 // outlive the handler, for example when enqueueing async work.
-func (c *DefaultCtx) BodyCopy() []byte {
+func (c *Ctx) BodyCopy() []byte {
 	if len(c.body) == 0 {
 		return nil
 	}
@@ -521,14 +431,14 @@ func (c *DefaultCtx) BodyCopy() []byte {
 }
 
 // BodyRaw is the Fiber-compatible name for the unmodified request body.
-func (c *DefaultCtx) BodyRaw() []byte { return c.body }
+func (c *Ctx) BodyRaw() []byte { return c.body }
 
 // QueryParser decodes the query string into v. The target type should be
 // *map[string]any for unstructured access; struct decoding is not yet supported.
 // QueryParser decodes the query string into v. Supports the same formats
 // as form-encoded bodies (nested keys via bracket notation, arrays, etc.).
 // Target should be *map[string]any or *any.
-func (c *DefaultCtx) QueryParser(v any) error {
+func (c *Ctx) QueryParser(v any) error {
 	uri := c.Header.URI
 	qi := bytes.IndexByte(uri, '?')
 	if qi < 0 {
@@ -539,7 +449,7 @@ func (c *DefaultCtx) QueryParser(v any) error {
 }
 
 // Trailer returns a decoded chunked request trailer by name.
-func (c *DefaultCtx) Trailer(name string) string {
+func (c *Ctx) Trailer(name string) string {
 	for i := range c.trailers {
 		if bytesEqualFold(c.trailers[i].Key, []byte(name)) {
 			return string(c.trailers[i].Value)
@@ -551,7 +461,7 @@ func (c *DefaultCtx) Trailer(name string) string {
 // SetTrailer sets a response trailer header. Trailers are sent after the
 // chunked body (HTTP/1.1) or as trailing HEADERS (HTTP/2). The trailer
 // name should also be announced via the Trailer response header.
-func (c *DefaultCtx) SetTrailer(key, value string) {
+func (c *Ctx) SetTrailer(key, value string) {
 	if !validToken([]byte(key)) || strings.ContainsAny(value, "\x00\r\n") {
 		return
 	}
@@ -567,7 +477,7 @@ func (c *DefaultCtx) SetTrailer(key, value string) {
 	c.responseTrailers = append(c.responseTrailers, Header{Key: []byte(key), Value: []byte(value)})
 }
 
-func (c *DefaultCtx) BodyParser(v any) error {
+func (c *Ctx) BodyParser(v any) error {
 	ct := b2s(c.Header.ContentType)
 	if codec := matchCodec(ct); codec != nil {
 		if cta, ok := codec.(ContentTypeAwareCodec); ok {
@@ -579,9 +489,9 @@ func (c *DefaultCtx) BodyParser(v any) error {
 }
 
 // Context carries request cancellation and middleware deadlines.
-func (c *DefaultCtx) Context() context.Context { return c.requestContext }
+func (c *Ctx) Context() context.Context { return c.requestContext }
 
-func (c *DefaultCtx) SetContext(ctx context.Context) {
+func (c *Ctx) SetContext(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -591,30 +501,30 @@ func (c *DefaultCtx) SetContext(ctx context.Context) {
 // Done returns a channel that is closed when the request context is cancelled
 // (timeout, client disconnect, server draining). Handlers should select on
 // this channel alongside their own work to implement cooperative cancellation.
-func (c *DefaultCtx) Done() <-chan struct{} {
+func (c *Ctx) Done() <-chan struct{} {
 	return c.requestContext.Done()
 }
 
 // Err returns nil while the request is still active and a non-nil error
 // (context.Canceled or context.DeadlineExceeded) once the context has been
 // cancelled or its deadline has expired.
-func (c *DefaultCtx) Err() error {
+func (c *Ctx) Err() error {
 	return c.requestContext.Err()
 }
 
 // Deadline returns the time at which the request context will be cancelled,
 // if a deadline has been set (e.g. via WriteTimeout or the timeout middleware).
-func (c *DefaultCtx) Deadline() (time.Time, bool) {
+func (c *Ctx) Deadline() (time.Time, bool) {
 	return c.requestContext.Deadline()
 }
 
 // TransformBody installs a buffered response transformation. It is intended
 // for middleware such as gzip compression and does not affect Stream output.
-func (c *DefaultCtx) TransformBody(fn func([]byte) ([]byte, error)) { c.bodyTransform = fn }
+func (c *Ctx) TransformBody(fn func([]byte) ([]byte, error)) { c.bodyTransform = fn }
 
 // AddBodyTransform appends a response transformation without replacing an
 // existing middleware transformation.
-func (c *DefaultCtx) AddBodyTransform(fn func([]byte) ([]byte, error)) {
+func (c *Ctx) AddBodyTransform(fn func([]byte) ([]byte, error)) {
 	if fn == nil {
 		return
 	}
@@ -632,7 +542,7 @@ func (c *DefaultCtx) AddBodyTransform(fn func([]byte) ([]byte, error)) {
 	}
 }
 
-func (c *DefaultCtx) Get(name string, defaults ...string) string {
+func (c *Ctx) Get(name string, defaults ...string) string {
 	value := c.Header.PeekStr(name)
 	if value == "" && len(defaults) != 0 {
 		return defaults[0]
@@ -641,13 +551,13 @@ func (c *DefaultCtx) Get(name string, defaults ...string) string {
 }
 
 // GetReqHeaders returns all request header values, preserving repeated fields.
-func (c *DefaultCtx) GetReqHeaders() map[string][]string { return c.Header.GetHeaders() }
+func (c *Ctx) GetReqHeaders() map[string][]string { return c.Header.GetHeaders() }
 
 // GetHeaders is an alias for GetReqHeaders.
-func (c *DefaultCtx) GetHeaders() map[string][]string { return c.GetReqHeaders() }
+func (c *Ctx) GetHeaders() map[string][]string { return c.GetReqHeaders() }
 
 // Hostname returns the request host without its port.
-func (c *DefaultCtx) Hostname() string {
+func (c *Ctx) Hostname() string {
 	host := string(c.Header.Host)
 	if parsed, _, err := net.SplitHostPort(host); err == nil {
 		return parsed
@@ -655,7 +565,7 @@ func (c *DefaultCtx) Hostname() string {
 	return strings.Trim(host, "[]")
 }
 
-func (c *DefaultCtx) Locals(key string, value ...any) any {
+func (c *Ctx) Locals(key string, value ...any) any {
 	c.localsMu.Lock()
 	defer c.localsMu.Unlock()
 	if len(value) > 0 {
@@ -687,7 +597,7 @@ func (c *DefaultCtx) Locals(key string, value ...any) any {
 	return nil
 }
 
-func (c *DefaultCtx) IP() string {
+func (c *Ctx) IP() string {
 	if c.cachedIP != "" {
 		return c.cachedIP
 	}
@@ -702,7 +612,7 @@ func (c *DefaultCtx) IP() string {
 
 // ── Response builders ──────────────────────────────────────────────────────
 
-func (c *DefaultCtx) Status(code int) Ctx {
+func (c *Ctx) Status(code int) *Ctx {
 	if code < 100 || code > 999 {
 		code = 500
 	}
@@ -712,11 +622,11 @@ func (c *DefaultCtx) Status(code int) Ctx {
 
 // StatusCode returns the current response status code.
 // Used by middleware to inspect the status after calling Next().
-func (c *DefaultCtx) StatusCode() int {
+func (c *Ctx) StatusCode() int {
 	return c.status
 }
 
-func (c *DefaultCtx) Set(key, value string) {
+func (c *Ctx) Set(key, value string) {
 	k := []byte(key)
 	v := []byte(value)
 	if !validToken(k) || strings.ContainsAny(value, "\x00\r\n") {
@@ -751,7 +661,7 @@ func (c *DefaultCtx) Set(key, value string) {
 
 // Append adds a comma-separated response header value without replacing an
 // existing value. It is useful for fields such as Vary.
-func (c *DefaultCtx) Append(key, value string) {
+func (c *Ctx) Append(key, value string) {
 	if !validToken([]byte(key)) || strings.ContainsAny(value, "\x00\r\n") {
 		return
 	}
@@ -777,9 +687,9 @@ func (c *DefaultCtx) Append(key, value string) {
 func headerValueContainsToken(header []byte, token string) bool { return hasHeaderToken(header, token) }
 
 // Responded reports whether response headers have already been written.
-func (c *DefaultCtx) Responded() bool { return c.responded }
+func (c *Ctx) Responded() bool { return c.responded }
 
-func (c *DefaultCtx) Type(mime string) Ctx {
+func (c *Ctx) Type(mime string) *Ctx {
 	if strings.ContainsAny(mime, "\x00\r\n") {
 		return c
 	}
@@ -788,7 +698,7 @@ func (c *DefaultCtx) Type(mime string) Ctx {
 }
 
 // ResponseHeader returns a response header set so far.
-func (c *DefaultCtx) ResponseHeader(name string) string {
+func (c *Ctx) ResponseHeader(name string) string {
 	if strings.EqualFold(name, HeaderContentType) {
 		return string(c.contentType)
 	}
@@ -806,7 +716,7 @@ func (c *DefaultCtx) ResponseHeader(name string) string {
 }
 
 // GetRespHeader is the Fiber-compatible alias for ResponseHeader.
-func (c *DefaultCtx) GetRespHeader(name string, defaults ...string) string {
+func (c *Ctx) GetRespHeader(name string, defaults ...string) string {
 	value := c.ResponseHeader(name)
 	if value == "" && len(defaults) != 0 {
 		return defaults[0]
@@ -815,7 +725,7 @@ func (c *DefaultCtx) GetRespHeader(name string, defaults ...string) string {
 }
 
 // GetRespHeaders returns all response headers set on the context.
-func (c *DefaultCtx) GetRespHeaders() map[string][]string {
+func (c *Ctx) GetRespHeaders() map[string][]string {
 	headers := make(map[string][]string, c.chCount+len(c.extraHeaders)+1)
 	if len(c.contentType) != 0 {
 		headers[HeaderContentTypeStr] = []string{string(c.contentType)}
@@ -837,35 +747,35 @@ func (c *DefaultCtx) GetRespHeaders() map[string][]string {
 // ResponseBody returns the currently prepared response body snapshot.
 // It is primarily used by reliability/idempotency middleware. The slice is
 // valid only during the request lifecycle; copy it if it must be retained.
-func (c *DefaultCtx) ResponseBody() []byte { return c.responseBody }
+func (c *Ctx) ResponseBody() []byte { return c.responseBody }
 
 // HasResponseCookies reports whether the response currently sets cookies.
-func (c *DefaultCtx) HasResponseCookies() bool { return len(c.responseCookies) > 0 }
+func (c *Ctx) HasResponseCookies() bool { return len(c.responseCookies) > 0 }
 
-func (c *DefaultCtx) FirstCookie() string {
+func (c *Ctx) FirstCookie() string {
 	if len(c.responseCookies) == 0 {
 		return ""
 	}
 	return c.responseCookies[0].Value
 }
 
-func (c *DefaultCtx) SendString(s string) error {
+func (c *Ctx) SendString(s string) error {
 	if c.contentType == nil {
 		c.contentType = plainTextCT
 	}
 	return c.writeResponseString(s)
 }
 
-func (c *DefaultCtx) SendBytes(b []byte) error {
+func (c *Ctx) SendBytes(b []byte) error {
 	return c.writeResponse(b)
 }
 
-func (c *DefaultCtx) Send(b []byte) error { return c.SendBytes(b) }
+func (c *Ctx) Send(b []byte) error { return c.SendBytes(b) }
 
 // JSON writes v as application/json using the active JSON engine. Types that
 // implement JSONAppender are encoded directly into the response buffer, avoiding
 // a marshal allocation and a second response-copy on the normal hot path.
-func (c *DefaultCtx) JSON(v any) error {
+func (c *Ctx) JSON(v any) error {
 	c.contentType = jsonCT
 	if app, ok := v.(JSONAppender); ok {
 		return c.writeJSONAppender(app)
@@ -884,13 +794,13 @@ func (c *DefaultCtx) JSON(v any) error {
 }
 
 // JSONBytes sends an already encoded JSON document without re-marshalling.
-func (c *DefaultCtx) JSONBytes(b []byte) error {
+func (c *Ctx) JSONBytes(b []byte) error {
 	c.contentType = jsonCT
 	return c.writeResponse(b)
 }
 
 // JSONString sends an already encoded JSON document without re-marshalling.
-func (c *DefaultCtx) JSONString(s string) error {
+func (c *Ctx) JSONString(s string) error {
 	c.contentType = jsonCT
 	return c.writeResponseString(s)
 }
@@ -898,7 +808,7 @@ func (c *DefaultCtx) JSONString(s string) error {
 // JSONAppend writes JSON generated directly into fh's pooled response buffer.
 // This is the preferred hot-path API for small dynamic JSON responses because it
 // avoids string concatenation, reflection, and a second body copy.
-func (c *DefaultCtx) JSONAppend(fn JSONAppendFunc) error {
+func (c *Ctx) JSONAppend(fn JSONAppendFunc) error {
 	c.contentType = jsonCT
 	if fn == nil {
 		return c.JSONBytes([]byte("null"))
@@ -909,7 +819,7 @@ func (c *DefaultCtx) JSONAppend(fn JSONAppendFunc) error {
 // EchoBody sends the request body back without parsing or copying. This is the
 // correct hot-path primitive for proxy, webhook, and raw echo endpoints; do not
 // decode and re-encode JSON just to return the same payload.
-func (c *DefaultCtx) EchoBody(contentType ...string) error {
+func (c *Ctx) EchoBody(contentType ...string) error {
 	if len(contentType) > 0 && contentType[0] != "" {
 		c.Type(contentType[0])
 	} else if len(c.Header.ContentType) > 0 {
@@ -921,7 +831,7 @@ func (c *DefaultCtx) EchoBody(contentType ...string) error {
 // EchoJSON sends the request body back as JSON. By default it trusts upstream
 // validation for maximum throughput. Pass true to validate with the active JSON
 // engine before echoing.
-func (c *DefaultCtx) EchoJSON(validate ...bool) error {
+func (c *Ctx) EchoJSON(validate ...bool) error {
 	if len(validate) > 0 && validate[0] && !CurrentJSONEngine().Valid(c.body) {
 		return BadRequest("Invalid JSON body")
 	}
@@ -929,7 +839,7 @@ func (c *DefaultCtx) EchoJSON(validate ...bool) error {
 	return c.writeResponse(c.body)
 }
 
-func (c *DefaultCtx) Render(name string, data any, layout ...string) error {
+func (c *Ctx) Render(name string, data any, layout ...string) error {
 	engine := c.server.cfg.TemplateEngine
 	if engine == nil {
 		return NewHTTPError(StatusInternalServerError, "TEMPLATE_ENGINE_MISSING", "fasthttp: no template engine configured")
@@ -942,12 +852,12 @@ func (c *DefaultCtx) Render(name string, data any, layout ...string) error {
 	return c.writeResponse(buf.Bytes())
 }
 
-func (c *DefaultCtx) SendStatus(code int) error {
+func (c *Ctx) SendStatus(code int) error {
 	c.status = code
 	return c.writeResponse(nil)
 }
 
-func (c *DefaultCtx) Redirect(location string, code ...int) error {
+func (c *Ctx) Redirect(location string, code ...int) error {
 	sc := 302
 	if len(code) > 0 {
 		sc = code[0]
@@ -959,7 +869,7 @@ func (c *DefaultCtx) Redirect(location string, code ...int) error {
 
 // RedirectTo redirects to a named route. Route parameters are substituted and
 // additional values become query parameters.
-func (c *DefaultCtx) RedirectTo(name string, params map[string]string, code ...int) error {
+func (c *Ctx) RedirectTo(name string, params map[string]string, code ...int) error {
 	location, err := c.server.URL(name, params)
 	if err != nil {
 		return err
@@ -969,7 +879,7 @@ func (c *DefaultCtx) RedirectTo(name string, params map[string]string, code ...i
 
 // RedirectBack redirects to a same-origin Referer, or to fallback when the
 // Referer is absent, malformed, or points at another host.
-func (c *DefaultCtx) RedirectBack(fallback string, code ...int) error {
+func (c *Ctx) RedirectBack(fallback string, code ...int) error {
 	location := fallback
 	if raw := c.Get(HeaderRefererStr); raw != "" {
 		if ref, err := url.Parse(raw); err == nil {
@@ -988,7 +898,7 @@ type contextFlashStore interface {
 
 // Flash stores a value for the next request, or retrieves and consumes it when
 // called without a value. The session middleware must be registered.
-func (c *DefaultCtx) Flash(key string, value ...any) any {
+func (c *Ctx) Flash(key string, value ...any) any {
 	store, ok := c.Locals("session").(contextFlashStore)
 	if !ok {
 		panic("fasthttp: flash messages require session middleware")
@@ -997,10 +907,10 @@ func (c *DefaultCtx) Flash(key string, value ...any) any {
 }
 
 // App returns the owning application instance for advanced integrations.
-func (c *DefaultCtx) App() *App { return c.server }
+func (c *Ctx) App() *App { return c.server }
 
 // ServerOutbox returns the reliability outbox for the current app.
-func (c *DefaultCtx) ServerOutbox() *Outbox {
+func (c *Ctx) ServerOutbox() *Outbox {
 	if c == nil || c.server == nil {
 		return nil
 	}
@@ -1008,7 +918,7 @@ func (c *DefaultCtx) ServerOutbox() *Outbox {
 }
 
 // ServerInbox returns the reliability inbox for the current app.
-func (c *DefaultCtx) ServerInbox() *Inbox {
+func (c *Ctx) ServerInbox() *Inbox {
 	if c == nil || c.server == nil {
 		return nil
 	}
@@ -1016,7 +926,7 @@ func (c *DefaultCtx) ServerInbox() *Inbox {
 }
 
 // writeResponseString writes a response with a string body — zero alloc.
-func (c *DefaultCtx) writeResponseString(s string) error {
+func (c *Ctx) writeResponseString(s string) error {
 	if c.captureResponseBody {
 		c.responseBody = append(c.responseBody[:0], s...)
 	} else {
@@ -1132,7 +1042,7 @@ func (c *DefaultCtx) writeResponseString(s string) error {
 	return writeAll(c.conn, buf)
 }
 
-func (c *DefaultCtx) writeJSONMapStringString(m map[string]string) error {
+func (c *Ctx) writeJSONMapStringString(m map[string]string) error {
 	bp := jsonBytePool.Get().(*[]byte)
 	body := (*bp)[:0]
 	body = append(body, '{')
@@ -1155,7 +1065,7 @@ func (c *DefaultCtx) writeJSONMapStringString(m map[string]string) error {
 	return err
 }
 
-func (c *DefaultCtx) writeJSONMapStringAny(m map[string]any) error {
+func (c *Ctx) writeJSONMapStringAny(m map[string]any) error {
 	bp := jsonBytePool.Get().(*[]byte)
 	body := (*bp)[:0]
 	body = append(body, '{')
@@ -1269,7 +1179,7 @@ func appendJSONString(dst []byte, s string) []byte {
 
 const hexLower = "0123456789abcdef"
 
-func (c *DefaultCtx) writeJSONAppender(app JSONAppender) error {
+func (c *Ctx) writeJSONAppender(app JSONAppender) error {
 	bp := jsonBytePool.Get().(*[]byte)
 	body := (*bp)[:0]
 	out, err := app.AppendJSON(body)
@@ -1287,7 +1197,7 @@ func (c *DefaultCtx) writeJSONAppender(app JSONAppender) error {
 }
 
 // writeResponse writes a response with a byte body.
-func (c *DefaultCtx) writeResponse(body []byte) error {
+func (c *Ctx) writeResponse(body []byte) error {
 	if c.captureResponseBody {
 		c.responseBody = append(c.responseBody[:0], body...)
 	} else {
@@ -1402,13 +1312,13 @@ func (c *DefaultCtx) writeResponse(body []byte) error {
 	return writeAll(c.conn, buf)
 }
 
-func (c *DefaultCtx) canFastWrite200() bool {
+func (c *Ctx) canFastWrite200() bool {
 	return !c.responded && c.status == StatusOK && c.h2 == nil && c.bodyTransform == nil && !c.captureResponseBody &&
 		c.chCount == 0 && len(c.extraHeaders) == 0 && len(c.responseCookies) == 0 && len(c.responseTrailers) == 0 &&
 		len(c.beforeResponse) == 0 && !methodIs(c.Header.Method, 'H', 'E', 'A', 'D')
 }
 
-func (c *DefaultCtx) writeFast200String(s string) error {
+func (c *Ctx) writeFast200String(s string) error {
 	c.responded = true
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
@@ -1439,7 +1349,7 @@ func (c *DefaultCtx) writeFast200String(s string) error {
 	return writeAll(c.conn, buf)
 }
 
-func (c *DefaultCtx) writeFast200Bytes(body []byte) error {
+func (c *Ctx) writeFast200Bytes(body []byte) error {
 	c.responded = true
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
