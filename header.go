@@ -97,6 +97,9 @@ type RequestHeader struct {
 	Proto                       []byte
 	Host                        []byte
 	ContentType                 []byte
+	Expect                      []byte
+	Upgrade                     []byte
+	HTTP2Settings               []byte
 	ContentLength               int
 	HasContentLength            bool
 	KeepAlive                   bool
@@ -118,6 +121,9 @@ func (h *RequestHeader) reset() {
 	h.Proto = nil
 	h.Host = nil
 	h.ContentType = nil
+	h.Expect = nil
+	h.Upgrade = nil
+	h.HTTP2Settings = nil
 	h.ContentLength = 0
 	h.HasContentLength = false
 	h.KeepAlive = false
@@ -503,6 +509,12 @@ func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, str
 			}
 			h.Chunked = chunked
 			h.UnsupportedTransferEncoding = !chunked
+		case knownExpect:
+			h.Expect = val
+		case knownUpgrade:
+			h.Upgrade = val
+		case knownHTTP2Settings:
+			h.HTTP2Settings = val
 		}
 
 		if h.hcount >= maxCount || h.hcount >= maxHeaders {
@@ -529,6 +541,9 @@ const (
 	knownContentLength
 	knownConnection
 	knownTransferEncoding
+	knownExpect
+	knownUpgrade
+	knownHTTP2Settings
 )
 
 func knownHeader(k []byte) knownHeaderKind {
@@ -548,6 +563,14 @@ func knownHeader(k []byte) knownHeaderKind {
 		if lowerN(k, "content-type") {
 			return knownContentType
 		}
+	case 6:
+		if lowerN(k, "expect") {
+			return knownExpect
+		}
+	case 7:
+		if lowerN(k, "upgrade") {
+			return knownUpgrade
+		}
 	case 14:
 		if lowerN(k, "content-length") {
 			return knownContentLength
@@ -555,6 +578,10 @@ func knownHeader(k []byte) knownHeaderKind {
 	case 17:
 		if lowerN(k, "transfer-encoding") {
 			return knownTransferEncoding
+		}
+	case 18:
+		if lowerN(k, "http2-settings") {
+			return knownHTTP2Settings
 		}
 	}
 	return knownNone

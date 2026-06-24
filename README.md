@@ -793,3 +793,8 @@ examples/compliance-enterprise
 ```
 
 It demonstrates production compliance defaults, idempotent order creation, durable queued email, request journal, audit ledger, principal/tenant auth, scope checks, compliance evidence endpoints and admin status.
+
+
+## Performance
+
+See [docs/performance.md](docs/performance.md) for hot-path configuration, benchmark mode, and zero-allocation response APIs.

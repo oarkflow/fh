@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/textproto"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -779,6 +780,12 @@ func (c *Ctx) JSON(v any) error {
 	if app, ok := v.(JSONAppender); ok {
 		return c.writeJSONAppender(app)
 	}
+	switch vv := v.(type) {
+	case map[string]string:
+		return c.writeJSONMapStringString(vv)
+	case map[string]any:
+		return c.writeJSONMapStringAny(vv)
+	}
 	b, err := (jsonCodec{}).Marshal(v)
 	if err != nil {
 		return err
@@ -802,6 +809,7 @@ func (c *Ctx) JSONString(s string) error {
 // This is the preferred hot-path API for small dynamic JSON responses because it
 // avoids string concatenation, reflection, and a second body copy.
 func (c *Ctx) JSONAppend(fn JSONAppendFunc) error {
+	c.contentType = jsonCT
 	if fn == nil {
 		return c.JSONBytes([]byte("null"))
 	}
@@ -1033,6 +1041,143 @@ func (c *Ctx) writeResponseString(s string) error {
 	*c.writeBuf = buf
 	return writeAll(c.conn, buf)
 }
+
+func (c *Ctx) writeJSONMapStringString(m map[string]string) error {
+	bp := jsonBytePool.Get().(*[]byte)
+	body := (*bp)[:0]
+	body = append(body, '{')
+	i := 0
+	for k, v := range m {
+		if i > 0 {
+			body = append(body, ',')
+		}
+		body = appendJSONString(body, k)
+		body = append(body, ':')
+		body = appendJSONString(body, v)
+		i++
+	}
+	body = append(body, '}')
+	err := c.writeResponse(body)
+	if cap(body) <= 64<<10 {
+		*bp = body[:0]
+		jsonBytePool.Put(bp)
+	}
+	return err
+}
+
+func (c *Ctx) writeJSONMapStringAny(m map[string]any) error {
+	bp := jsonBytePool.Get().(*[]byte)
+	body := (*bp)[:0]
+	body = append(body, '{')
+	i := 0
+	for k, v := range m {
+		if i > 0 {
+			body = append(body, ',')
+		}
+		body = appendJSONString(body, k)
+		body = append(body, ':')
+		var err error
+		body, err = appendJSONValue(body, v)
+		if err != nil {
+			*bp = body[:0]
+			jsonBytePool.Put(bp)
+			return err
+		}
+		i++
+	}
+	body = append(body, '}')
+	err := c.writeResponse(body)
+	if cap(body) <= 64<<10 {
+		*bp = body[:0]
+		jsonBytePool.Put(bp)
+	}
+	return err
+}
+
+func appendJSONValue(dst []byte, v any) ([]byte, error) {
+	switch x := v.(type) {
+	case nil:
+		return append(dst, "null"...), nil
+	case string:
+		return appendJSONString(dst, x), nil
+	case bool:
+		if x {
+			return append(dst, "true"...), nil
+		}
+		return append(dst, "false"...), nil
+	case int:
+		return strconv.AppendInt(dst, int64(x), 10), nil
+	case int8:
+		return strconv.AppendInt(dst, int64(x), 10), nil
+	case int16:
+		return strconv.AppendInt(dst, int64(x), 10), nil
+	case int32:
+		return strconv.AppendInt(dst, int64(x), 10), nil
+	case int64:
+		return strconv.AppendInt(dst, x, 10), nil
+	case uint:
+		return strconv.AppendUint(dst, uint64(x), 10), nil
+	case uint8:
+		return strconv.AppendUint(dst, uint64(x), 10), nil
+	case uint16:
+		return strconv.AppendUint(dst, uint64(x), 10), nil
+	case uint32:
+		return strconv.AppendUint(dst, uint64(x), 10), nil
+	case uint64:
+		return strconv.AppendUint(dst, x, 10), nil
+	case float32:
+		return strconv.AppendFloat(dst, float64(x), 'g', -1, 32), nil
+	case float64:
+		return strconv.AppendFloat(dst, x, 'g', -1, 64), nil
+	case JSONAppender:
+		return x.AppendJSON(dst)
+	case JSONMarshaler:
+		b, err := x.MarshalJSON()
+		if err != nil {
+			return dst, err
+		}
+		return append(dst, b...), nil
+	default:
+		b, err := CurrentJSONEngine().Marshal(v)
+		if err != nil {
+			return dst, err
+		}
+		return append(dst, b...), nil
+	}
+}
+
+func appendJSONString(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == '\\' || c == '"' {
+			dst = append(dst, s[start:i]...)
+			switch c {
+			case '\\', '"':
+				dst = append(dst, '\\', c)
+			case '\b':
+				dst = append(dst, '\\', 'b')
+			case '\f':
+				dst = append(dst, '\\', 'f')
+			case '\n':
+				dst = append(dst, '\\', 'n')
+			case '\r':
+				dst = append(dst, '\\', 'r')
+			case '\t':
+				dst = append(dst, '\\', 't')
+			default:
+				dst = append(dst, '\\', 'u', '0', '0', hexLower[c>>4], hexLower[c&0x0f])
+			}
+			start = i + 1
+		}
+	}
+	dst = append(dst, s[start:]...)
+	dst = append(dst, '"')
+	return dst
+}
+
+const hexLower = "0123456789abcdef"
 
 func (c *Ctx) writeJSONAppender(app JSONAppender) error {
 	bp := jsonBytePool.Get().(*[]byte)

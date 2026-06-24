@@ -35,8 +35,15 @@ type Router struct {
 	// Default false is safer.
 	UnsafeParams bool
 
-	trees      map[string]*node
-	static     map[string]map[string]HandlerFunc // method -> exact path -> handler
+	trees  map[string]*node
+	static map[string]map[string]HandlerFunc // method -> exact path -> handler
+
+	// Cached common-method pointers remove two map lookups from the request hot
+	// path. The generic maps remain authoritative for custom methods, URL
+	// generation, Allowed(), and build-time validation.
+	treeGET, treePOST, treePUT, treeDELETE, treePATCH, treeHEAD, treeOPTIONS, treeCONNECT, treeTRACE                   *node
+	staticGET, staticPOST, staticPUT, staticDELETE, staticPATCH, staticHEAD, staticOPTIONS, staticCONNECT, staticTRACE map[string]HandlerFunc
+
 	named      map[string]namedRoute
 	routeNames map[string]string
 	routes     map[string]struct{}
@@ -241,6 +248,7 @@ func (r *Router) Add(method, path string, h HandlerFunc) {
 		root = &node{}
 		r.trees[method] = root
 	}
+	r.setCommonTree(method, root)
 
 	segments := splitRouteSegments(path)
 	insertRoute(root, method, path, segments, 0, h, nil)
@@ -251,6 +259,7 @@ func (r *Router) Add(method, path string, h HandlerFunc) {
 			r.static[method] = m
 		}
 		m[path] = h
+		r.setCommonStatic(method, m)
 	}
 	r.routes[method+" "+path] = struct{}{}
 }
@@ -267,21 +276,85 @@ func (r *Router) Find(method, path string, params *[]Param) HandlerFunc {
 }
 
 func (r *Router) FindBytes(method, path []byte, params *[]Param) HandlerFunc {
-	// Request parser already validates method as a token and normal HTTP clients
-	// send canonical uppercase methods. Avoid strings.ToUpper on the hot path.
+	// Request parsing already validated method as a token. For canonical HTTP
+	// methods, avoid converting method bytes to string and avoid the method->tree
+	// map lookup on every request. Custom methods still use the generic path.
 	if r.frozen.Load() {
-		return r.findNoLockCanonical(b2s(method), path, params)
+		return r.findBytesCanonical(method, path, params)
 	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	return r.findBytesCanonical(method, path, params)
+}
+
+func (r *Router) findBytesCanonical(method, path []byte, params *[]Param) HandlerFunc {
+	switch len(method) {
+	case 3:
+		if method[0] == 'G' && method[1] == 'E' && method[2] == 'T' {
+			return r.findNoLockBytes(r.staticGET, r.treeGET, path, params)
+		}
+		if method[0] == 'P' && method[1] == 'U' && method[2] == 'T' {
+			return r.findNoLockBytes(r.staticPUT, r.treePUT, path, params)
+		}
+	case 4:
+		if method[0] == 'P' && method[1] == 'O' && method[2] == 'S' && method[3] == 'T' {
+			return r.findNoLockBytes(r.staticPOST, r.treePOST, path, params)
+		}
+		if method[0] == 'H' && method[1] == 'E' && method[2] == 'A' && method[3] == 'D' {
+			if h := r.findNoLockBytes(r.staticHEAD, r.treeHEAD, path, params); h != nil {
+				return h
+			}
+			return r.findNoLockBytes(r.staticGET, r.treeGET, path, params)
+		}
+	case 5:
+		if method[0] == 'P' && method[1] == 'A' && method[2] == 'T' && method[3] == 'C' && method[4] == 'H' {
+			return r.findNoLockBytes(r.staticPATCH, r.treePATCH, path, params)
+		}
+		if method[0] == 'T' && method[1] == 'R' && method[2] == 'A' && method[3] == 'C' && method[4] == 'E' {
+			return r.findNoLockBytes(r.staticTRACE, r.treeTRACE, path, params)
+		}
+	case 6:
+		if method[0] == 'D' && method[1] == 'E' && method[2] == 'L' && method[3] == 'E' && method[4] == 'T' && method[5] == 'E' {
+			return r.findNoLockBytes(r.staticDELETE, r.treeDELETE, path, params)
+		}
+	case 7:
+		if method[0] == 'O' && method[1] == 'P' && method[2] == 'T' && method[3] == 'I' && method[4] == 'O' && method[5] == 'N' && method[6] == 'S' {
+			return r.findNoLockBytes(r.staticOPTIONS, r.treeOPTIONS, path, params)
+		}
+		if method[0] == 'C' && method[1] == 'O' && method[2] == 'N' && method[3] == 'N' && method[4] == 'E' && method[5] == 'C' && method[6] == 'T' {
+			return r.findNoLockBytes(r.staticCONNECT, r.treeCONNECT, path, params)
+		}
+	}
 	return r.findNoLockCanonical(b2s(method), path, params)
 }
 
 func (r *Router) findNoLock(method string, path []byte, params *[]Param) HandlerFunc {
 	method = strings.ToUpper(method)
 	return r.findNoLockCanonical(method, path, params)
+}
+
+func (r *Router) findNoLockBytes(static map[string]HandlerFunc, root *node, path []byte, params *[]Param) HandlerFunc {
+	if static != nil {
+		if h := static[b2s(path)]; h != nil {
+			if params != nil {
+				*params = (*params)[:0]
+			}
+			return h
+		}
+	}
+
+	var local []Param
+	if params == nil {
+		params = &local
+	} else {
+		*params = (*params)[:0]
+	}
+	if root == nil {
+		return nil
+	}
+	return match(root, cleanLookupPath(path), params, r.UnsafeParams)
 }
 
 func (r *Router) findNoLockCanonical(method string, path []byte, params *[]Param) HandlerFunc {
@@ -448,6 +521,52 @@ func (r *Router) methodsNoLock() []string {
 	sort.Strings(methods)
 
 	return methods
+}
+
+func (r *Router) setCommonTree(method string, root *node) {
+	switch method {
+	case "GET":
+		r.treeGET = root
+	case "POST":
+		r.treePOST = root
+	case "PUT":
+		r.treePUT = root
+	case "DELETE":
+		r.treeDELETE = root
+	case "PATCH":
+		r.treePATCH = root
+	case "HEAD":
+		r.treeHEAD = root
+	case "OPTIONS":
+		r.treeOPTIONS = root
+	case "CONNECT":
+		r.treeCONNECT = root
+	case "TRACE":
+		r.treeTRACE = root
+	}
+}
+
+func (r *Router) setCommonStatic(method string, m map[string]HandlerFunc) {
+	switch method {
+	case "GET":
+		r.staticGET = m
+	case "POST":
+		r.staticPOST = m
+	case "PUT":
+		r.staticPUT = m
+	case "DELETE":
+		r.staticDELETE = m
+	case "PATCH":
+		r.staticPATCH = m
+	case "HEAD":
+		r.staticHEAD = m
+	case "OPTIONS":
+		r.staticOPTIONS = m
+	case "CONNECT":
+		r.staticCONNECT = m
+	case "TRACE":
+		r.staticTRACE = m
+	}
 }
 
 func routeIsStatic(segments []string) bool {

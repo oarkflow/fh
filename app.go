@@ -123,6 +123,7 @@ var defaultConfig = Config{
 	ReadTimeout:          0,
 	WriteTimeout:         0,
 	IdleTimeout:          0,
+	FastMode:             true,
 	ReadBufferSize:       16384,
 	MaxRequestBodySize:   4 << 20,
 	MaxHeaderListSize:    64 << 10,
@@ -942,7 +943,14 @@ func (a *App) serveConn(conn net.Conn) {
 			_ = writeAll(conn, serverError501)
 			return
 		}
-		ctx.originalURI = append(ctx.originalURI[:0], ctx.Header.URI...)
+		// The request buffer stays alive until the handler completes, so FastMode can
+		// preserve OriginalURL without copying bytes on every request. Rewrite assigns
+		// Header.URI to a separate target slice, leaving originalURI intact.
+		if a.cfg.FastMode {
+			ctx.originalURI = ctx.Header.URI
+		} else {
+			ctx.originalURI = append(ctx.originalURI[:0], ctx.Header.URI...)
+		}
 
 		// h2c upgrade: HTTP/1.1 Upgrade: h2c, Connection: Upgrade, HTTP2-Settings
 		if !a.cfg.DisableHTTP2 && hasUpgradeH2C(ctx) {
@@ -983,7 +991,7 @@ func (a *App) serveConn(conn net.Conn) {
 			_ = writeAll(conn, serverError413)
 			return
 		}
-		expect := trimOWS(ctx.Header.Peek([]byte("Expect")))
+		expect := trimOWS(ctx.Header.Expect)
 		if len(expect) > 0 {
 			if !strEqFold(expect, "100-continue") || (!ctx.Header.Chunked && ctx.Header.ContentLength == 0) {
 				releaseCtx(ctx)
@@ -1071,18 +1079,22 @@ func (a *App) serveConn(conn net.Conn) {
 			}
 		}
 
-		// Derive a per-request context from the connection context with an
-		// optional WriteTimeout deadline. Handlers and middleware can observe
-		// c.Context().Done() to implement cooperative cancellation.
-		reqCtx, reqCancel := context.WithCancel(connCtx)
-		if a.cfg.WriteTimeout > 0 {
-			reqCtx, reqCancel = context.WithTimeout(connCtx, a.cfg.WriteTimeout)
+		// Derive a per-request context only when it adds observable value. In the
+		// default FastMode hot path there is no per-request timeout, so reusing the
+		// connection context avoids context.WithCancel allocation/work on every
+		// request while still cancelling handlers on connection shutdown.
+		if a.cfg.FastMode && a.cfg.WriteTimeout == 0 {
+			ctx.SetContext(connCtx)
+			a.dispatch(ctx)
+		} else {
+			reqCtx, reqCancel := context.WithCancel(connCtx)
+			if a.cfg.WriteTimeout > 0 {
+				reqCtx, reqCancel = context.WithTimeout(connCtx, a.cfg.WriteTimeout)
+			}
+			ctx.SetContext(reqCtx)
+			a.dispatch(ctx)
+			reqCancel()
 		}
-		ctx.SetContext(reqCtx)
-
-		a.dispatch(ctx)
-
-		reqCancel()
 		keepAlive := ctx.Header.KeepAlive && !ctx.forceClose && !ctx.upgraded && !a.cfg.DisableKeepAlive && !a.draining.Load()
 		upgraded := ctx.upgraded
 
@@ -1214,16 +1226,16 @@ func (a *App) emitError(err error) {
 }
 
 func hasUpgradeH2C(ctx *Ctx) bool {
-	upgrade := trimOWS(ctx.Header.Peek([]byte("Upgrade")))
-	if !strEqFold(upgrade, "h2c") {
+	upgrade := trimOWS(ctx.Header.Upgrade)
+	if len(upgrade) == 0 || !strEqFold(upgrade, "h2c") {
+		return false
+	}
+	settings := trimOWS(ctx.Header.HTTP2Settings)
+	if len(settings) == 0 {
 		return false
 	}
 	conn := trimOWS(ctx.Header.Peek(HeaderConnectionBytes))
-	if !hasHeaderToken(conn, "upgrade") || !hasHeaderToken(conn, "http2-settings") {
-		return false
-	}
-	settings := trimOWS(ctx.Header.Peek([]byte("HTTP2-Settings")))
-	return len(settings) > 0
+	return hasHeaderToken(conn, "upgrade") && hasHeaderToken(conn, "http2-settings")
 }
 
 func readH2CUpgradeBody(conn net.Conn, ctx *Ctx, buffered []byte, bodyStart, maxBody int, timeout time.Duration) ([]byte, error) {
