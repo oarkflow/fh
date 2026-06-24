@@ -22,35 +22,35 @@ func init() {
 }
 
 func main() {
-	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app := fiber.New()
 
-	app.Get("/plaintext", func(c *fiber.Ctx) error {
+	app.Get("/plaintext", func(c fiber.Ctx) error {
 		return c.SendString("Hello, World!")
 	})
 
-	app.Get("/json", func(c *fiber.Ctx) error {
+	app.Get("/json", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"message": "Hello, World!"})
 	})
 
-	app.Get("/users/:id", func(c *fiber.Ctx) error {
+	app.Get("/users/:id", func(c fiber.Ctx) error {
 		id := c.Params("id")
 		return c.JSON(User{Name: "User " + id})
 	})
 
-	app.Get("/search", func(c *fiber.Ctx) error {
+	app.Get("/search", func(c fiber.Ctx) error {
 		q := c.Query("q")
 		return c.JSON(fiber.Map{"query": q})
 	})
 
-	app.Post("/echo", func(c *fiber.Ctx) error {
+	app.Post("/echo", func(c fiber.Ctx) error {
 		var body map[string]any
-		if err := c.BodyParser(&body); err != nil {
+		if err := c.Bind().Body(&body); err != nil {
 			return err
 		}
 		return c.JSON(body)
 	})
 
-	app.Get("/users", func(c *fiber.Ctx) error {
+	app.Get("/users", func(c fiber.Ctx) error {
 		return c.JSON(users)
 	})
 
