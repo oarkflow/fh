@@ -450,10 +450,10 @@ func TestDecodeFormToStructSlice(t *testing.T) {
 		Tags []string `form:"tags"`
 	}
 	var s target
-	if err := DecodeForm([]byte("tags=go&tags=http&tags=fast"), &s); err != nil {
+	if err := DecodeForm([]byte("tags=go&tags=http&tags=core"), &s); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Tags) != 3 || s.Tags[0] != "go" || s.Tags[1] != "http" || s.Tags[2] != "fast" {
+	if len(s.Tags) != 3 || s.Tags[0] != "go" || s.Tags[1] != "http" || s.Tags[2] != "core" {
 		t.Fatalf("unexpected tags: %v", s.Tags)
 	}
 }

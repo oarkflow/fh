@@ -65,18 +65,13 @@ type Config struct {
 	WriteTimeout   time.Duration
 	IdleTimeout    time.Duration
 	MaxConnections int
-	// FastMode enables hot-path optimizations that match modern high-throughput
-	// frameworks: no per-request deadline syscalls by default, zero-copy route
-	// params valid for the handler lifetime, and no response-body capture unless
-	// middleware explicitly asks for it. It is enabled by default.
-	FastMode bool
 	// DisablePanicRecovery removes the application-level panic recovery defer from
 	// every request. It is useful for trusted benchmark/edge deployments that use
 	// process supervision or explicit recover middleware. Leave false for robust
 	// production defaults.
 	DisablePanicRecovery bool
 	// SafeParams forces route params to be copied into stable strings. Leave false
-	// for benchmark/server hot paths; turn on only when params are stored after the request.
+	// for high-throughput handlers; turn on only when params are stored after the request.
 	SafeParams bool
 	// CaptureResponseBody keeps a copy of every response for middleware/tests.
 	// It is disabled by default; reliability/cache middleware opt in per request.
@@ -128,7 +123,6 @@ var defaultConfig = Config{
 	ReadTimeout:          0,
 	WriteTimeout:         0,
 	IdleTimeout:          0,
-	FastMode:             true,
 	ReadBufferSize:       16384,
 	MaxRequestBodySize:   4 << 20,
 	MaxHeaderListSize:    64 << 10,
@@ -174,9 +168,6 @@ func WithMaxRequestLineSize(n int) Option {
 }
 func WithMaxConcurrentStreams(n uint32) Option {
 	return func(c *Config) { c.MaxConcurrentStreams = n }
-}
-func WithFastMode(enabled bool) Option {
-	return func(c *Config) { c.FastMode = enabled }
 }
 func WithDisablePanicRecovery(disabled bool) Option {
 	return func(c *Config) { c.DisablePanicRecovery = disabled }
@@ -236,8 +227,8 @@ func WithCompliance(cc ComplianceConfig) Option {
 	return func(c *Config) { c.Compliance = cc }
 }
 
-var ErrAppAlreadyStarted = errors.New("fasthttp: app has already been started")
-var ErrRewrite = errors.New("fasthttp: reroute rewritten request")
+var ErrAppAlreadyStarted = errors.New("fh: app has already been started")
+var ErrRewrite = errors.New("fh: reroute rewritten request")
 
 // ── App ────────────────────────────────────────────────────────────────────
 
@@ -382,14 +373,20 @@ func (a *App) Add(method, path string, handlers ...HandlerFunc) *App {
 	defer a.buildMu.Unlock()
 	a.assertMutable()
 	if len(handlers) == 0 {
-		panic("fasthttp: route requires at least one handler")
+		panic("fh: route requires at least one handler")
 	}
 	for _, handler := range handlers {
 		if handler == nil {
-			panic("fasthttp: nil route handler")
+			panic("fh: nil route handler")
 		}
 	}
-	a.router.Add(method, path, a.chain(handlers))
+	routeHandler := a.chain(handlers)
+	if len(a.middleware) == 0 && len(handlers) == 1 {
+		if pre := prebuiltResponseForHandler(handlers[0]); pre != nil {
+			a.router.registerPrebuiltResponse(method, path, pre)
+		}
+	}
+	a.router.Add(method, path, routeHandler)
 	a.registerRouteInfo(RouteInfo{Method: strings.ToUpper(strings.TrimSpace(method)), Path: normalizeRoutePath(strings.ToUpper(strings.TrimSpace(method)), path)})
 	a.lastRoute = namedRoute{method: strings.ToUpper(strings.TrimSpace(method)), path: normalizeRoutePath(strings.ToUpper(strings.TrimSpace(method)), path)}
 	return a
@@ -402,7 +399,7 @@ func (a *App) Name(name string) *App {
 	defer a.buildMu.Unlock()
 	a.assertMutable()
 	if a.lastRoute.method == "" {
-		panic("fasthttp: no route available to name")
+		panic("fh: no route available to name")
 	}
 	a.router.Name(a.lastRoute.method, a.lastRoute.path, name)
 	return a
@@ -573,11 +570,11 @@ func (a *App) ListenWithGracefulShutdown(addr string) error {
 
 	go func() {
 		<-ctx.Done()
-		a.logger.Printf("[fasthttp] signal received, starting graceful shutdown...")
+		a.logger.Printf("[fh] signal received, starting graceful shutdown...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), a.effectiveShutdownTimeout())
 		defer cancel()
 		if err := a.ShutdownWithContext(shutdownCtx); err != nil {
-			a.logger.Printf("[fasthttp] graceful shutdown: %v", err)
+			a.logger.Printf("[fh] graceful shutdown: %v", err)
 		}
 	}()
 
@@ -623,7 +620,7 @@ func (a *App) Serve(ln net.Listener) error {
 		}
 	}
 
-	a.logger.Printf("[fasthttp] Listening on %s", ln.Addr())
+	a.logger.Printf("[fh] Listening on %s", ln.Addr())
 
 	var acceptErr error
 	for {
@@ -634,7 +631,7 @@ func (a *App) Serve(ln net.Listener) error {
 			}
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
-				a.logger.Printf("[fasthttp] accept timeout: %v", err)
+				a.logger.Printf("[fh] accept timeout: %v", err)
 				continue
 			}
 			acceptErr = err
@@ -761,18 +758,18 @@ func (a *App) runShutdownHooks() {
 		if a.audit != nil {
 			if closer, ok := a.audit.(AuditSinkCloser); ok {
 				if err := closer.Close(); err != nil {
-					a.logger.Printf("[fasthttp] audit shutdown error: %v", err)
+					a.logger.Printf("[fh] audit shutdown error: %v", err)
 				}
 			}
 		}
 		if a.reliability != nil {
 			if err := a.reliability.Close(); err != nil {
-				a.logger.Printf("[fasthttp] reliability shutdown error: %v", err)
+				a.logger.Printf("[fh] reliability shutdown error: %v", err)
 			}
 		}
 		for _, fn := range a.hooks.onShutdown {
 			if err := fn(); err != nil {
-				a.logger.Printf("[fasthttp] shutdown hook error: %v", err)
+				a.logger.Printf("[fh] shutdown hook error: %v", err)
 			}
 		}
 	})
@@ -801,7 +798,7 @@ func (a *App) setH2Conn(conn net.Conn, h2c *h2Conn) {
 func (a *App) serveConn(conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
-			a.logger.Printf("[fasthttp] connection hook panic: %v\n%s", r, debug.Stack())
+			a.logger.Printf("[fh] connection hook panic: %v\n%s", r, debug.Stack())
 		}
 		conn.Close()
 		a.connMu.Lock()
@@ -811,7 +808,7 @@ func (a *App) serveConn(conn net.Conn) {
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						a.logger.Printf("[fasthttp] close hook panic: %v", r)
+						a.logger.Printf("[fh] close hook panic: %v", r)
 					}
 				}()
 				fn(conn)
@@ -951,13 +948,13 @@ func (a *App) serveConn(conn net.Conn) {
 			_ = writeAll(conn, serverError501)
 			return
 		}
-		// The request buffer stays alive until the handler completes, so FastMode can
+		// The request buffer stays alive until the handler completes, so zero-copy request state can
 		// preserve OriginalURL without copying bytes on every request. Rewrite assigns
 		// Header.URI to a separate target slice, leaving originalURI intact.
-		if a.cfg.FastMode {
-			ctx.originalURI = ctx.Header.URI
-		} else {
+		if a.cfg.SafeParams {
 			ctx.originalURI = append(ctx.originalURI[:0], ctx.Header.URI...)
+		} else {
+			ctx.originalURI = ctx.Header.URI
 		}
 
 		// h2c upgrade: HTTP/1.1 Upgrade: h2c, Connection: Upgrade, HTTP2-Settings
@@ -1088,10 +1085,10 @@ func (a *App) serveConn(conn net.Conn) {
 		}
 
 		// Derive a per-request context only when it adds observable value. In the
-		// default FastMode hot path there is no per-request timeout, so reusing the
+		// default request path there is no per-request timeout, so reusing the
 		// connection context avoids context.WithCancel allocation/work on every
 		// request while still cancelling handlers on connection shutdown.
-		if a.cfg.FastMode && a.cfg.WriteTimeout == 0 {
+		if a.cfg.WriteTimeout == 0 {
 			ctx.SetContext(connCtx)
 			a.dispatch(ctx)
 		} else {
@@ -1141,9 +1138,9 @@ func (a *App) dispatch(ctx *DefaultCtx) {
 	defer func() {
 		if r := recover(); r != nil {
 			if a.cfg.Debug {
-				a.logger.Printf("[fasthttp] panic: %v\n%s", r, debug.Stack())
+				a.logger.Printf("[fh] panic: %v\n%s", r, debug.Stack())
 			} else {
-				a.logger.Printf("[fasthttp] panic: %v", r)
+				a.logger.Printf("[fh] panic: %v", r)
 			}
 			if !ctx.responded {
 				a.cfg.ErrorHandler(ctx, NewPanicError(r))
@@ -1161,6 +1158,13 @@ func (a *App) dispatchCore(ctx *DefaultCtx) {
 		}
 		ctx.params = ctx.params[:0]
 		path := ctx.path()
+		if ctx.canRouteStaticPrebuilt() {
+			if resp := a.router.FindPrebuiltResponseBytes(ctx.Header.Method, path); resp != nil {
+				ctx.responded = true
+				_ = writeAll(ctx.conn, resp)
+				return
+			}
+		}
 		handler := a.router.FindBytes(ctx.Header.Method, path, &ctx.params)
 		if handler == nil && bytesEqualFold(ctx.Header.Method, MethodHEADBytes) {
 			ctx.params = ctx.params[:0]
@@ -1234,7 +1238,7 @@ func (a *App) chain(handlers []HandlerFunc) HandlerFunc {
 
 func findHeaderEnd(b []byte) int {
 	// bytes.Index uses optimized runtime routines on supported architectures and
-	// is materially faster than a Go byte-by-byte loop for pipelined traffic.
+	// is materially cheaper than a Go byte-by-byte loop for pipelined traffic.
 	return bytes.Index(b, strHeaderEnd)
 }
 
@@ -1301,7 +1305,7 @@ func isTimeoutErr(err error) bool {
 
 func defaultErrorHandler(ctx Ctx, err error) {
 	if dc, ok := ctx.(*DefaultCtx); ok && dc.server != nil && dc.server.logger != nil {
-		dc.server.logger.Printf("[fasthttp] request error: %v", err)
+		dc.server.logger.Printf("[fh] request error: %v", err)
 	}
 	_ = ctx.SafeErrorResponse(err)
 }

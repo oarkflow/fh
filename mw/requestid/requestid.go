@@ -138,7 +138,7 @@ func DefaultValidator(id string) bool {
 	return true
 }
 
-// AtomicGenerator is fast, deterministic, sortable-ish and safe for high throughput.
+// AtomicGenerator is compact, deterministic, sortable-ish and safe for high throughput.
 // Format:
 //
 //	<node-prefix>-<unixnano-base36>-<counter-base36>

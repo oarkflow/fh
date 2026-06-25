@@ -58,7 +58,7 @@ func (a *App) WithRouteSecurity(cfg RouteSecurityConfig) *App {
 	defer a.buildMu.Unlock()
 	a.assertMutable()
 	if a.lastRoute.method == "" {
-		panic("fasthttp: no route available to annotate")
+		panic("fh: no route available to annotate")
 	}
 	a.updateRouteInfo(a.lastRoute.method, a.lastRoute.path, func(r *RouteInfo) {
 		r.Security = cfg
@@ -74,7 +74,7 @@ func (a *App) WithDataPolicy(p DataPolicy) *App {
 	defer a.buildMu.Unlock()
 	a.assertMutable()
 	if a.lastRoute.method == "" {
-		panic("fasthttp: no route available to annotate")
+		panic("fh: no route available to annotate")
 	}
 	a.updateRouteInfo(a.lastRoute.method, a.lastRoute.path, func(r *RouteInfo) { r.Data = p })
 	return a

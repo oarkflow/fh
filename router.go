@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -27,7 +28,7 @@ type Router struct {
 
 	// If true, route params are converted from []byte to string without allocation.
 	//
-	// Fastest mode, but only safe if:
+	// Zero-copy params are only safe when:
 	//   - request path buffer lives until the handler finishes
 	//   - params are not stored after request completion
 	//   - params are not used asynchronously after request completion
@@ -41,10 +42,11 @@ type Router struct {
 	// Cached common-method pointers remove two map lookups from the request hot
 	// path. The generic maps remain authoritative for custom methods, URL
 	// generation, Allowed(), and build-time validation.
-	treeGET, treePOST, treePUT, treeDELETE, treePATCH, treeHEAD, treeOPTIONS, treeCONNECT, treeTRACE                                                       *node
-	staticGET, staticPOST, staticPUT, staticDELETE, staticPATCH, staticHEAD, staticOPTIONS, staticCONNECT, staticTRACE                                     map[string]HandlerFunc
-	fastGET, fastPOST, fastPUT, fastDELETE, fastPATCH, fastHEAD, fastOPTIONS, fastCONNECT, fastTRACE                                                       []fastParamRoute
-	fastStaticGET, fastStaticPOST, fastStaticPUT, fastStaticDELETE, fastStaticPATCH, fastStaticHEAD, fastStaticOPTIONS, fastStaticCONNECT, fastStaticTRACE []fastStaticRoute
+	treeGET, treePOST, treePUT, treeDELETE, treePATCH, treeHEAD, treeOPTIONS, treeCONNECT, treeTRACE                                                                                           *node
+	staticGET, staticPOST, staticPUT, staticDELETE, staticPATCH, staticHEAD, staticOPTIONS, staticCONNECT, staticTRACE                                                                         map[string]HandlerFunc
+	paramGET, paramPOST, paramPUT, paramDELETE, paramPATCH, paramHEAD, paramOPTIONS, paramCONNECT, paramTRACE                                                                                  []paramShortcut
+	staticShortcutGET, staticShortcutPOST, staticShortcutPUT, staticShortcutDELETE, staticShortcutPATCH, staticShortcutHEAD, staticShortcutOPTIONS, staticShortcutCONNECT, staticShortcutTRACE []staticShortcut
+	prebuiltGET, prebuiltPOST, prebuiltPUT, prebuiltDELETE, prebuiltPATCH, prebuiltHEAD, prebuiltOPTIONS, prebuiltCONNECT, prebuiltTRACE                                                       []prebuiltResponse
 
 	named      map[string]namedRoute
 	routeNames map[string]string
@@ -57,8 +59,8 @@ type namedRoute struct {
 }
 
 var (
-	ErrRouteNotFound     = errors.New("fasthttp: named route not found")
-	ErrRouteParamMissing = errors.New("fasthttp: required route parameter missing")
+	ErrRouteNotFound     = errors.New("fh: named route not found")
+	ErrRouteParamMissing = errors.New("fh: required route parameter missing")
 )
 
 type node struct {
@@ -78,21 +80,30 @@ type routeEndpoint struct {
 	paramKeys []string
 }
 
-// fastParamRoute is a compact hot-path matcher for very common REST routes of
+// paramShortcut is a compact hot-path matcher for very common REST routes of
 // the form /static/:id. It preserves the normal trie semantics because static
 // routes are checked first and the route only matches a single trailing segment.
-type fastParamRoute struct {
+type paramShortcut struct {
 	prefix   string
 	paramKey string
 	fn       HandlerFunc
 }
 
-// fastStaticRoute keeps low-cardinality static routes in a compact slice. For
-// typical apps and benchmarks this avoids hashing the path on every request; the
+// staticShortcut keeps low-cardinality static routes in a compact slice. For
+// typical apps and hot paths this avoids hashing the path on every request; the
 // authoritative static map remains available for high-cardinality route tables.
-type fastStaticRoute struct {
+type staticShortcut struct {
 	path string
 	fn   HandlerFunc
+}
+
+// prebuiltResponse is a prebuilt immutable HTTP/1.1 response for exact static
+// routes. It bypasses handler dispatch and response header assembly in the
+// common immutable-response hot path while preserving normal handlers as a
+// fallback when per-request response features are enabled.
+type prebuiltResponse struct {
+	path string
+	resp []byte
 }
 
 func newRouter() *Router {
@@ -153,20 +164,20 @@ func (r *Router) Name(method, path, name string) {
 	path = normalizeRoutePath(method, path)
 	name = strings.TrimSpace(name)
 	if name == "" {
-		panic("fasthttp: route name must not be empty")
+		panic("fh: route name must not be empty")
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.frozen.Load() {
-		panic("fasthttp: cannot name route after router is frozen")
+		panic("fh: cannot name route after router is frozen")
 	}
 	key := method + " " + path
 	if _, ok := r.routes[key]; !ok {
-		panic(fmt.Sprintf("fasthttp: cannot name unregistered route %s", key))
+		panic(fmt.Sprintf("fh: cannot name unregistered route %s", key))
 	}
 	if old, ok := r.named[name]; ok && (old.method != method || old.path != path) {
-		panic(fmt.Sprintf("fasthttp: duplicate route name %q", name))
+		panic(fmt.Sprintf("fh: duplicate route name %q", name))
 	}
 	if oldName, ok := r.routeNames[key]; ok && oldName != name {
 		delete(r.named, oldName)
@@ -246,11 +257,11 @@ func (r *Router) Add(method, path string, h HandlerFunc) {
 	method = strings.ToUpper(strings.TrimSpace(method))
 
 	if !validTokenString(method) {
-		panic("fasthttp: invalid route method")
+		panic("fh: invalid route method")
 	}
 
 	if h == nil {
-		panic("fasthttp: nil route handler")
+		panic("fh: nil route handler")
 	}
 
 	path = normalizeRoutePath(method, path)
@@ -259,7 +270,7 @@ func (r *Router) Add(method, path string, h HandlerFunc) {
 	defer r.mu.Unlock()
 
 	if r.frozen.Load() {
-		panic("fasthttp: cannot add route after router is frozen")
+		panic("fh: cannot add route after router is frozen")
 	}
 
 	root := r.trees[method]
@@ -271,8 +282,8 @@ func (r *Router) Add(method, path string, h HandlerFunc) {
 
 	segments := splitRouteSegments(path)
 	insertRoute(root, method, path, segments, 0, h, nil)
-	if fr, ok := buildFastParamRoute(segments, h); ok {
-		r.addFastParamRoute(method, fr)
+	if fr, ok := buildParamShortcut(segments, h); ok {
+		r.addParamShortcut(method, fr)
 	}
 	if routeIsStatic(segments) {
 		m := r.static[method]
@@ -282,7 +293,7 @@ func (r *Router) Add(method, path string, h HandlerFunc) {
 		}
 		m[path] = h
 		r.setCommonStatic(method, m)
-		r.addFastStaticRoute(method, fastStaticRoute{path: path, fn: h})
+		r.addStaticShortcut(method, staticShortcut{path: path, fn: h})
 	}
 	r.routes[method+" "+path] = struct{}{}
 }
@@ -316,38 +327,38 @@ func (r *Router) findBytesCanonical(method, path []byte, params *[]Param) Handle
 	switch len(method) {
 	case 3:
 		if method[0] == 'G' && method[1] == 'E' && method[2] == 'T' {
-			return r.findNoLockBytesFast(r.fastStaticGET, r.staticGET, r.fastGET, r.treeGET, path, params)
+			return r.findNoLockBytesCore(r.staticShortcutGET, r.staticGET, r.paramGET, r.treeGET, path, params)
 		}
 		if method[0] == 'P' && method[1] == 'U' && method[2] == 'T' {
-			return r.findNoLockBytesFast(r.fastStaticPUT, r.staticPUT, r.fastPUT, r.treePUT, path, params)
+			return r.findNoLockBytesCore(r.staticShortcutPUT, r.staticPUT, r.paramPUT, r.treePUT, path, params)
 		}
 	case 4:
 		if method[0] == 'P' && method[1] == 'O' && method[2] == 'S' && method[3] == 'T' {
-			return r.findNoLockBytesFast(r.fastStaticPOST, r.staticPOST, r.fastPOST, r.treePOST, path, params)
+			return r.findNoLockBytesCore(r.staticShortcutPOST, r.staticPOST, r.paramPOST, r.treePOST, path, params)
 		}
 		if method[0] == 'H' && method[1] == 'E' && method[2] == 'A' && method[3] == 'D' {
-			if h := r.findNoLockBytesFast(r.fastStaticHEAD, r.staticHEAD, r.fastHEAD, r.treeHEAD, path, params); h != nil {
+			if h := r.findNoLockBytesCore(r.staticShortcutHEAD, r.staticHEAD, r.paramHEAD, r.treeHEAD, path, params); h != nil {
 				return h
 			}
-			return r.findNoLockBytesFast(r.fastStaticGET, r.staticGET, r.fastGET, r.treeGET, path, params)
+			return r.findNoLockBytesCore(r.staticShortcutGET, r.staticGET, r.paramGET, r.treeGET, path, params)
 		}
 	case 5:
 		if method[0] == 'P' && method[1] == 'A' && method[2] == 'T' && method[3] == 'C' && method[4] == 'H' {
-			return r.findNoLockBytesFast(r.fastStaticPATCH, r.staticPATCH, r.fastPATCH, r.treePATCH, path, params)
+			return r.findNoLockBytesCore(r.staticShortcutPATCH, r.staticPATCH, r.paramPATCH, r.treePATCH, path, params)
 		}
 		if method[0] == 'T' && method[1] == 'R' && method[2] == 'A' && method[3] == 'C' && method[4] == 'E' {
-			return r.findNoLockBytesFast(r.fastStaticTRACE, r.staticTRACE, r.fastTRACE, r.treeTRACE, path, params)
+			return r.findNoLockBytesCore(r.staticShortcutTRACE, r.staticTRACE, r.paramTRACE, r.treeTRACE, path, params)
 		}
 	case 6:
 		if method[0] == 'D' && method[1] == 'E' && method[2] == 'L' && method[3] == 'E' && method[4] == 'T' && method[5] == 'E' {
-			return r.findNoLockBytesFast(r.fastStaticDELETE, r.staticDELETE, r.fastDELETE, r.treeDELETE, path, params)
+			return r.findNoLockBytesCore(r.staticShortcutDELETE, r.staticDELETE, r.paramDELETE, r.treeDELETE, path, params)
 		}
 	case 7:
 		if method[0] == 'O' && method[1] == 'P' && method[2] == 'T' && method[3] == 'I' && method[4] == 'O' && method[5] == 'N' && method[6] == 'S' {
-			return r.findNoLockBytesFast(r.fastStaticOPTIONS, r.staticOPTIONS, r.fastOPTIONS, r.treeOPTIONS, path, params)
+			return r.findNoLockBytesCore(r.staticShortcutOPTIONS, r.staticOPTIONS, r.paramOPTIONS, r.treeOPTIONS, path, params)
 		}
 		if method[0] == 'C' && method[1] == 'O' && method[2] == 'N' && method[3] == 'N' && method[4] == 'E' && method[5] == 'C' && method[6] == 'T' {
-			return r.findNoLockBytesFast(r.fastStaticCONNECT, r.staticCONNECT, r.fastCONNECT, r.treeCONNECT, path, params)
+			return r.findNoLockBytesCore(r.staticShortcutCONNECT, r.staticCONNECT, r.paramCONNECT, r.treeCONNECT, path, params)
 		}
 	}
 	return r.findNoLockCanonical(b2s(method), path, params)
@@ -359,14 +370,14 @@ func (r *Router) findNoLock(method string, path []byte, params *[]Param) Handler
 }
 
 func (r *Router) findNoLockBytes(static map[string]HandlerFunc, root *node, path []byte, params *[]Param) HandlerFunc {
-	return r.findNoLockBytesFast(nil, static, nil, root, path, params)
+	return r.findNoLockBytesCore(nil, static, nil, root, path, params)
 }
 
-func (r *Router) findNoLockBytesFast(fastStatic []fastStaticRoute, static map[string]HandlerFunc, fast []fastParamRoute, root *node, path []byte, params *[]Param) HandlerFunc {
-	if h := matchFastStaticRoutes(fastStatic, path, params); h != nil {
+func (r *Router) findNoLockBytesCore(shortcuts []staticShortcut, static map[string]HandlerFunc, paramsShortcuts []paramShortcut, root *node, path []byte, params *[]Param) HandlerFunc {
+	if h := matchStaticShortcuts(shortcuts, path, params); h != nil {
 		return h
 	}
-	if h := matchFastParamRoutes(fast, path, params, r.UnsafeParams); h != nil {
+	if h := matchParamShortcuts(paramsShortcuts, path, params, r.UnsafeParams); h != nil {
 		return h
 	}
 	if static != nil {
@@ -556,30 +567,117 @@ func (r *Router) methodsNoLock() []string {
 	return methods
 }
 
-func (r *Router) addFastStaticRoute(method string, fr fastStaticRoute) {
+func (r *Router) addStaticShortcut(method string, fr staticShortcut) {
 	switch method {
 	case "GET":
-		r.fastStaticGET = append(r.fastStaticGET, fr)
+		r.staticShortcutGET = append(r.staticShortcutGET, fr)
 	case "POST":
-		r.fastStaticPOST = append(r.fastStaticPOST, fr)
+		r.staticShortcutPOST = append(r.staticShortcutPOST, fr)
 	case "PUT":
-		r.fastStaticPUT = append(r.fastStaticPUT, fr)
+		r.staticShortcutPUT = append(r.staticShortcutPUT, fr)
 	case "DELETE":
-		r.fastStaticDELETE = append(r.fastStaticDELETE, fr)
+		r.staticShortcutDELETE = append(r.staticShortcutDELETE, fr)
 	case "PATCH":
-		r.fastStaticPATCH = append(r.fastStaticPATCH, fr)
+		r.staticShortcutPATCH = append(r.staticShortcutPATCH, fr)
 	case "HEAD":
-		r.fastStaticHEAD = append(r.fastStaticHEAD, fr)
+		r.staticShortcutHEAD = append(r.staticShortcutHEAD, fr)
 	case "OPTIONS":
-		r.fastStaticOPTIONS = append(r.fastStaticOPTIONS, fr)
+		r.staticShortcutOPTIONS = append(r.staticShortcutOPTIONS, fr)
 	case "CONNECT":
-		r.fastStaticCONNECT = append(r.fastStaticCONNECT, fr)
+		r.staticShortcutCONNECT = append(r.staticShortcutCONNECT, fr)
 	case "TRACE":
-		r.fastStaticTRACE = append(r.fastStaticTRACE, fr)
+		r.staticShortcutTRACE = append(r.staticShortcutTRACE, fr)
 	}
 }
 
-func matchFastStaticRoutes(routes []fastStaticRoute, path []byte, params *[]Param) HandlerFunc {
+func (r *Router) addPrebuiltResponse(method, path string, resp []byte) {
+	fr := prebuiltResponse{path: path, resp: resp}
+	switch method {
+	case "GET":
+		r.prebuiltGET = append(r.prebuiltGET, fr)
+	case "POST":
+		r.prebuiltPOST = append(r.prebuiltPOST, fr)
+	case "PUT":
+		r.prebuiltPUT = append(r.prebuiltPUT, fr)
+	case "DELETE":
+		r.prebuiltDELETE = append(r.prebuiltDELETE, fr)
+	case "PATCH":
+		r.prebuiltPATCH = append(r.prebuiltPATCH, fr)
+	case "HEAD":
+		r.prebuiltHEAD = append(r.prebuiltHEAD, fr)
+	case "OPTIONS":
+		r.prebuiltOPTIONS = append(r.prebuiltOPTIONS, fr)
+	case "CONNECT":
+		r.prebuiltCONNECT = append(r.prebuiltCONNECT, fr)
+	case "TRACE":
+		r.prebuiltTRACE = append(r.prebuiltTRACE, fr)
+	}
+}
+
+func (r *Router) registerPrebuiltResponse(method, path string, resp []byte) {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	path = normalizeRoutePath(method, path)
+	stable := append([]byte(nil), resp...)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.frozen.Load() {
+		panic("fh: cannot add static response after router is frozen")
+	}
+	r.addPrebuiltResponse(method, path, stable)
+}
+
+func (r *Router) FindPrebuiltResponseBytes(method, path []byte) []byte {
+	switch len(method) {
+	case 3:
+		if method[0] == 'G' && method[1] == 'E' && method[2] == 'T' {
+			return matchPrebuiltResponse(r.prebuiltGET, path)
+		}
+		if method[0] == 'P' && method[1] == 'U' && method[2] == 'T' {
+			return matchPrebuiltResponse(r.prebuiltPUT, path)
+		}
+	case 4:
+		if method[0] == 'P' && method[1] == 'O' && method[2] == 'S' && method[3] == 'T' {
+			return matchPrebuiltResponse(r.prebuiltPOST, path)
+		}
+		if method[0] == 'H' && method[1] == 'E' && method[2] == 'A' && method[3] == 'D' {
+			if resp := matchPrebuiltResponse(r.prebuiltHEAD, path); resp != nil {
+				return resp
+			}
+			return nil
+		}
+	case 5:
+		if method[0] == 'P' && method[1] == 'A' && method[2] == 'T' && method[3] == 'C' && method[4] == 'H' {
+			return matchPrebuiltResponse(r.prebuiltPATCH, path)
+		}
+		if method[0] == 'T' && method[1] == 'R' && method[2] == 'A' && method[3] == 'C' && method[4] == 'E' {
+			return matchPrebuiltResponse(r.prebuiltTRACE, path)
+		}
+	case 6:
+		if method[0] == 'D' && method[1] == 'E' && method[2] == 'L' && method[3] == 'E' && method[4] == 'T' && method[5] == 'E' {
+			return matchPrebuiltResponse(r.prebuiltDELETE, path)
+		}
+	case 7:
+		if method[0] == 'O' && method[1] == 'P' && method[2] == 'T' && method[3] == 'I' && method[4] == 'O' && method[5] == 'N' && method[6] == 'S' {
+			return matchPrebuiltResponse(r.prebuiltOPTIONS, path)
+		}
+		if method[0] == 'C' && method[1] == 'O' && method[2] == 'N' && method[3] == 'N' && method[4] == 'E' && method[5] == 'C' && method[6] == 'T' {
+			return matchPrebuiltResponse(r.prebuiltCONNECT, path)
+		}
+	}
+	return nil
+}
+
+func matchPrebuiltResponse(routes []prebuiltResponse, path []byte) []byte {
+	for i := range routes {
+		r := &routes[i]
+		if byteStringEqual(path, r.path) {
+			return r.resp
+		}
+	}
+	return nil
+}
+
+func matchStaticShortcuts(routes []staticShortcut, path []byte, params *[]Param) HandlerFunc {
 	for i := range routes {
 		r := &routes[i]
 		if byteStringEqual(path, r.path) {
@@ -604,44 +702,44 @@ func byteStringEqual(b []byte, s string) bool {
 	return true
 }
 
-func buildFastParamRoute(segments []string, h HandlerFunc) (fastParamRoute, bool) {
-	// Most REST benchmarks and many real APIs use /resource/:id. Matching this
+func buildParamShortcut(segments []string, h HandlerFunc) (paramShortcut, bool) {
+	// Most REST hot paths and many real APIs use /resource/:id. Matching this
 	// shape directly avoids trie recursion, map lookup for the dynamic segment,
 	// and endpoint param-key stitching on the hottest parameterized path.
 	if len(segments) != 2 || segments[0] == "" || segments[0][0] == ':' || segments[0][0] == '*' {
-		return fastParamRoute{}, false
+		return paramShortcut{}, false
 	}
 	param := segments[1]
 	if len(param) < 2 || param[0] != ':' {
-		return fastParamRoute{}, false
+		return paramShortcut{}, false
 	}
-	return fastParamRoute{prefix: "/" + segments[0] + "/", paramKey: param[1:], fn: h}, true
+	return paramShortcut{prefix: "/" + segments[0] + "/", paramKey: param[1:], fn: h}, true
 }
 
-func (r *Router) addFastParamRoute(method string, fr fastParamRoute) {
+func (r *Router) addParamShortcut(method string, fr paramShortcut) {
 	switch method {
 	case "GET":
-		r.fastGET = append(r.fastGET, fr)
+		r.paramGET = append(r.paramGET, fr)
 	case "POST":
-		r.fastPOST = append(r.fastPOST, fr)
+		r.paramPOST = append(r.paramPOST, fr)
 	case "PUT":
-		r.fastPUT = append(r.fastPUT, fr)
+		r.paramPUT = append(r.paramPUT, fr)
 	case "DELETE":
-		r.fastDELETE = append(r.fastDELETE, fr)
+		r.paramDELETE = append(r.paramDELETE, fr)
 	case "PATCH":
-		r.fastPATCH = append(r.fastPATCH, fr)
+		r.paramPATCH = append(r.paramPATCH, fr)
 	case "HEAD":
-		r.fastHEAD = append(r.fastHEAD, fr)
+		r.paramHEAD = append(r.paramHEAD, fr)
 	case "OPTIONS":
-		r.fastOPTIONS = append(r.fastOPTIONS, fr)
+		r.paramOPTIONS = append(r.paramOPTIONS, fr)
 	case "CONNECT":
-		r.fastCONNECT = append(r.fastCONNECT, fr)
+		r.paramCONNECT = append(r.paramCONNECT, fr)
 	case "TRACE":
-		r.fastTRACE = append(r.fastTRACE, fr)
+		r.paramTRACE = append(r.paramTRACE, fr)
 	}
 }
 
-func matchFastParamRoutes(routes []fastParamRoute, path []byte, params *[]Param, unsafeParams bool) HandlerFunc {
+func matchParamShortcuts(routes []paramShortcut, path []byte, params *[]Param, unsafeParams bool) HandlerFunc {
 	if len(routes) == 0 {
 		return nil
 	}
@@ -742,7 +840,7 @@ func insertRoute(
 ) {
 	if index == len(segments) {
 		if n.handler != nil {
-			panic(fmt.Sprintf("fasthttp: duplicate route %s %s", method, fullPath))
+			panic(fmt.Sprintf("fh: duplicate route %s %s", method, fullPath))
 		}
 
 		n.handler = &routeEndpoint{
@@ -756,7 +854,7 @@ func insertRoute(
 	seg := segments[index]
 
 	if seg == "" {
-		panic(fmt.Sprintf("fasthttp: empty path segment in route %s %s", method, fullPath))
+		panic(fmt.Sprintf("fh: empty path segment in route %s %s", method, fullPath))
 	}
 
 	switch {
@@ -785,7 +883,7 @@ func insertRoute(
 		}
 
 		if index != len(segments)-1 {
-			panic(fmt.Sprintf("fasthttp: wildcard must be final segment in route %s %s", method, fullPath))
+			panic(fmt.Sprintf("fh: wildcard must be final segment in route %s %s", method, fullPath))
 		}
 
 		if n.wild == nil {
@@ -793,7 +891,7 @@ func insertRoute(
 			n.wildName = name
 		} else if n.wildName != name {
 			panic(fmt.Sprintf(
-				"fasthttp: conflicting wildcard name in route %s %s: existing *%s, new *%s",
+				"fh: conflicting wildcard name in route %s %s: existing *%s, new *%s",
 				method,
 				fullPath,
 				n.wildName,
@@ -922,11 +1020,11 @@ func normalizeRoutePath(method, path string) string {
 	}
 
 	if path[0] != '/' {
-		panic("fasthttp: route path must begin with '/'")
+		panic("fh: route path must begin with '/'")
 	}
 
 	if len(path) > 1 && strings.Contains(path, "//") {
-		panic("fasthttp: route path must not contain duplicate slashes")
+		panic("fh: route path must not contain duplicate slashes")
 	}
 
 	return path
@@ -975,7 +1073,7 @@ func nextSegment(path []byte) (seg, rest []byte) {
 
 func validateStaticSegment(method, fullPath, seg string) {
 	if seg == "" {
-		panic(fmt.Sprintf("fasthttp: empty path segment in route %s %s", method, fullPath))
+		panic(fmt.Sprintf("fh: empty path segment in route %s %s", method, fullPath))
 	}
 
 	if seg[0] == ':' || seg[0] == '*' {
@@ -984,7 +1082,7 @@ func validateStaticSegment(method, fullPath, seg string) {
 
 	if strings.ContainsAny(seg, ":*") {
 		panic(fmt.Sprintf(
-			"fasthttp: ':' or '*' must appear only at the beginning of a segment in route %s %s",
+			"fh: ':' or '*' must appear only at the beginning of a segment in route %s %s",
 			method,
 			fullPath,
 		))
@@ -993,7 +1091,7 @@ func validateStaticSegment(method, fullPath, seg string) {
 
 func validateParamName(method, fullPath, name string) {
 	if name == "" {
-		panic(fmt.Sprintf("fasthttp: empty route parameter in route %s %s", method, fullPath))
+		panic(fmt.Sprintf("fh: empty route parameter in route %s %s", method, fullPath))
 	}
 
 	for i := 0; i < len(name); i++ {
@@ -1007,7 +1105,7 @@ func validateParamName(method, fullPath, name string) {
 
 		if !ok {
 			panic(fmt.Sprintf(
-				"fasthttp: invalid route parameter %q in route %s %s",
+				"fh: invalid route parameter %q in route %s %s",
 				name,
 				method,
 				fullPath,
@@ -1070,62 +1168,61 @@ func paramValue(b []byte, unsafeMode bool) string {
 	return string(b)
 }
 
-// GetText registers a static 200 OK text/plain endpoint with a prebuilt response
-// for the default high-throughput HTTP/1.1 mode. It falls back to SendString when
-// per-request response features such as Date, keep-alive headers, captures,
-// hooks, or close semantics are enabled.
-func (a *App) GetText(path, body string) *App {
-	return a.Get(path, StaticText(body))
+var staticHandlerResponses sync.Map // map[uintptr][]byte
+
+func registerStaticHandler(h HandlerFunc, response []byte) HandlerFunc {
+	staticHandlerResponses.Store(reflect.ValueOf(h).Pointer(), append([]byte(nil), response...))
+	return h
 }
 
-// GetJSONStatic registers a static 200 OK application/json endpoint with a
-// prebuilt response for literal JSON payloads.
-func (a *App) GetJSONStatic(path, body string) *App {
-	return a.Get(path, StaticJSON(body))
-}
-
-// GetJSONBytesStatic registers a static 200 OK application/json endpoint from
-// an already encoded JSON byte slice. The body is copied once at registration
-// so callers may safely reuse or mutate their source buffer.
-func (a *App) GetJSONBytesStatic(path string, body []byte) *App {
-	return a.Get(path, StaticJSONBytes(body))
+func prebuiltResponseForHandler(h HandlerFunc) []byte {
+	if h == nil {
+		return nil
+	}
+	if v, ok := staticHandlerResponses.Load(reflect.ValueOf(h).Pointer()); ok {
+		return v.([]byte)
+	}
+	return nil
 }
 
 // StaticText returns a handler for immutable text/plain responses.
 func StaticText(body string) HandlerFunc {
 	pre := prebuildStatic200(plainTextCT, []byte(body))
-	return func(c Ctx) error {
+	h := func(c Ctx) error {
 		if dc, ok := c.(*DefaultCtx); ok && dc.canStaticPrebuilt() {
 			dc.responded = true
 			return writeAll(dc.conn, pre)
 		}
 		return c.SendString(body)
 	}
+	return registerStaticHandler(h, pre)
 }
 
 // StaticJSON returns a handler for immutable application/json responses.
 func StaticJSON(body string) HandlerFunc {
 	pre := prebuildStatic200(jsonCT, []byte(body))
-	return func(c Ctx) error {
+	h := func(c Ctx) error {
 		if dc, ok := c.(*DefaultCtx); ok && dc.canStaticPrebuilt() {
 			dc.responded = true
 			return writeAll(dc.conn, pre)
 		}
 		return c.JSONString(body)
 	}
+	return registerStaticHandler(h, pre)
 }
 
 // StaticJSONBytes returns a handler for immutable pre-encoded JSON bytes.
 func StaticJSONBytes(body []byte) HandlerFunc {
 	stable := append([]byte(nil), body...)
 	pre := prebuildStatic200(jsonCT, stable)
-	return func(c Ctx) error {
+	h := func(c Ctx) error {
 		if dc, ok := c.(*DefaultCtx); ok && dc.canStaticPrebuilt() {
 			dc.responded = true
 			return writeAll(dc.conn, pre)
 		}
 		return c.JSONBytes(stable)
 	}
+	return registerStaticHandler(h, pre)
 }
 
 func prebuildStatic200(contentType, body []byte) []byte {
@@ -1143,6 +1240,21 @@ func (c *DefaultCtx) canStaticPrebuilt() bool {
 	return c.status == StatusOK &&
 		!c.responded &&
 		c.h2 == nil &&
+		c.bodyTransform == nil &&
+		!c.captureResponseBody &&
+		c.chCount == 0 &&
+		len(c.extraHeaders) == 0 &&
+		len(c.responseCookies) == 0 &&
+		len(c.responseTrailers) == 0 &&
+		len(c.beforeResponse) == 0 &&
+		c.Header.KeepAlive &&
+		!c.forceClose &&
+		!methodIs(c.Header.Method, 'H', 'E', 'A', 'D') &&
+		!c.server.cfg.SendDateHeader && !c.server.cfg.SendKeepAliveHeader
+}
+
+func (c *DefaultCtx) canRouteStaticPrebuilt() bool {
+	return c.h2 == nil &&
 		c.bodyTransform == nil &&
 		!c.captureResponseBody &&
 		c.chCount == 0 &&

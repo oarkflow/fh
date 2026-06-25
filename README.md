@@ -467,7 +467,7 @@ Optional interfaces: `ContentTypeAwareCodec` (response encoding), `EncoderCodec`
 Self-contained in `http2.go` with `pkg/hpack`:
 
 - **Framing**: DATA, HEADERS, PRIORITY, RST_STREAM, SETTINGS, PUSH_PROMISE, PING, GOAWAY, WINDOW_UPDATE, CONTINUATION
-- **HPACK**: Custom implementation (~36% faster static-table decode vs `golang.org/x/net/http2/hpack`)
+- **HPACK**: Custom implementation (~36% lower-latency static-table decode vs `golang.org/x/net/http2/hpack`)
 - **Stream multiplexing**: `sync.Map`-backed stream table with flow control
 - **H2C**: Prior knowledge (direct `PRI * HTTP/2.0`) and upgrade (`Upgrade: h2c`)
 - **TLS ALPN**: Automatic via `ListenTLS` with `h2` protocol negotiation

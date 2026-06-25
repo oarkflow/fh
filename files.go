@@ -42,17 +42,17 @@ func (c *DefaultCtx) FormFile(field string) (*MultipartFile, error) {
 // SaveFile persists an uploaded file to an explicit destination.
 func (c *DefaultCtx) SaveFile(file *MultipartFile, dst string) error {
 	if file == nil {
-		return errors.New("fasthttp: nil uploaded file")
+		return errors.New("fh: nil uploaded file")
 	}
 	return file.Save(dst)
 }
 
 func saveUploadedFile(dst string, data []byte, mode fs.FileMode) error {
 	if dst == "" {
-		return errors.New("fasthttp: empty file destination")
+		return errors.New("fh: empty file destination")
 	}
 	dir := filepath.Dir(dst)
-	tmp, err := os.CreateTemp(dir, ".fasthttp-upload-*")
+	tmp, err := os.CreateTemp(dir, ".fh-upload-*")
 	if err != nil {
 		return err
 	}

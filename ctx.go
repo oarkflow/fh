@@ -934,7 +934,7 @@ func (c *DefaultCtx) EchoJSON(validate ...bool) error {
 func (c *DefaultCtx) Render(name string, data any, layout ...string) error {
 	engine := c.server.cfg.TemplateEngine
 	if engine == nil {
-		return NewHTTPError(StatusInternalServerError, "TEMPLATE_ENGINE_MISSING", "fasthttp: no template engine configured")
+		return NewHTTPError(StatusInternalServerError, "TEMPLATE_ENGINE_MISSING", "fh: no template engine configured")
 	}
 	var buf bytes.Buffer
 	if err := engine.Render(&buf, name, data, layout...); err != nil {
@@ -993,7 +993,7 @@ type contextFlashStore interface {
 func (c *DefaultCtx) Flash(key string, value ...any) any {
 	store, ok := c.Locals("session").(contextFlashStore)
 	if !ok {
-		panic("fasthttp: flash messages require session middleware")
+		panic("fh: flash messages require session middleware")
 	}
 	return store.Flash(key, value...)
 }
@@ -1024,8 +1024,8 @@ func (c *DefaultCtx) writeResponseString(s string) error {
 	} else {
 		c.responseBody = c.responseBody[:0]
 	}
-	if c.canFastWrite200() {
-		return c.writeFast200String(s)
+	if c.canDirectWrite200() {
+		return c.writeDirect200String(s)
 	}
 	if c.h2 != nil {
 		return c.h2.writeResponse(c, []byte(s))
@@ -1328,8 +1328,8 @@ func (c *DefaultCtx) writeResponse(body []byte) error {
 	} else {
 		c.responseBody = c.responseBody[:0]
 	}
-	if c.canFastWrite200() {
-		return c.writeFast200Bytes(body)
+	if c.canDirectWrite200() {
+		return c.writeDirect200Bytes(body)
 	}
 	if c.h2 != nil {
 		return c.h2.writeResponse(c, body)
@@ -1435,13 +1435,13 @@ func (c *DefaultCtx) writeResponse(body []byte) error {
 	return writeAll(c.conn, buf)
 }
 
-func (c *DefaultCtx) canFastWrite200() bool {
+func (c *DefaultCtx) canDirectWrite200() bool {
 	return !c.responded && c.status == StatusOK && c.h2 == nil && c.bodyTransform == nil && !c.captureResponseBody &&
 		c.chCount == 0 && len(c.extraHeaders) == 0 && len(c.responseCookies) == 0 && len(c.responseTrailers) == 0 &&
 		len(c.beforeResponse) == 0 && !methodIs(c.Header.Method, 'H', 'E', 'A', 'D')
 }
 
-func (c *DefaultCtx) writeFast200String(s string) error {
+func (c *DefaultCtx) writeDirect200String(s string) error {
 	c.responded = true
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
@@ -1471,7 +1471,7 @@ func (c *DefaultCtx) writeFast200String(s string) error {
 	return writeAll(c.conn, buf)
 }
 
-func (c *DefaultCtx) writeFast200Bytes(body []byte) error {
+func (c *DefaultCtx) writeDirect200Bytes(body []byte) error {
 	c.responded = true
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()

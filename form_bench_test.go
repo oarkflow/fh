@@ -14,7 +14,7 @@ func BenchmarkParseFormBytesSimple(b *testing.B) {
 }
 
 func BenchmarkParseFormBytesNested(b *testing.B) {
-	data := []byte("user[name]=John&user[age]=30&user[address][city]=NYC&user[address][state]=NY&tags[]=go&tags[]=fast&tags[]=http")
+	data := []byte("user[name]=John&user[age]=30&user[address][city]=NYC&user[address][state]=NY&tags[]=go&tags[]=core&tags[]=http")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

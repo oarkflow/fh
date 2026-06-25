@@ -779,6 +779,18 @@ func parseTransferCoding(val []byte) (chunked bool, ok bool) {
 	return false, true
 }
 
+// parseIntDecimal parses a decimal integer from bytes without allocation.
+func parseIntDecimal(b []byte) int {
+	n := 0
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
 func BytesEqualFold(a, b []byte) bool {
 	return bytesEqualFold(a, b)
 }

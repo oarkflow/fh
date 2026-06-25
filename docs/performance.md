@@ -4,12 +4,12 @@ fh's default runtime now keeps the secure parser and reliability hooks available
 
 ## What changed
 
-- `FastMode` is now enabled by default. The old code documented this behavior but did not actually set the default.
+- The normal request path now includes the zero-copy and low-allocation optimizations directly; there is no separate mode or duplicate API surface.
 - Requests with no write timeout reuse the connection context instead of allocating a new `context.WithCancel` object per request.
-- `OriginalURL()` is preserved without copying the URI on every request. The slice is valid for the request lifetime, which is the same lifetime expected by route params in fast mode.
+- `OriginalURL()` is preserved without copying the URI on every request. The slice is valid for the request lifetime, which is the same lifetime expected by route params in zero-copy mode.
 - Common route methods (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`, `CONNECT`, `TRACE`) use cached router pointers instead of a method map lookup per request.
 - `Expect`, `Upgrade`, and `HTTP2-Settings` are captured while parsing headers, so ordinary HTTP/1 requests avoid repeated header scans for 100-continue and h2c upgrade checks.
-- `Ctx.JSON(map[string]string)` and `Ctx.JSON(map[string]any)` use a direct append encoder for common small objects. `JSONAppend`, `JSONString`, `JSONBytes`, and `EchoJSON` remain the fastest APIs for known payloads and echo/proxy endpoints.
+- `Ctx.JSON(map[string]string)` and `Ctx.JSON(map[string]any)` use a direct append encoder for common small objects. `JSONAppend`, `JSONString`, `JSONBytes`, and `EchoJSON` remain the lowest-allocation APIs for known payloads and echo/proxy endpoints.
 
 ## Benchmark-mode configuration
 
@@ -17,8 +17,7 @@ For HTTP/1-only throughput comparisons, disable h2c detection explicitly:
 
 ```go
 app := fh.New(
-    fh.WithFastMode(true),
-    fh.WithDisableHTTP2(true),
+        fh.WithDisableHTTP2(true),
 )
 ```
 

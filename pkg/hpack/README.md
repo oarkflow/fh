@@ -19,7 +19,7 @@ A complete, production-ready implementation of [RFC 7541](https://httpwg.org/spe
 
 ### 1 — Zero allocation on static-table hot path
 
-One-byte indexed fields that map to static table entries use a dedicated fast path and
+One-byte indexed fields that map to static table entries use a dedicated hot path and
 decode with **0 B/op, 0 allocs/op**.
 The emit callback receives a `HeaderField` whose `Name`/`Value` strings point directly into
 the static table's pre-interned backing — no copy, no heap allocation.
@@ -29,7 +29,7 @@ BenchmarkComparison/DecodeStatic/Custom   54M ops   22.1 ns/op   0 B/op   0 allo
 BenchmarkComparison/DecodeStatic/XNet     34M ops   34.9 ns/op   0 B/op   0 allocs/op
 ```
 
-On an Apple M2 Pro with Go 1.25, the custom static-table path is about 36% faster
+On an Apple M2 Pro with Go 1.25, the custom static-table path is about 36% lower-latency
 than `golang.org/x/net/http2/hpack` v0.56.0. Run `go test ./pkg/hpack -run '^$'
 -bench BenchmarkComparison -benchmem` to reproduce the comparison on your CPU.
 
@@ -203,7 +203,7 @@ go test -fuzz=FuzzDecode -fuzztime=60s
 ## Package path
 
 ```
-github.com/orgware/fasthttp/hpack
+github.com/oarkflow/fh/pkg/hpack
 ```
 
 Replace `golang.org/x/net/http2/hpack` imports with the above. The public API

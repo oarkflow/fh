@@ -41,4 +41,4 @@ app.Use(lifecycle.New(lifecycle.Hooks{
 
 ## Best practice
 
-Keep lifecycle hooks fast and non-blocking. Use them to enqueue audit events or update metrics, not to perform slow external calls inline.
+Keep lifecycle hooks lightweight and non-blocking. Use them to enqueue audit events or update metrics, not to perform slow external calls inline.

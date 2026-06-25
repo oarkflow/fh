@@ -40,7 +40,7 @@ app.Use("/payments", breaker.Handler())
 ## States
 
 - `closed`: requests pass normally.
-- `open`: requests fail fast until `ResetAfter` passes.
+- `open`: requests fail immediately until `ResetAfter` passes.
 - `half-open`: limited trial state; closes after enough successes.
 
 ## Best practice

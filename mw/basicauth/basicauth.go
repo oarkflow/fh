@@ -281,7 +281,7 @@ func equalFoldASCII(a, b string) bool {
 }
 
 func isHTTPS(ctx fh.Ctx, trustProxy bool) bool {
-	// This keeps compatibility with custom fasthttp-like contexts.
+	// This keeps compatibility with custom fh-like contexts.
 	// If your Ctx exposes TLS state directly, you can customize this logic.
 
 	if trustProxy {

@@ -113,7 +113,7 @@ type Decoder struct {
 	headerBytes    uint32 // accumulated size of current header block
 
 	// buf is the current working slice. It is either p passed to Write
-	// (zero-copy fast path) or saveBuf.Bytes() (continuation path).
+	// (zero-copy hot path) or saveBuf.Bytes() (continuation path).
 	buf []byte
 
 	// saveBuf holds leftover bytes across Write calls.
@@ -421,7 +421,7 @@ func (d *Decoder) readString(p []byte) (u undecodedStr, remain []byte, err error
 
 func (d *Decoder) decodeString(u undecodedStr) (string, error) {
 	if !u.isHuff {
-		// Fast path: no copy needed; the string is valid for the duration
+		// Hot path: no copy needed; the string is valid for the duration
 		// of Write. Callers that store header fields must copy.
 		return string(u.b), nil
 	}

@@ -87,7 +87,7 @@ func TestJSONEngineStructuredSuffix(t *testing.T) {
 	}
 }
 
-func TestJSONAppenderAndUnmarshalerFastPaths(t *testing.T) {
+func TestJSONAppenderAndUnmarshalerDirectPaths(t *testing.T) {
 	out, err := EncodeBody("application/json", appPayload{V: "ok"})
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestJSONAppenderAndUnmarshalerFastPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !u.Seen {
-		t.Fatalf("UnmarshalJSON fast path was not used")
+		t.Fatalf("UnmarshalJSON hot path was not used")
 	}
 }
 

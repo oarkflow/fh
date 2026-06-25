@@ -31,7 +31,7 @@ type Cookie struct {
 	Partitioned bool
 }
 
-var ErrInvalidCookie = errors.New("fasthttp: invalid cookie")
+var ErrInvalidCookie = errors.New("fh: invalid cookie")
 
 // Valid checks RFC 6265 syntax and security invariants for cookie prefixes,
 // SameSite=None, and partitioned cookies.

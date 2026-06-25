@@ -17,8 +17,8 @@ import (
 )
 
 var (
-	ErrInvalidSessionSecret = errors.New("fasthttp: session secret must contain at least 32 bytes")
-	ErrInvalidSession       = errors.New("fasthttp: invalid session")
+	ErrInvalidSessionSecret = errors.New("fh: session secret must contain at least 32 bytes")
+	ErrInvalidSession       = errors.New("fh: invalid session")
 )
 
 type Session struct {
@@ -30,7 +30,7 @@ type Session struct {
 	destroyed bool
 }
 
-const flashKey = "__fasthttp_flash"
+const flashKey = "__fh_flash"
 
 // Flash stores a value for the next request. Called without a value, it
 // retrieves and consumes the stored value.
@@ -205,7 +205,7 @@ func SessionDomain(domain string) SessionOption { return func(m *SessionManager)
 
 func NewSessionManager(store SessionStore, opts ...SessionOption) *SessionManager {
 	if store == nil {
-		panic("fasthttp: nil session store")
+		panic("fh: nil session store")
 	}
 	m := &SessionManager{
 		store:      store,
@@ -222,7 +222,7 @@ func NewSessionManager(store SessionStore, opts ...SessionOption) *SessionManage
 	if len(m.secrets) == 0 {
 		b := make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, b); err != nil {
-			panic(fmt.Errorf("fasthttp: session randomness: %w", err))
+			panic(fmt.Errorf("fh: session randomness: %w", err))
 		}
 		m.secrets = [][]byte{b}
 	}
@@ -244,7 +244,7 @@ func NewSessionManager(store SessionStore, opts ...SessionOption) *SessionManage
 func generateSessionID() string {
 	b := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, b); err != nil {
-		panic(fmt.Errorf("fasthttp: session randomness: %w", err))
+		panic(fmt.Errorf("fh: session randomness: %w", err))
 	}
 	return hex.EncodeToString(b)
 }
