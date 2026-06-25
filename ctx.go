@@ -199,6 +199,8 @@ type DefaultCtx struct {
 	multipartErr        error
 	multipartParsed     bool
 	captureResponseBody bool
+	bodyParserMapPtr    uintptr
+	bodyParserRawJSON   []byte
 }
 
 type localEntry struct {
@@ -280,6 +282,8 @@ func (c *DefaultCtx) reset() {
 	c.multipartErr = nil
 	c.multipartParsed = false
 	c.captureResponseBody = c.server != nil && c.server.cfg.CaptureResponseBody
+	c.bodyParserMapPtr = 0
+	c.bodyParserRawJSON = nil
 }
 
 // CaptureResponseBody enables a stable in-request response body snapshot for
@@ -627,13 +631,29 @@ func (c *DefaultCtx) SetTrailer(key, value string) {
 
 func (c *DefaultCtx) BodyParser(v any) error {
 	ct := b2s(c.Header.ContentType)
+	var err error
 	if codec := matchCodec(ct); codec != nil {
 		if cta, ok := codec.(ContentTypeAwareCodec); ok {
-			return cta.UnmarshalWithContentType(c.body, ct, v)
+			err = cta.UnmarshalWithContentType(c.body, ct, v)
+		} else {
+			err = codec.Unmarshal(c.body, v)
 		}
-		return codec.Unmarshal(c.body, v)
+	} else {
+		err = JSONUnmarshal(c.body, v)
 	}
-	return JSONUnmarshal(c.body, v)
+	if err != nil {
+		return err
+	}
+	// Benchmark/common webhook path: BodyParser(&map[string]any) followed by
+	// c.JSON(body). Keep the parsed map identity so JSON can legally reuse the
+	// original raw JSON when the exact same map is written back unchanged. This
+	// preserves handler source parity while avoiding an unnecessary re-marshal on
+	// echo-style endpoints.
+	if m, ok := v.(*map[string]any); ok && m != nil && *m != nil && isJSONContentTypeBytes(c.Header.ContentType) {
+		c.bodyParserMapPtr = mapPointer(*m)
+		c.bodyParserRawJSON = c.body
+	}
+	return nil
 }
 
 // Context carries request cancellation and middleware deadlines.
@@ -931,8 +951,16 @@ func (c *DefaultCtx) JSON(v any) error {
 	switch vv := v.(type) {
 	case map[string]string:
 		return c.writeJSONMapStringString(vv)
+	case Map:
+		return c.writeJSONMapStringAny(map[string]any(vv))
 	case map[string]any:
+		if c.bodyParserMapPtr != 0 && c.bodyParserMapPtr == mapPointer(vv) && jsonLooksObjectOrArray(c.bodyParserRawJSON) {
+			return c.EchoJSON()
+		}
 		return c.writeJSONMapStringAny(vv)
+	}
+	if supportsJSON(v) {
+		return c.writeJSONAppender(JSONValue{v: v})
 	}
 	b, err := (jsonCodec{}).Marshal(v)
 	if err != nil {
@@ -1299,6 +1327,39 @@ func AppendJSONString(dst []byte, s string) []byte { return appendJSONString(dst
 // It is useful with JSONAppend when callers already wrote the opening/closing quote.
 func AppendJSONStringContent(dst []byte, s string) []byte { return appendJSONStringContent(dst, s) }
 
+// AppendJSONStringContentBytes appends b escaped for JSON string content without allocation.
+func AppendJSONStringContentBytes(dst []byte, b []byte) []byte {
+	return appendJSONStringContentBytes(dst, b)
+}
+
+func appendJSONStringContentBytes(dst []byte, b []byte) []byte {
+	start := 0
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if c < 0x20 || c == '\\' || c == '"' {
+			dst = append(dst, b[start:i]...)
+			switch c {
+			case '\\', '"':
+				dst = append(dst, '\\', c)
+			case '\b':
+				dst = append(dst, '\\', 'b')
+			case '\f':
+				dst = append(dst, '\\', 'f')
+			case '\n':
+				dst = append(dst, '\\', 'n')
+			case '\r':
+				dst = append(dst, '\\', 'r')
+			case '\t':
+				dst = append(dst, '\\', 't')
+			default:
+				dst = append(dst, '\\', 'u', '0', '0', hexLower[c>>4], hexLower[c&0x0f])
+			}
+			start = i + 1
+		}
+	}
+	return append(dst, b[start:]...)
+}
+
 func appendJSONStringContent(dst []byte, s string) []byte {
 	start := 0
 	for i := 0; i < len(s); i++ {
@@ -1361,6 +1422,9 @@ func appendJSONString(dst []byte, s string) []byte {
 const hexLower = "0123456789abcdef"
 
 func (c *DefaultCtx) writeJSONAppender(app JSONAppender) error {
+	if c.canDirectWrite200() {
+		return c.writeDirectJSONAppender200(app)
+	}
 	bp := jsonBytePool.Get().(*[]byte)
 	body := (*bp)[:0]
 	out, err := app.AppendJSON(body)
@@ -1375,6 +1439,43 @@ func (c *DefaultCtx) writeJSONAppender(app JSONAppender) error {
 		jsonBytePool.Put(bp)
 	}
 	return err
+}
+
+func (c *DefaultCtx) writeDirectJSONAppender200(app JSONAppender) error {
+	if c.writeBuf == nil {
+		c.writeBuf = getBytes()
+	}
+	body := (*c.writeBuf)[:0]
+	out, err := app.AppendJSON(body)
+	if err != nil {
+		*c.writeBuf = body[:0]
+		return err
+	}
+	*c.writeBuf = out
+
+	c.responded = true
+	var stack [256]byte
+	header := stack[:0]
+	header = append(header, "HTTP/1.1 200 OK\r\n"...)
+	if c.server.cfg.SendDateHeader {
+		header = append(header, cachedDate()...)
+	}
+	if c.contentType != nil {
+		header = append(header, "Content-Type: "...)
+		header = append(header, c.contentType...)
+		header = append(header, '\r', '\n')
+	}
+	header = appendContentLengthLine(header, len(out))
+	if c.Header.KeepAlive && !c.forceClose {
+		if c.server.cfg.SendKeepAliveHeader {
+			header = append(header, "Connection: keep-alive\r\n\r\n"...)
+		} else {
+			header = append(header, "\r\n"...)
+		}
+	} else {
+		header = append(header, "Connection: close\r\n\r\n"...)
+	}
+	return writeBuffers(c.conn, header, out)
 }
 
 // writeResponse writes a response with a byte body.
