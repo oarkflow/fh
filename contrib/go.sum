@@ -57,6 +57,8 @@ github.com/oarkflow/squealx v0.0.77 h1:IxFB69OBpHokig6QI8jAi+q3SLvK1qZdt9G4XIEVD
 github.com/oarkflow/squealx v0.0.77/go.mod h1:g1gFAKTLoN7DYbXNk7dqqtH5kRTbDqsTVxEgJdF5fSA=
 github.com/oarkflow/tcpguard v0.0.14 h1:GEQFyxB+mqs94khLfbHy2QB1uYO1XmsgaSSyBWk5dMg=
 github.com/oarkflow/tcpguard v0.0.14/go.mod h1:wS0xTHqdbkaPOK28IF+uEH3SEfXdFV4heZHQYu5HOKM=
+github.com/oarkflow/zlog v0.0.1 h1:mVTeTdJyflOrlKcUKOWoilx8CQc5aV52GEW4VIgnjpE=
+github.com/oarkflow/zlog v0.0.1/go.mod h1:zMwaPtZMtZzOwVqTuWpS6m0O3i5/Wn8wDmoiwAPXzRE=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
