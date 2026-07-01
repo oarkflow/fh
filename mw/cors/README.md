@@ -1,43 +1,38 @@
-# cors middleware
+# CORS Middleware
 
-`cors` handles Cross-Origin Resource Sharing for browser clients, including preflight requests, static origin lists, dynamic origin functions, and origin stores.
+## What it does
 
-## Import
+Applies Cross-Origin Resource Sharing headers and handles preflight requests for browser clients.
 
-```go
-import "github.com/oarkflow/fh/mw/cors"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Use(cors.New(cors.Config{
-    AllowOrigins: []string{"https://app.example.com"},
-    AllowMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-    AllowHeaders: []string{"Authorization", "Content-Type", "X-Request-ID"},
-    ExposeHeaders: []string{"X-Request-ID"},
-    MaxAge: 86400,
-}))
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/cors"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(cors.New(cors.Config{AllowOrigins: []string{"https://example.com"}}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Dynamic origins
+## Impact
 
-```go
-app.Use(cors.New(cors.Config{
-    AllowOriginFunc: func(c *fh.Ctx, origin string) bool {
-        return strings.HasSuffix(origin, ".example.com")
-    },
-    AllowCredentials: true,
-}))
-```
+Enables browser integrations while controlling which origins, methods, and headers are allowed.
 
-## Origin store
+## Ordering guidance
 
-```go
-store := cors.NewMemoryOriginStore("https://admin.example.com")
-app.Use(cors.New(cors.Config{OriginStore: store}))
-```
+Run before authentication for preflight handling, but ensure actual protected requests still pass auth.
 
-## Best practice
+## Production considerations
 
-Never use wildcard origins with credentials. Keep CORS as narrow as possible and place it before auth middleware so preflight requests do not fail authentication.
+Avoid `*` with credentials. Prefer explicit origins, methods, and headers. Log unexpected origins during rollout.
+

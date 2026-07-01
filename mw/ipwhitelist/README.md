@@ -1,45 +1,38 @@
-# ipwhitelist middleware
+# IP Whitelist Middleware
 
-`ipwhitelist` enforces IP/CIDR allowlists and blocklists. It supports in-memory stores, custom stores, trusted proxy handling, and custom forbidden responses.
+## What it does
 
-## Import
+Allows only configured client IPs or CIDR ranges. It is useful for admin routes, partner callbacks, and internal endpoints.
 
-```go
-import "github.com/oarkflow/fh/mw/ipwhitelist"
-```
-
-## Simple allowlist
+## How to implement
 
 ```go
-app.Use(ipwhitelist.New("127.0.0.1", "10.0.0.0/8", "192.168.1.0/24"))
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/ipwhitelist"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(ipwhitelist.New("10.0.0.0/8", "127.0.0.1"))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Allowlist and blocklist
+## Impact
 
-```go
-store := ipwhitelist.MustMemoryStore("10.0.0.0/8")
+Low overhead. Blocks unauthorized networks before expensive processing.
 
-app.Use(ipwhitelist.NewWithConfig(ipwhitelist.Config{
-    Store: store,
-    Blocked: []string{"10.0.4.20", "203.0.113.0/24"},
-    TrustProxy: true,
-    Forbidden: func(c *fh.Ctx) error {
-        return c.Status(fh.StatusForbidden).JSON(fh.Map{"error": "ip_forbidden"})
-    },
-}))
-```
+## Ordering guidance
 
-## Custom key function
+Run early, after real IP/proxy header middleware if behind a trusted proxy.
 
-```go
-app.Use(ipwhitelist.NewWithConfig(ipwhitelist.Config{
-    Store: ipwhitelist.MustMemoryStore("198.51.100.10"),
-    KeyFunc: func(c *fh.Ctx) string {
-        return c.Get("X-Real-IP")
-    },
-}))
-```
+## Production considerations
 
-## Best practice
+Only trust forwarded headers from known proxies. Keep allowlists updated and include monitoring for denied requests.
 
-Only trust forwarded IP headers when the request comes through your own reverse proxy/load balancer. For public apps, prefer CIDR ranges from infrastructure and partner systems rather than individual dynamic IPs.

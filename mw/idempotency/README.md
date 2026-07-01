@@ -1,27 +1,36 @@
-# idempotency middleware
+# Idempotency Middleware
 
-`idempotency` computes and stores an idempotency key in request locals. It is intentionally lightweight and works well with the core reliability layer.
+## What it does
 
-## Import
+Applies idempotency-key handling so unsafe operations can be retried without duplicate side effects.
 
-```go
-import "github.com/oarkflow/fh/mw/idempotency"
-```
-
-## Usage
+## How to implement
 
 ```go
-app.Post("/payments",
-    idempotency.New(func(c *fh.Ctx) string {
-        return c.Get("X-Tenant-ID") + ":payment:" + c.Get("X-External-ID")
-    }),
-    func(c *fh.Ctx) error {
-        key := c.Locals("idempotency_key")
-        return c.JSON(fh.Map{"idempotency_key": key})
-    },
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/idempotency"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(idempotency.New(func(c fh.Ctx) string { return c.Get("Idempotency-Key") }))
+
+	app.Post("/payments", func(c fh.Ctx) error { return c.JSON(fh.Map{"status":"accepted"}) })
+}
 ```
 
-## Best practice
+## Impact
 
-Use deterministic idempotency for externally retried operations such as payments, orders, invoice creation, email sending, and webhook processing. Combine this middleware with `mw/reliability` when response replay or body-drift conflict detection is required.
+Prevents duplicate writes from client retries and network failures. Storage choice determines durability and cluster safety.
+
+## Ordering guidance
+
+Run before handlers that perform side effects. Run after body limit and before transactional enqueue/outbox logic.
+
+## Production considerations
+
+Use distributed storage in multi-node deployments. Detect body-hash conflicts for reused keys. Set TTL and replay response policies.
+

@@ -1,71 +1,38 @@
-# ratelimiter middleware
+# Rate Limiter Middleware
 
-`ratelimiter` provides fixed-window rate limiting with a sharded in-memory store and standard rate-limit headers.
+## What it does
 
-## Import
+Limits request rate by IP, user, tenant, API key, or custom key to protect fairness and prevent abuse.
 
-```go
-import "github.com/oarkflow/fh/mw/ratelimiter"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Use(ratelimiter.New(ratelimiter.Config{
-    Max: 100,
-    Window: time.Minute,
-}))
-```
+package main
 
-## Per-user or per-tenant key
-
-```go
-app.Use(ratelimiter.New(ratelimiter.Config{
-    Max: 1000,
-    Window: time.Minute,
-    KeyFunc: func(c *fh.Ctx) string {
-        tenant := c.Get("X-Tenant-ID")
-        if tenant == "" {
-            tenant = c.IP()
-        }
-        return tenant
-    },
-}))
-```
-
-## Route-specific limit
-
-```go
-app.Post("/login",
-    ratelimiter.New(ratelimiter.Config{
-        Max: 5,
-        Window: time.Minute,
-        KeyFunc: func(c *fh.Ctx) string { return "login:" + c.IP() },
-    }),
-    login,
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/ratelimiter"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(ratelimiter.New(ratelimiter.Config{Limit: 100}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Custom rejection
+## Impact
 
-```go
-app.Use(ratelimiter.New(ratelimiter.Config{
-    Max: 10,
-    Window: time.Minute,
-    LimitReached: func(c *fh.Ctx, r ratelimiter.Result) error {
-        c.Set(ratelimiter.HeaderRetryAfter, strconv.Itoa(int(r.RetryAfter.Seconds())))
-        return c.Status(429).JSON(fh.Map{"error": "rate_limited"})
-    },
-}))
-```
+Controls abuse and overload. Store choice affects memory usage and multi-node correctness.
 
-## Response headers
+## Ordering guidance
 
-- `X-RateLimit-Limit`
-- `X-RateLimit-Remaining`
-- `X-RateLimit-Reset`
-- `Retry-After` when rejected
+Run after real IP and authentication if the key depends on client identity. Run before expensive handlers.
 
-## Best practice
+## Production considerations
 
-Use different keys and limits for unauthenticated IP traffic, authenticated users, tenants, login endpoints, and expensive endpoints.
+Use distributed stores for multi-node deployments. Return clear `429` responses with retry headers. Track limit hits by route and key type.
+

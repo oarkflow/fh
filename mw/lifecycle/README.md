@@ -1,44 +1,38 @@
-# lifecycle middleware
+# Lifecycle Middleware
 
-`lifecycle` runs hooks around request processing. It is useful for metrics, auditing, debugging, request state tracking, and cleanup.
+## What it does
 
-## Import
+Provides hooks around request start, before handler, after handler, error handling, and request end. It centralizes cross-cutting lifecycle behavior.
 
-```go
-import "github.com/oarkflow/fh/mw/lifecycle"
-```
-
-## Usage
+## How to implement
 
 ```go
-app.Use(lifecycle.New(lifecycle.Hooks{
-    OnRequestStart: func(c *fh.Ctx) {
-        c.Locals("started_at", time.Now())
-    },
-    OnBeforeHandler: func(c *fh.Ctx) {
-        log.Printf("start %s %s", c.Method(), c.Path())
-    },
-    OnError: func(c *fh.Ctx, err error) {
-        log.Printf("request failed: %v", err)
-    },
-    OnAfterHandler: func(c *fh.Ctx) {
-        log.Printf("status=%d", c.StatusCode())
-    },
-    OnRequestEnd: func(c *fh.Ctx) {
-        log.Printf("end %s %s", c.Method(), c.Path())
-    },
-}))
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/lifecycle"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(lifecycle.New(lifecycle.Hooks{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Hook order
+## Impact
 
-1. `OnRequestStart`
-2. `OnBeforeHandler`
-3. downstream middleware/handler
-4. `OnError` when the downstream returned an error
-5. `OnAfterHandler`
-6. `OnRequestEnd`
+Hook overhead depends on configured callbacks. Useful for instrumentation, cleanup, and compensation.
 
-## Best practice
+## Ordering guidance
 
-Keep lifecycle hooks lightweight and non-blocking. Use them to enqueue audit events or update metrics, not to perform slow external calls inline.
+Run near the outside of the middleware chain so it can observe most behavior.
+
+## Production considerations
+
+Hooks must be fast and safe. Do not panic in hooks. Avoid blocking external calls in lifecycle callbacks.
+

@@ -1,76 +1,38 @@
-# signature middleware
+# HMAC Signature Middleware
 
-`signature` verifies HMAC-SHA256 request signatures with timestamp tolerance, optional key IDs, secret rotation, and custom signed payloads.
+## What it does
 
-## Import
+Verifies signed requests using HMAC signatures, timestamps, and key resolution. It is useful for partner APIs and webhook-like endpoints.
 
-```go
-import "github.com/oarkflow/fh/mw/signature"
-```
-
-## Basic signed webhook
+## How to implement
 
 ```go
-app.Post("/webhooks/provider",
-    signature.New(signature.Config{
-        Secret: []byte(os.Getenv("WEBHOOK_SECRET")),
-        SignatureHeader: "X-Signature",
-        TimestampHeader: "X-Timestamp",
-        Scheme: "sha256=",
-        Tolerance: 5 * time.Minute,
-    }),
-    handleWebhook,
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/signature"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(signature.New(signature.Config{SecretResolver: func(c fh.Ctx, keyID string) [][]byte { return [][]byte{[]byte("secret")} }}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-The default signed payload is:
+## Impact
 
-```text
-<timestamp>.<raw body>
-```
+Adds body hashing and HMAC verification. Protects integrity and authenticity.
 
-## Multiple active secrets
+## Ordering guidance
 
-```go
-app.Use(signature.New(signature.Config{
-    Secrets: [][]byte{
-        []byte(os.Getenv("WEBHOOK_SECRET_CURRENT")),
-        []byte(os.Getenv("WEBHOOK_SECRET_PREVIOUS")),
-    },
-}))
-```
+Run after body limit/request hash and before handlers. Pair with replay protection.
 
-## Key ID resolver
+## Production considerations
 
-```go
-app.Use(signature.New(signature.Config{
-    KeyIDHeader: "X-Key-ID",
-    Resolve: func(c *fh.Ctx, keyID string) [][]byte {
-        return lookupSecretsForKeyID(keyID)
-    },
-}))
-```
+Use timestamp skew limits, key IDs, key rotation, constant-time comparison, and distributed replay stores.
 
-## Custom payload
-
-```go
-app.Use(signature.New(signature.Config{
-    Secret: []byte("secret"),
-    SignedPayload: func(c *fh.Ctx, ts string) []byte {
-        return []byte(c.Method() + "." + c.Path() + "." + ts + "." + string(c.Body()))
-    },
-}))
-```
-
-## Generating a compatible signature
-
-```go
-payload := []byte(timestamp + "." + string(body))
-mac := hmac.New(sha256.New, secret)
-mac.Write(payload)
-sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
-```
-
-## Best practice
-
-Combine `signature` with `replay` or a durable nonce store. Rotate secrets by accepting current and previous secrets during the transition window.

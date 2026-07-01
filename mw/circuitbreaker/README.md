@@ -1,48 +1,36 @@
-# circuitbreaker middleware
+# Circuit Breaker Middleware
 
-`circuitbreaker` protects downstream services or expensive handlers by opening after repeated failures.
+## What it does
 
-## Import
+Stops calling unhealthy handlers or downstream paths after failures cross a threshold, then probes for recovery after a cooldown.
 
-```go
-import "github.com/oarkflow/fh/mw/circuitbreaker"
-```
-
-## Usage
+## How to implement
 
 ```go
-app.Get("/payments/status",
-    circuitbreaker.Middleware(circuitbreaker.Config{
-        FailureThreshold: 5,
-        SuccessThreshold: 2,
-        ResetAfter: 30 * time.Second,
-    }),
-    paymentStatus,
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/circuitbreaker"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(circuitbreaker.Middleware(circuitbreaker.Config{FailureThreshold: 5}))
+
+	app.Get("/", func(c fh.Ctx) error { return c.String(fh.StatusOK, "ok") })
+}
 ```
 
-## Custom failure detection
+## Impact
 
-```go
-breaker := circuitbreaker.New(circuitbreaker.Config{
-    FailureThreshold: 3,
-    IsFailure: func(c *fh.Ctx, err error) bool {
-        return err != nil || c.StatusCode() == 502 || c.StatusCode() == 503
-    },
-    OnOpen: func(c *fh.Ctx) error {
-        return c.Status(503).JSON(fh.Map{"error": "payments_unavailable"})
-    },
-})
+Prevents repeated expensive failures and gives dependencies time to recover. It may temporarily reject requests even after the underlying issue improves until half-open recovery succeeds.
 
-app.Use("/payments", breaker.Handler())
-```
+## Ordering guidance
 
-## States
+Place around handlers or route groups that depend on external systems. Usually after authentication and before proxy/DB/service calls.
 
-- `closed`: requests pass normally.
-- `open`: requests fail immediately until `ResetAfter` passes.
-- `half-open`: limited trial state; closes after enough successes.
+## Production considerations
 
-## Best practice
+Track breaker state with metrics and logs. Use fallback responses for non-critical features. Avoid one global breaker for unrelated dependencies.
 
-Use one breaker per downstream dependency or route group. Do not share one breaker across unrelated services.

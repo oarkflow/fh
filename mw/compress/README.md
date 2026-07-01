@@ -1,43 +1,38 @@
-# compress middleware
+# Compression Middleware
 
-`compress` applies gzip response compression when the client accepts it and the response is compressible.
+## What it does
 
-## Import
+Compresses eligible responses when the client supports an accepted encoding. It reduces bandwidth for text, JSON, HTML, and other compressible payloads.
 
-```go
-import "github.com/oarkflow/fh/mw/compress"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Use(compress.New())
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/compress"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(compress.New(compress.Config{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Custom configuration
+## Impact
 
-```go
-app.Use(compress.New(compress.Config{
-    Level: gzip.BestSpeed,
-    MinSize: 1024,
-    CompressibleTypes: []string{
-        "text/plain",
-        "text/html",
-        "application/json",
-        "application/javascript",
-        "text/css",
-    },
-}))
-```
+Saves network bandwidth at the cost of CPU. For small responses compression can hurt latency.
 
-## Behavior
+## Ordering guidance
 
-- Checks `Accept-Encoding` for gzip support.
-- Skips responses smaller than `MinSize`.
-- Skips non-compressible content types.
-- Adds `Content-Encoding: gzip` and `Vary: Accept-Encoding`.
-- Uses response body transforms, so middleware should be registered before handlers that send normal buffered responses.
+Run late enough to see the response body, but avoid compressing already-compressed assets. Usually after cache decisions.
 
-## Best practice
+## Production considerations
 
-Do not compress already-compressed content such as images, archives, video, or encrypted blobs. Avoid compressing sensitive cross-origin responses when compression side-channel risk matters.
+Set minimum body size. Disable or be careful for sensitive reflected content if BREACH-style risks apply. Do not compress images, archives, or already-compressed data.
+

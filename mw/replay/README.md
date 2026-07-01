@@ -1,43 +1,38 @@
-# replay middleware
+# Replay Protection Middleware
 
-`replay` rejects duplicate nonce/key values within a TTL window. It is useful with signed requests and webhook verification.
+## What it does
 
-## Import
+Rejects repeated requests within a TTL using a nonce/signature/key store. It is useful for signed webhooks and high-risk operations.
 
-```go
-import "github.com/oarkflow/fh/mw/replay"
-```
-
-## Usage
+## How to implement
 
 ```go
-app.Post("/webhook",
-    replay.New(replay.Config{
-        Header: "X-Nonce",
-        TTL: 5 * time.Minute,
-    }),
-    webhookHandler,
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/replay"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(replay.New(replay.Config{Store: replay.NewMemoryStore()}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Custom key
+## Impact
 
-```go
-app.Use(replay.New(replay.Config{
-    TTL: 10 * time.Minute,
-    Key: func(c *fh.Ctx) string {
-        return c.Get("X-Tenant-ID") + ":" + c.Get("X-Nonce")
-    },
-}))
-```
+Prevents replay attacks. Store cardinality and TTL affect memory/storage usage.
 
-## Custom store
+## Ordering guidance
 
-```go
-store := replay.NewMemoryStore()
-app.Use(replay.New(replay.Config{Store: store}))
-```
+Run after signature/key extraction and before side-effect handlers.
 
-## Best practice
+## Production considerations
 
-Use a shared durable store if multiple server instances must coordinate replay protection. Pair with `signature` for HMAC-signed requests.
+Use a distributed store for multi-node deployments. Include timestamp skew validation and key scoping.
+

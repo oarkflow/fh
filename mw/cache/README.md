@@ -1,52 +1,38 @@
-# cache middleware
+# Cache Middleware
 
-`cache` provides bounded in-memory response caching for safe responses. It is intended for GET/HEAD endpoints where a short TTL reduces repeated handler work.
+## What it does
 
-## Import
+Caches eligible responses using an in-memory or custom store. It can reduce handler work and improve latency for repeated safe requests.
 
-```go
-import "github.com/oarkflow/fh/mw/cache"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Get("/public/config",
-    cache.New(cache.Config{TTL: 30 * time.Second}),
-    func(c *fh.Ctx) error {
-        return c.JSON(loadPublicConfig())
-    },
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/cache"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(cache.New(cache.Config{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Custom cache key and vary headers
+## Impact
 
-```go
-app.Use(cache.New(cache.Config{
-    TTL: 5 * time.Minute,
-    MaxEntries: 4096,
-    MaxBodySize: 256 << 10,
-    VaryHeaders: []string{"Accept-Language"},
-    KeyGenerator: func(c *fh.Ctx) string {
-        return c.Method() + ":" + c.Path() + ":" + c.Query("page")
-    },
-}))
-```
+Can significantly reduce CPU/database load. Memory usage depends on response size, TTL, and key cardinality.
 
-## Behavior
+## Ordering guidance
 
-The middleware skips caching when:
+Run after request normalization and authentication only when cache keys include identity/tenant. Run before expensive handlers.
 
-- method is not configured, by default only `GET` and `HEAD`
-- `Authorization` is present
-- request cookies exist unless `AllowRequestCookies` is true
-- request `Cache-Control` includes `no-cache` or `no-store`
-- response sets cookies
-- response `Cache-Control` includes `private` or `no-store`
-- body exceeds `MaxBodySize`
+## Production considerations
 
-It sets `X-Cache: HIT` or `X-Cache: MISS`.
+Be careful with personalized responses. Include tenant/user/version/query in cache keys. Respect cache-control rules and avoid caching sensitive data.
 
-## Best practice
-
-Do not cache personalized or authorization-dependent responses unless your key includes the authenticated subject and you fully understand the data-leak risk.

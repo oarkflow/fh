@@ -1,36 +1,38 @@
-# recover middleware
+# Recover Middleware
 
-`recover` catches panics, logs them, and converts them into controlled errors instead of crashing the process.
+## What it does
 
-## Import
+Catches panics, logs stack traces when configured, and returns a controlled error response instead of crashing the process.
 
-```go
-import recovermw "github.com/oarkflow/fh/mw/recover"
-```
-
-The alias avoids colliding with Go's built-in `recover` function.
-
-## Basic usage
+## How to implement
 
 ```go
-app.Use(recovermw.New())
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/recover"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(recover.New(recover.Config{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Custom handler
+## Impact
 
-```go
-app.Use(recovermw.New(recovermw.Config{
-    EnableStackTrace: true,
-    StackTraceLimit: 32 << 10,
-    Handler: func(c *fh.Ctx, recovered any, stack []byte) error {
-        return c.Status(500).JSON(fh.Map{
-            "error": "internal_error",
-            "request_id": c.Locals("request_id"),
-        })
-    },
-}))
-```
+Improves service availability. It does not fix the underlying bug; it prevents a panic from killing the server.
 
-## Best practice
+## Ordering guidance
 
-Register `recover` as the first middleware. In production, return generic errors to clients and send detailed stack traces only to logs.
+Run near the beginning of the chain so it wraps most middleware and handlers.
+
+## Production considerations
+
+Log enough detail for debugging but do not leak stack traces to clients in production. Alert on recovered panics.
+

@@ -97,3 +97,12 @@ func (a *LogAdapter) log(level, msg string, args ...any) {
 	}
 	a.Logger.Print(b.String())
 }
+
+// Logger returns the application logger so middleware and integrations can emit
+// structured messages without reaching into App internals.
+func (a *App) Logger() Logger {
+	if a == nil || a.logger == nil {
+		return NewDefaultLogger()
+	}
+	return a.logger
+}

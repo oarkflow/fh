@@ -121,7 +121,7 @@ admin.Get("/", adminHandler)
 
 | Package | Description |
 |---|---|
-| `mw/basicauth` | HTTP Basic Authentication |
+| `mw/basicauth` | HTTP Basic Authentication with single-user, multi-user, storage-backed and dynamic provider modes |
 | `mw/bodylimit` | Request body size limit |
 | `mw/cache` | Response caching with TTL |
 | `mw/compress` | Gzip response compression |
@@ -795,6 +795,136 @@ examples/compliance-enterprise
 It demonstrates production compliance defaults, idempotent order creation, durable queued email, request journal, audit ledger, principal/tenant auth, scope checks, compliance evidence endpoints and admin status.
 
 
+## Latest middleware fixes
+
+- `mw/maintenance` now uses `Renderer fh.Handler` for custom maintenance pages. When `Path` and `Renderer` are configured, normal requests redirect to the maintenance page while the maintenance path renders through the handler.
+- `mw/basicauth` now supports multiple users through `NewFromUsers`, `NewFromPlainUsers`, `UsersProvider`, and `PlainUsersProvider`, while preserving the existing `New(username, password)` API.
+
 ## Performance
 
 See [docs/performance.md](docs/performance.md) for hot-path configuration, benchmark mode, and zero-allocation response APIs.
+
+## Production reliability and resilience additions
+
+This version includes additional non-duplicative production packages:
+
+- `storage/memory`: process-local journal, idempotency and queue adapters for tests, benchmarks and embedded deployments.
+- `storage/sql`: generic `database/sql` reliability adapters with schema generation/migration support for PostgreSQL, MySQL and SQLite-style deployments.
+- `mw/bulkhead`: concurrent request isolation.
+- `mw/backpressure`: queue-depth-based ingress protection.
+- `mw/loadshed`: in-flight/goroutine/heap based overload shedding.
+- `mw/realip`: trusted proxy real IP extraction.
+- `mw/hostguard`: host allow/deny protection.
+- `mw/maintenance`: runtime maintenance switch with optional bypass, JSON rejection, HTML rendering and redirect-to-maintenance-page support.
+- `mw/etag`: ETag and conditional request support.
+- `mw/tracing`: W3C traceparent propagation without third-party dependencies.
+- `mw/admin`: protected operational endpoints for runtime, routes and queue statistics.
+
+See `docs/PRODUCTION_FEATURES.md` and `examples/production` for usage.
+
+## Additional production modules
+
+The continuation package adds more non-overlapping production features:
+
+- `mw/jwt` for dependency-free HMAC JWT verification and `fh.Principal` population.
+- Authorization intentionally stays in the existing core helpers (`fh.RequireRole`, `fh.RequirePermission`, `fh.RequireScope`) and `contrib/mw/authz`; duplicate `mw/rbac`, `mw/abac`, and `mw/permissions` packages were removed.
+- `mw/webhook` for HMAC signed webhook verification with timestamp tolerance.
+- `mw/adaptiveconcurrency`, `mw/retrybudget`, and `mw/tenantlimit` for overload and retry-storm protection.
+- `mw/conditional` for ETag / Last-Modified conditional requests.
+- `mw/pprof` for guarded pprof endpoints.
+- Expanded `mw/metrics` with Prometheus text output and request duration histograms.
+
+See `docs/PRODUCTION_REMAINING_FEATURES.md` and `examples/production/main.go`.
+
+### JWT generation and authz integration
+
+Generate a development/service token with the built-in signer:
+
+```go
+token, err := jwt.Sign(map[string]any{
+    "sub":         "u1",
+    "tenant_id":   "t1",
+    "roles":       []string{"admin"},
+    "permissions": []string{"users:read"},
+    "scope":       "profile email",
+    "exp":         time.Now().Add(time.Hour).Unix(),
+}, []byte("dev-secret"), "HS256")
+```
+
+Use it on requests:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/admin-only
+```
+
+`mw/jwt` is authentication only. It verifies the token, stores claims in `Ctx.Locals("jwt_claims")`, and sets `fh.Principal` so the existing authorization layers can operate:
+
+```go
+app.Get("/admin-only",
+    jwt.New(jwt.Config{Secret: []byte("dev-secret")}),
+    fh.RequireRole("admin"),
+    handler,
+)
+```
+
+For policy-based authorization, keep using `contrib/mw/authz` with `SubjectFromPrincipal()` or `SubjectFromHeadersOrPrincipal()`.
+
+
+## Continued production hardening
+
+This build continues the production feature work without adding duplicate authorization middleware. Authorization remains in the existing core helpers and `contrib/mw/authz`; JWT is authentication and principal extraction only.
+
+New production additions:
+
+- Core dependency health checks with `app.AddHealthCheck(...)`.
+- Readiness now fails when a dependency check fails.
+- Queue job listing via `DurableQueue.ListJobs(ctx, state, limit)`.
+- Queue DLQ operations via `RetryFailed` and `DiscardFailed` across file, memory and SQL storage.
+- Admin queue endpoints for listing, retrying and discarding failed jobs.
+- `mw/requesthash` for request body SHA-256 diagnostics.
+- `mw/slowlog` for request latency SLO logging.
+- `App.Logger()` accessor for middleware/integration logging.
+
+Protected queue ops endpoints:
+
+```text
+GET  /_fh/admin/queue/jobs?state=failed&limit=100
+POST /_fh/admin/queue/:id/retry
+POST /_fh/admin/queue/:id/discard
+```
+
+See `docs/PRODUCTION_GAPS_CONTINUED.md` and `examples/production/main.go`.
+
+## Middleware documentation index
+
+Every core and contrib middleware package now includes a local `README.md` explaining what it does, how to implement it, operational impact, ordering guidance, and production considerations. See [`docs/MIDDLEWARE_READMES.md`](docs/MIDDLEWARE_READMES.md) for the full index.
+
+
+
+## Additional production-gap fixes
+
+This build also adds cleanup/janitor support for long-running production services:
+
+- `IdempotencyJanitor` optional interface for expiring replay records.
+- `QueueJanitor` optional interface for purging old terminal queue jobs.
+- File, memory and SQL reliability adapters implement the cleanup interfaces.
+- `Reliability.PurgeExpiredIdempotency(ctx, now)` helper.
+- `DurableQueue.PurgeJobs(ctx, state, before, limit)` helper.
+- Protected admin queue purge endpoint:
+
+```text
+POST /_fh/admin/queue/purge?state=done&before=2026-07-01T00:00:00Z&limit=1000
+```
+
+See `docs/PRODUCTION_GAPS_NEXT.md`.
+
+## Production gap continuation
+
+This package adds hardened CORS defaults, hashed API-key records, deny-by-default admin ops, CSP nonce/report-only support, mTLS middleware, SSE helpers, and a small `fh` CLI:
+
+```bash
+go run ./cmd/fh jwt:sign --secret dev-secret --sub u1 --roles admin --ttl 1h
+go run ./cmd/fh apikey:generate --prefix fh_live
+```
+
+Admin endpoints are now deny-by-default unless `Auth` is configured or `AllowInsecure` is explicitly set for local development.

@@ -1,34 +1,38 @@
-# contract middleware
+# Contract Middleware
 
-`contract` enforces request contract rules such as allowed methods, required content types, required headers, and body size limits.
+## What it does
 
-## Import
+Enforces route/API contract rules such as required headers, version compatibility, or request/response expectations depending on configuration.
 
-```go
-import "github.com/oarkflow/fh/mw/contract"
-```
-
-## Usage
+## How to implement
 
 ```go
-app.Post("/users",
-    contract.New(contract.Config{
-        Methods: []string{"POST"},
-        ContentTypes: []string{"application/json"},
-        RequireHeaders: []string{"X-Tenant-ID"},
-        MaxBodyBytes: 1 << 20,
-    }),
-    createUser,
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/contract"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(contract.New(contract.Config{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Behavior
+## Impact
 
-- Unsupported methods return `405 Method Not Allowed`.
-- Bodies larger than `MaxBodyBytes` return `413 Payload Too Large`.
-- Content types are matched by prefix, so `application/json; charset=utf-8` matches `application/json`.
-- Missing required headers return `400 Bad Request`.
+Improves API correctness and client compatibility. Overhead depends on the number and complexity of checks.
 
-## Best practice
+## Ordering guidance
 
-Use this on typed API endpoints, JSON-only endpoints, webhook endpoints, and routes where strict input contracts help avoid ambiguous parsing.
+Run after version extraction and before handlers. In development, run stricter checks; in production, keep only required admission checks.
+
+## Production considerations
+
+Keep contracts under source control. Add CI checks for OpenAPI/schema compatibility and route behavior.
+

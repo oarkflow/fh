@@ -1,54 +1,38 @@
-# apikey middleware
+# API Key Middleware
 
-`apikey` authenticates requests using an API key from a header or query parameter. Static keys are compared with `hmac.Equal`; dynamic lookup can be provided for database-backed keys.
+## What it does
 
-## Import
+Authenticates requests using an API key from a header or custom extractor. It is suitable for service-to-service APIs, partner APIs, and machine clients.
 
-```go
-import "github.com/oarkflow/fh/mw/apikey"
-```
-
-## Header key usage
+## How to implement
 
 ```go
-app.Use(apikey.New(apikey.Config{
-    Header: "X-API-Key",
-    Keys: []string{"dev-secret-key"},
-}))
-```
+package main
 
-## Database/dynamic lookup
-
-```go
-app.Use(apikey.New(apikey.Config{
-    Header: "X-API-Key",
-    Lookup: func(c *fh.Ctx, key string) bool {
-        // Look up a hashed key in your database/cache.
-        return key == "service-key-1"
-    },
-}))
-```
-
-## Route-specific usage
-
-```go
-app.Post("/internal/jobs",
-    apikey.New(apikey.Config{Keys: []string{os.Getenv("INTERNAL_API_KEY")}}),
-    createJob,
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/apikey"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(apikey.New(apikey.Config{Header: "X-API-Key", Lookup: func(c fh.Ctx, key string) bool { return key == "dev-key" }}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Custom error
+## Impact
 
-```go
-app.Use(apikey.New(apikey.Config{
-    Keys: []string{"secret"},
-    Error: func(c *fh.Ctx) error {
-        return c.Status(fh.StatusUnauthorized).JSON(fh.Map{"error": "api_key_required"})
-    },
-}))
-```
+Adds a key lookup per request. With an in-memory lookup the overhead is small; with a remote lookup, cache positive and negative results carefully.
 
-## Best practice
+## Ordering guidance
 
-Prefer header keys over query keys because URLs are commonly logged. Store only hashed API keys server-side and rotate keys periodically.
+Run after request ID/real IP/tracing and before authorization, rate limits that depend on client identity, and handlers.
+
+## Production considerations
+
+Store only hashed API keys. Support rotation, expiration, scopes, tenant binding, and audit logs. Avoid putting keys in query strings because they leak into logs and proxies.
+

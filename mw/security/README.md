@@ -1,52 +1,38 @@
-# security middleware
+# Security Headers Middleware
 
-`security` sets hardened response security headers.
+## What it does
 
-## Import
+Adds common defensive HTTP headers such as content type protection, frame options, referrer policy, HSTS, and CSP-related headers depending on config.
 
-```go
-import "github.com/oarkflow/fh/mw/security"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Use(security.New())
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/security"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(security.New(security.Config{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-Default headers include hardened frame, content-type, referrer, cross-origin, permissions, and HSTS settings.
+## Impact
 
-## Custom policy
+Improves browser security with very low overhead.
 
-```go
-app.Use(security.New(security.Config{
-    ContentSecurityPolicy: "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'",
-    HSTSMaxAge: 31536000,
-    HSTSIncludeSubDomains: true,
-    HSTSPreload: true,
-    FrameDeny: true,
-    ContentTypeNosniff: true,
-    ReferrerPolicy: "no-referrer",
-    CrossOriginOpenerPolicy: "same-origin",
-    CrossOriginResourcePolicy: "same-origin",
-    CrossOriginEmbedderPolicy: "require-corp",
-    PermissionsPolicy: "camera=(), microphone=(), geolocation=()",
-}))
-```
+## Ordering guidance
 
-## Headers managed
+Run late enough to apply headers to normal responses, but before response is sent.
 
-- `Content-Security-Policy`
-- `Strict-Transport-Security`
-- `X-Frame-Options`
-- `X-Content-Type-Options`
-- `X-XSS-Protection`
-- `Referrer-Policy`
-- `Cross-Origin-Opener-Policy`
-- `Cross-Origin-Resource-Policy`
-- `Cross-Origin-Embedder-Policy`
-- `Permissions-Policy`
+## Production considerations
 
-## Best practice
+Tune CSP carefully; start with report-only where needed. Enable HSTS only when HTTPS is permanent for the domain.
 
-Use a strict CSP in production and test it carefully with your frontend assets. Only enable HSTS preload when every subdomain is HTTPS-ready.

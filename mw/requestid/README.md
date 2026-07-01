@@ -1,49 +1,38 @@
-# requestid middleware
+# Request ID Middleware
 
-`requestid` validates and propagates an incoming request ID or generates a new one. It stores the ID in locals and sets a response header.
+## What it does
 
-## Import
+Creates or validates a per-request identifier and exposes it through context/headers for logs, traces, responses, and downstream calls.
 
-```go
-import "github.com/oarkflow/fh/mw/requestid"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Use(requestid.New())
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/requestid"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(requestid.New(requestid.Config{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Custom header and generator
+## Impact
 
-```go
-gen := requestid.NewAtomicGeneratorWithPrefix("api")
+Very low overhead. Essential for production debugging.
 
-app.Use(requestid.New(requestid.Config{
-    Header: "X-Request-ID",
-    Generator: gen,
-    TrustIncoming: true,
-}))
-```
+## Ordering guidance
 
-## Custom validator
+Run first or near first before logging, tracing, audit, metrics, and handlers.
 
-```go
-app.Use(requestid.New(requestid.Config{
-    Validator: func(id string) bool {
-        return len(id) >= 8 && len(id) <= 128 && requestid.DefaultValidator(id)
-    },
-}))
-```
+## Production considerations
 
-## Handler usage
+Validate incoming IDs to prevent log injection. Use high-entropy IDs when generating new IDs.
 
-```go
-app.Get("/", func(c *fh.Ctx) error {
-    return c.JSON(fh.Map{"request_id": c.Locals("request_id")})
-})
-```
-
-## Best practice
-
-Register request IDs before logger, metrics, auth, and proxy middleware so all downstream components can reference the same ID.

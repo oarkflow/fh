@@ -1,62 +1,38 @@
-# logger middleware
+# Logger Middleware
 
-`logger` provides high-performance async access logging with text formats, JSON format, `slog`, custom writers, queue limits, skip rules, and dropped-log accounting.
+## What it does
 
-## Import
+Writes access logs with request/response metadata such as method, path, status, latency, IP, request ID, and errors.
 
-```go
-import "github.com/oarkflow/fh/mw/logger"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Use(logger.New())
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/logger"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(logger.New(logger.Config{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## JSON logs
+## Impact
 
-```go
-app.Use(logger.New(logger.Config{
-    FormatName: "json",
-    QueueSize: 8192,
-    MaxLineBytes: 4096,
-}))
-```
+Adds I/O overhead; structured asynchronous logging is preferred for high throughput.
 
-## Common log format
+## Ordering guidance
 
-```go
-app.Use(logger.New(logger.Config{FormatName: "common"}))
-```
+Run after request/correlation ID and real IP so logs include normalized identifiers. Usually wraps most middleware.
 
-## Custom format
+## Production considerations
 
-Supported tokens include `${time}`, `${ip}`, `${method}`, `${path}`, `${query}`, `${uri}`, `${status}`, `${latency}`, and `${error}`.
+Redact secrets, authorization headers, cookies, and sensitive query parameters. Use sampling for very high RPS routes.
 
-```go
-app.Use(logger.New(logger.Config{
-    Format: "${time} ${ip} ${method} ${uri} ${status} ${latency} ${error}\n",
-}))
-```
-
-## Skip noisy traffic
-
-```go
-app.Use(logger.New(logger.Config{
-    SkipPrefixes: []string{"/_fh/metrics", "/static/"},
-    SkipStatusCodes: []int{304},
-}))
-```
-
-## Managed shutdown
-
-```go
-lm := logger.NewMiddleware(logger.Config{FormatName: "json"})
-app.Use(lm.Handler())
-defer lm.Close()
-```
-
-## Best practice
-
-Use async mode in production, keep log lines bounded, and enable request/correlation IDs before the logger so IDs can be included by downstream logging hooks.

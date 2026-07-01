@@ -1,36 +1,38 @@
-# earlydata middleware
+# Early Data Middleware
 
-`earlydata` rejects replay-prone unsafe requests sent with TLS 0-RTT early data.
+## What it does
 
-## Import
+Detects and controls TLS 0-RTT early data requests to prevent replay-sensitive operations from being executed unsafely.
 
-```go
-import "github.com/oarkflow/fh/mw/earlydata"
-```
-
-## Usage
+## How to implement
 
 ```go
-app.Use(earlydata.New())
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/earlydata"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(earlydata.New(earlydata.Config{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Custom configuration
+## Impact
 
-```go
-app.Use(earlydata.New(earlydata.Config{
-    AllowMethods: []string{"GET", "HEAD", "OPTIONS", "TRACE"},
-    AllowWithIdempotencyKey: true,
-    IdempotencyHeader: "Idempotency-Key",
-}))
-```
+Protects unsafe operations from replay risks. May reject requests marked as early data.
 
-## Behavior
+## Ordering guidance
 
-- If `Early-Data: 1` is not present, the request continues.
-- Methods in `AllowMethods` continue.
-- If `AllowWithIdempotencyKey` is true, unsafe early-data requests with the configured idempotency header continue.
-- Other unsafe early-data requests receive `425 Too Early`.
+Run before handlers for unsafe methods and before idempotency-sensitive operations.
 
-## Best practice
+## Production considerations
 
-Enable this on public HTTPS APIs when a proxy or TLS terminator forwards the `Early-Data` header. Keep unsafe operations protected by idempotency keys.
+Only allow early data for safe, idempotent operations. Document behavior behind TLS terminators/CDNs.
+

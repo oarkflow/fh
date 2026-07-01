@@ -1,36 +1,38 @@
-# policy middleware
+# Policy Middleware
 
-`policy` groups cross-cutting route metadata such as data sensitivity with API version enforcement.
+## What it does
 
-## Import
+Evaluates configurable policy rules to allow, reject, or otherwise control requests based on request context.
 
-```go
-import "github.com/oarkflow/fh/mw/policy"
-```
-
-## Usage
+## How to implement
 
 ```go
-app.Use(policy.New(policy.Config{
-    Data: fh.DataPolicy{
-        Sensitivity: "pii",
-        Retention: "90d",
-    },
-    Version: apiversion.Config{
-        Default: "2026-06-01",
-        Supported: []string{"2026-06-01"},
-    },
-}))
-```
+package main
 
-Inside a handler:
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/policy"
+)
 
-```go
-if p, ok := c.Locals("fh.data_policy").(fh.DataPolicy); ok {
-    log.Println("sensitivity", p.Sensitivity)
+func main() {
+	app := fh.New()
+	app.Use(policy.New(policy.Config{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
 }
 ```
 
-## Best practice
+## Impact
 
-Use data policies to make logging, auditing, redaction, retention, and compliance behavior explicit at route/group level.
+Centralizes request admission decisions. Complexity depends on policy rules.
+
+## Ordering guidance
+
+Run after identity, tenant, and request metadata extraction. Run before handlers.
+
+## Production considerations
+
+Version policies, test with fixtures, log decisions, and keep fail-open/fail-closed behavior explicit.
+

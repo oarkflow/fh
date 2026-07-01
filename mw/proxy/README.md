@@ -1,51 +1,38 @@
-# proxy middleware
+# Proxy / Gateway Middleware
 
-`proxy` provides a reverse proxy and a simple prefix-based gateway using the Go standard library reverse proxy underneath.
+## What it does
 
-## Import
+Forwards requests to upstream services or implements simple gateway routing by path/prefix.
 
-```go
-import "github.com/oarkflow/fh/mw/proxy"
-```
-
-## Single upstream
+## How to implement
 
 ```go
-app.Use("/users", proxy.New(proxy.Config{
-    Target: "http://localhost:8081",
-    StripPrefix: "/users",
-    AddPrefix: "/api/users",
-    Timeout: 2 * time.Second,
-}))
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/proxy"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(proxy.New(proxy.Config{Target: "http://localhost:8081"}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Gateway routing
+## Impact
 
-```go
-app.Use(proxy.Gateway(map[string]proxy.Config{
-    "/users": {
-        Target: "http://users-service:8080",
-        Timeout: 2 * time.Second,
-    },
-    "/billing": {
-        Target: "http://billing-service:8080",
-        Timeout: 3 * time.Second,
-    },
-}))
-```
+Adds network I/O and upstream dependency risk. Enables gateway composition and service migration.
 
-## Header customization
+## Ordering guidance
 
-```go
-app.Use("/api", proxy.New(proxy.Config{
-    Target: "http://upstream:8080",
-    Director: func(r *http.Request) {
-        r.Header.Set("X-Forwarded-Host", r.Host)
-        r.Header.Set("X-Gateway", "fh")
-    },
-}))
-```
+Run after security middleware when proxying protected routes. Run after real IP/correlation/tracing so headers can be forwarded.
 
-## Best practice
+## Production considerations
 
-Set timeouts. Add request IDs before the proxy. For public edge deployments, combine proxy with body limits, rate limits, circuit breakers, and strict trusted-proxy handling.
+Set timeouts, max body size, header allow/deny lists, upstream health checks, circuit breakers, and retry budgets. Avoid blindly forwarding sensitive internal headers.
+

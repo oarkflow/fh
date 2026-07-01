@@ -1,35 +1,38 @@
-# metrics middleware
+# Metrics Middleware
 
-`metrics` tracks basic request counters and exposes metrics as JSON or Prometheus text format.
+## What it does
 
-## Import
+Collects request counts, status counts, latency buckets, and exposes Prometheus-style metrics through a handler.
 
-```go
-import "github.com/oarkflow/fh/mw/metrics"
-```
-
-## Usage
+## How to implement
 
 ```go
-m := metrics.New()
-app.Use(m.Middleware())
-app.Get("/_fh/metrics", m.Handler())
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/metrics"
+)
+
+func main() {
+	app := fh.New()
+	m := metrics.New()
+	app.Use(m.Middleware())
+	app.Get("/_fh/metrics", m.Handler())
+
+	app.Get("/", func(c fh.Ctx) error { return c.String(fh.StatusOK, "ok") })
+}
 ```
 
-## JSON output
+## Impact
 
-```bash
-curl http://localhost:3000/_fh/metrics
-```
+Small per-request overhead for counters and latency measurement. Provides essential production visibility.
 
-Returns uptime, total requests, in-flight requests, status counters, and route counters.
+## Ordering guidance
 
-## Prometheus output
+Run near the outside of the chain after request ID/tracing. Register the metrics endpoint separately and protect if needed.
 
-```bash
-curl 'http://localhost:3000/_fh/metrics?format=prometheus'
-```
+## Production considerations
 
-## Best practice
+Use stable route labels to avoid high-cardinality metrics. Avoid labeling by raw path, user, token, or request ID.
 
-Protect metrics endpoints on public deployments with `basicauth`, `apikey`, or IP allowlists. Put metrics early enough to capture most requests.

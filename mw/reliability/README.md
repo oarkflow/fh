@@ -1,63 +1,36 @@
-# reliability middleware
+# Reliability Middleware
 
-`reliability` connects routes to the core `fh` reliability layer. It supports per-route policies and typed reliable endpoints.
+## What it does
 
-## Import
+Applies route-level reliability policies and typed reliable endpoint behavior for idempotency, journaling, queue handoff, and response replay patterns.
 
-```go
-import "github.com/oarkflow/fh/mw/reliability"
-```
-
-## Route policy
+## How to implement
 
 ```go
-app.Post("/orders",
-    reliability.New(fh.ReliabilityPolicy{
-        Enabled: true,
-        RequireIdempotency: true,
-        Journal: true,
-        ReplayResponse: true,
-        ConflictOnBodyDrift: true,
-        MaxReplayAge: 24 * time.Hour,
-    }),
-    createOrder,
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/reliability"
 )
-```
 
-## Typed reliable endpoint
+func main() {
+	app := fh.New()
+	app.Use(reliability.New(fh.ReliabilityPolicy{}))
 
-```go
-type CreateEmail struct {
-    To string `json:"to"`
-    Subject string `json:"subject"`
+	app.Post("/work", func(c fh.Ctx) error { return c.JSON(fh.Map{"queued": true}) })
 }
-
-type Accepted struct {
-    JobID string `json:"job_id"`
-}
-
-app.Post("/emails", reliability.Endpoint[CreateEmail, Accepted](reliability.EndpointOptions[CreateEmail, Accepted]{
-    Policy: fh.ReliabilityPolicy{Enabled: true, RequireIdempotency: true, Journal: true},
-    Validate: func(c *fh.Ctx, req *CreateEmail) error {
-        if req.To == "" { return fh.NewHTTPError(422, "EMAIL_REQUIRED", "email is required") }
-        return nil
-    },
-    Handle: func(ctx context.Context, c *fh.Ctx, req CreateEmail) (Accepted, error) {
-        return Accepted{JobID: "sync-result"}, nil
-    },
-}))
 ```
 
-## Async endpoint
+## Impact
 
-```go
-app.Post("/emails", reliability.Endpoint[CreateEmail, fh.Map](reliability.EndpointOptions[CreateEmail, fh.Map]{
-    Policy: fh.ReliabilityPolicy{Enabled: true, RequireIdempotency: true, Journal: true},
-    Async: true,
-    QueueType: "email.send",
-}))
-```
+Adds durability and replay protection depending on configured policy and storage. The strongest guarantees require durable/distributed stores.
 
-## Best practice
+## Ordering guidance
 
-Use reliability for mutation endpoints that clients may retry: payments, orders, webhooks, email, inventory updates, and external provider callbacks.
+Run around unsafe operations that need reliability guarantees. Pair with body limit, idempotency, request hash, and transaction/outbox logic.
+
+## Production considerations
+
+Use SQL/Redis/NATS/Kafka-style backends for production. Test crash recovery and duplicate request behavior.
+

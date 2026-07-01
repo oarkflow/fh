@@ -1,56 +1,38 @@
-# static middleware
+# Static Files Middleware
 
-`static` serves files safely from a root directory with path traversal protection, cache headers, ETag, Last-Modified, SPA fallback, and download controls.
+## What it does
 
-## Import
+Serves files from a directory with options for index files, cache headers, directory behavior, and asset delivery.
 
-```go
-import staticmw "github.com/oarkflow/fh/mw/static"
-```
-
-The alias avoids confusion with the `static` keyword-like name in prose.
-
-## Basic usage
+## How to implement
 
 ```go
-app.Get("/static/*", staticmw.New("./public", staticmw.Config{
-    Prefix: "/static/",
-    ETag: true,
-    LastModified: true,
-    MaxAge: time.Hour,
-}))
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/static"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(static.New("./public"))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Immutable assets
+## Impact
 
-```go
-app.Get("/assets/*", staticmw.New("./dist/assets", staticmw.Config{
-    Prefix: "/assets/",
-    Immutable: true,
-    ETag: true,
-    LastModified: true,
-}))
-```
+Efficient for local static assets. Large file serving consumes disk/network I/O.
 
-## SPA fallback
+## Ordering guidance
 
-```go
-app.Get("/*", staticmw.New("./dist", staticmw.Config{
-    SPAFallback: "index.html",
-    ETag: true,
-    CacheControl: "no-cache",
-}))
-```
+Mount on specific prefixes before fallback routes. Pair with compression, ETag, conditional requests, and cache headers.
 
-## File downloads
+## Production considerations
 
-```go
-app.Get("/downloads/*", staticmw.New("./files", staticmw.Config{
-    Prefix: "/downloads/",
-    Download: true,
-}))
-```
+Prevent directory traversal. Disable directory listing unless intentional. Use CDN/object storage for very high traffic assets.
 
-## Best practice
-
-Disable directory browsing in production. Use immutable caching only for content-hashed filenames. Keep uploads outside the static root unless you explicitly validate and control served file types.

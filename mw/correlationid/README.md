@@ -1,37 +1,38 @@
-# correlationid middleware
+# Correlation ID Middleware
 
-`correlationid` propagates a correlation ID through request and response headers. It is useful for linking client logs, proxy logs, app logs, and downstream calls.
+## What it does
 
-## Import
+Propagates or creates a correlation ID so a single business transaction can be followed across services.
 
-```go
-import "github.com/oarkflow/fh/mw/correlationid"
-```
-
-## Usage
+## How to implement
 
 ```go
-app.Use(correlationid.New(correlationid.Config{
-    Header: "X-Correlation-ID",
-}))
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/correlationid"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(correlationid.New(correlationid.Config{Header: "X-Correlation-ID"}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-Inside a handler:
+## Impact
 
-```go
-app.Get("/debug", func(c *fh.Ctx) error {
-    return c.JSON(fh.Map{
-        "correlation_id": c.Locals("correlationID"),
-    })
-})
-```
+Very small overhead. Greatly improves debugging across distributed systems.
 
-## Behavior
+## Ordering guidance
 
-- Uses the incoming correlation header when present.
-- Generates a value when missing if the package configuration supports generation.
-- Sets the response header so clients can report it back.
+Run at the beginning of the chain before logging, tracing, audit, proxy, and handlers.
 
-## Best practice
+## Production considerations
 
-Use `requestid` for per-hop request identity and `correlationid` for end-to-end workflow identity.
+Validate externally provided IDs to avoid log injection. Forward the correlation ID to downstream services.
+

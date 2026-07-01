@@ -1,34 +1,38 @@
-# actor middleware
+# Actor Middleware
 
-`actor` serializes request execution for the same computed key. It is useful when requests for one user, account, tenant, order, or resource must not run concurrently in the same process.
+## What it does
 
-## Import
+Derives an actor key for the request and stores it in request context. It is useful for audit trails, policy decisions, rate limiting, and tenant/user-aware logging.
 
-```go
-import "github.com/oarkflow/fh/mw/actor"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Post("/accounts/:id/transfer",
-    actor.New(actor.Config{
-        Key: func(c *fh.Ctx) string {
-            return "account:" + c.Param("id")
-        },
-    }),
-    func(c *fh.Ctx) error {
-        return c.JSON(fh.Map{"status": "processed"})
-    },
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/actor"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(actor.New(actor.Config{Key: func(c fh.Ctx) string { return c.Get("X-Actor-ID") }}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Behavior
+## Impact
 
-- Empty keys bypass serialization.
-- Locks are process-local; use database locks or distributed locks if you need cross-process serialization.
-- Keep handlers short because all requests with the same key wait for the previous request to finish.
+Adds a small amount of per-request work to resolve the actor. The value can improve observability and authorization traceability across the stack.
 
-## Best practice
+## Ordering guidance
 
-Use this for high-value critical sections such as wallet mutation, per-tenant config updates, or single-resource state transitions. Do not use one global key for all traffic.
+Run after authentication or header normalization middleware if the actor is derived from a principal or trusted header. Run before audit/policy/logging middleware that consumes the actor.
+
+## Production considerations
+
+Do not trust public actor headers unless they are set by a trusted gateway. Prefer deriving the actor from `fh.Principal`, JWT claims, mTLS identity, or a verified API key.
+

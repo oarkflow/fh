@@ -51,18 +51,60 @@ type FHConfig struct {
 	Resource    fh.Extractor[*authz.Resource]
 	Environment fh.Extractor[*authz.Environment]
 
-	OnDenied func(c fh.Ctx, decision *authz.Decision) error
-	OnError  func(c fh.Ctx, err error) error
+	OnDenied          func(c fh.Ctx, decision *authz.Decision) error
+	OnUnauthenticated func(c fh.Ctx, err error) error
+	OnError           func(c fh.Ctx, err error) error
 
 	Next      func(c fh.Ctx) bool
 	SkipPaths []string
 
-	Context func(c fh.Ctx) context.Context
+	Context       func(c fh.Ctx) context.Context
+	DecisionLocal string
 }
 
 func SubjectFromHeaders() fh.Extractor[*authz.Subject] {
 	return func(c fh.Ctx) (*authz.Subject, bool, error) {
 		return FHDefaultSubjectExtractor(c), true, nil
+	}
+}
+
+func SubjectFromHeadersOrPrincipal() fh.Extractor[*authz.Subject] {
+	return func(c fh.Ctx) (*authz.Subject, bool, error) {
+		if p, ok := fh.PrincipalFrom(c); ok {
+			return principalSubject(p), true, nil
+		}
+		return FHDefaultSubjectExtractor(c), true, nil
+	}
+}
+
+func SubjectFromJWTClaims(localKey string) fh.Extractor[*authz.Subject] {
+	if localKey == "" {
+		localKey = "jwt_claims"
+	}
+	return func(c fh.Ctx) (*authz.Subject, bool, error) {
+		claims, ok := c.Locals(localKey).(map[string]any)
+		if !ok || claims == nil {
+			return nil, false, nil
+		}
+		id := claimString(claims, "sub")
+		if id == "" {
+			id = claimString(claims, "subject")
+		}
+		if id == "" {
+			return nil, false, nil
+		}
+		return &authz.Subject{
+			ID:       id,
+			Type:     claimStringDefault(claims, "type", "user"),
+			TenantID: firstClaimString(claims, "tenant_id", "tenant", "tid"),
+			Roles:    claimStrings(claims, "roles", "role", "groups"),
+			Attrs: map[string]any{
+				"claims":      claims,
+				"scopes":      claimStrings(claims, "scope", "scp", "scopes"),
+				"permissions": claimStrings(claims, "permissions", "perms"),
+				"auth_method": "jwt",
+			},
+		}, true, nil
 	}
 }
 
@@ -72,19 +114,7 @@ func SubjectFromPrincipal() fh.Extractor[*authz.Subject] {
 		if !ok {
 			return nil, false, nil
 		}
-		return &authz.Subject{
-			ID:       p.ID,
-			Type:     p.Type,
-			TenantID: p.TenantID,
-			Roles:    p.Roles,
-			Attrs: map[string]any{
-				"subject":     p.Subject,
-				"scopes":      p.Scopes,
-				"permissions": p.Permissions,
-				"claims":      p.Claims,
-				"auth_method": p.AuthMethod,
-			},
-		}, true, nil
+		return principalSubject(p), true, nil
 	}
 }
 
@@ -150,6 +180,13 @@ func FHDefaultEnvironmentExtractor(c fh.Ctx) *authz.Environment {
 	}
 }
 
+func FHDefaultUnauthenticatedHandler(c fh.Ctx, err error) error {
+	return c.Status(http.StatusUnauthorized).JSON(map[string]any{
+		"error":   "unauthorized",
+		"message": "authentication is required",
+	})
+}
+
 func FHDefaultDeniedHandler(c fh.Ctx, decision *authz.Decision) error {
 	return c.Status(http.StatusForbidden).JSON(map[string]any{
 		"error":   "forbidden",
@@ -166,13 +203,15 @@ func FHDefaultErrorHandler(c fh.Ctx, err error) error {
 
 func FHDefaultConfig(engine *authz.Engine) FHConfig {
 	return FHConfig{
-		Engine:      engine,
-		Subject:     SubjectFromHeaders(),
-		Action:      ActionFromMethod(),
-		Resource:    ResourceFromRoute("", ""),
-		Environment: EnvironmentFromRequest(),
-		OnDenied:    FHDefaultDeniedHandler,
-		OnError:     FHDefaultErrorHandler,
+		Engine:            engine,
+		Subject:           SubjectFromHeaders(),
+		Action:            ActionFromMethod(),
+		Resource:          ResourceFromRoute("", ""),
+		Environment:       EnvironmentFromRequest(),
+		OnDenied:          FHDefaultDeniedHandler,
+		OnUnauthenticated: FHDefaultUnauthenticatedHandler,
+		OnError:           FHDefaultErrorHandler,
+		DecisionLocal:     "authz_decision",
 		Context: func(c fh.Ctx) context.Context {
 			return context.Background()
 		},
@@ -199,6 +238,9 @@ func FHWithConfig(cfg FHConfig) fh.HandlerFunc {
 	if cfg.OnDenied == nil {
 		cfg.OnDenied = FHDefaultDeniedHandler
 	}
+	if cfg.OnUnauthenticated == nil {
+		cfg.OnUnauthenticated = FHDefaultUnauthenticatedHandler
+	}
 	if cfg.OnError == nil {
 		cfg.OnError = FHDefaultErrorHandler
 	}
@@ -206,6 +248,9 @@ func FHWithConfig(cfg FHConfig) fh.HandlerFunc {
 		cfg.Context = func(c fh.Ctx) context.Context {
 			return context.Background()
 		}
+	}
+	if cfg.DecisionLocal == "" {
+		cfg.DecisionLocal = "authz_decision"
 	}
 
 	return func(c fh.Ctx) error {
@@ -225,8 +270,8 @@ func FHWithConfig(cfg FHConfig) fh.HandlerFunc {
 		if err != nil {
 			return cfg.OnError(c, err)
 		}
-		if !ok || subject == nil {
-			return cfg.OnError(c, errors.New("authz middleware: subject extractor returned empty"))
+		if !ok || subject == nil || strings.TrimSpace(subject.ID) == "" {
+			return cfg.OnUnauthenticated(c, errors.New("authz middleware: subject extractor returned empty"))
 		}
 
 		action, ok, err := cfg.Action(c)
@@ -277,7 +322,7 @@ func FHWithConfig(cfg FHConfig) fh.HandlerFunc {
 			return cfg.OnError(c, err)
 		}
 
-		c.Locals("authz_decision", decision)
+		c.Locals(cfg.DecisionLocal, decision)
 
 		if !decision.Allowed {
 			return cfg.OnDenied(c, decision)
@@ -408,4 +453,74 @@ func splitTrim(s, sep string) []string {
 	}
 
 	return out
+}
+
+func principalSubject(p fh.Principal) *authz.Subject {
+	return &authz.Subject{
+		ID:       p.ID,
+		Type:     p.Type,
+		TenantID: p.TenantID,
+		Roles:    p.Roles,
+		Attrs: map[string]any{
+			"subject":     p.Subject,
+			"scopes":      p.Scopes,
+			"permissions": p.Permissions,
+			"claims":      p.Claims,
+			"auth_method": p.AuthMethod,
+		},
+	}
+}
+
+func claimString(claims map[string]any, key string) string {
+	if claims == nil || key == "" {
+		return ""
+	}
+	v, _ := claims[key].(string)
+	return strings.TrimSpace(v)
+}
+
+func claimStringDefault(claims map[string]any, key, def string) string {
+	if v := claimString(claims, key); v != "" {
+		return v
+	}
+	return def
+}
+
+func firstClaimString(claims map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v := claimString(claims, key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func claimStrings(claims map[string]any, keys ...string) []string {
+	for _, key := range keys {
+		if claims == nil || key == "" {
+			continue
+		}
+		switch v := claims[key].(type) {
+		case string:
+			return splitTrim(strings.ReplaceAll(v, " ", ","), ",")
+		case []string:
+			out := make([]string, 0, len(v))
+			for _, s := range v {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					out = append(out, s)
+				}
+			}
+			return out
+		case []any:
+			out := make([]string, 0, len(v))
+			for _, it := range v {
+				if s, _ := it.(string); strings.TrimSpace(s) != "" {
+					out = append(out, strings.TrimSpace(s))
+				}
+			}
+			return out
+		}
+	}
+	return nil
 }

@@ -1,41 +1,38 @@
-# timeout middleware
+# Timeout Middleware
 
-`timeout` adds a request context deadline and returns a timeout response if the deadline is exceeded before a response is committed.
+## What it does
 
-## Import
+Applies a request deadline and returns a controlled timeout response when handlers exceed the configured duration.
 
-```go
-import "github.com/oarkflow/fh/mw/timeout"
-```
-
-## Usage
+## How to implement
 
 ```go
-app.Use(timeout.New(5 * time.Second))
-```
+package main
 
-## Route-specific timeout
-
-```go
-app.Get("/reports/:id",
-    timeout.New(30 * time.Second),
-    generateReport,
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/timeout"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(timeout.New(5 * time.Second))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Handler cancellation
+## Impact
 
-```go
-app.Get("/slow", func(c *fh.Ctx) error {
-    select {
-    case <-time.After(10 * time.Second):
-        return c.SendString("done")
-    case <-c.Context().Done():
-        return c.Context().Err()
-    }
-})
-```
+Protects workers from hanging requests and downstream stalls. Long-running handlers may be canceled.
 
-## Best practice
+## Ordering guidance
 
-Handlers must respect `c.Context().Done()` for timeouts to stop work early. Also configure server-level read/write timeouts.
+Run before handlers and dependency calls. Pair with context-aware downstream clients.
+
+## Production considerations
+
+Choose route-specific timeouts. Ensure handlers honor context cancellation and release resources.
+

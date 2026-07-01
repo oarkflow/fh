@@ -280,6 +280,8 @@ type App struct {
 	errorCounts  sync.Map // error code -> *atomic.Uint64
 	routeMetaMu  sync.RWMutex
 	routeMeta    []RouteInfo
+	healthMu     sync.RWMutex
+	healthChecks []registeredHealthCheck
 	openapi      OpenAPIConfig
 	reliability  *Reliability
 	audit        AuditSink

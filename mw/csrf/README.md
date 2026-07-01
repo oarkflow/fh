@@ -1,58 +1,38 @@
-# csrf middleware
+# CSRF Middleware
 
-`csrf` implements a signed-origin-aware double-submit cookie pattern for browser requests. It creates a CSRF token cookie, exposes the token through `Locals("csrf_token")`, and requires unsafe requests to send the same token in a header.
+## What it does
 
-## Import
+Protects browser session-based applications from cross-site request forgery using tokens and origin checks.
 
-```go
-import "github.com/oarkflow/fh/mw/csrf"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Use(csrf.New(csrf.Config{
-    CookieName: "csrf_token",
-    HeaderName: "X-CSRF-Token",
-    CookiePath: "/",
-    CookieSecure: true,
-    CookieSameSite: fh.SameSiteLax,
-    CookieMaxAge: 12 * time.Hour,
-    TrustedOrigins: []string{"https://app.example.com"},
-}))
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/csrf"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(csrf.New(csrf.Config{}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Rendering the token
+## Impact
 
-```go
-app.Get("/form", func(c *fh.Ctx) error {
-    token, _ := c.Locals("csrf_token").(string)
-    return c.Type("html").SendString(`<form method="post">
-        <input type="hidden" name="csrf_token" value="` + token + `">
-        <button>Save</button>
-    </form>`)
-})
-```
+Adds token validation to unsafe methods. Essential for cookie-authenticated browser apps.
 
-For HTML forms, copy the token into the configured request header from JavaScript, or adapt your form handler to set `X-CSRF-Token`.
+## Ordering guidance
 
-## Unsafe request example
+Run after session/cookie middleware and before handlers for POST/PUT/PATCH/DELETE.
 
-```js
-await fetch("/profile", {
-  method: "POST",
-  headers: { "X-CSRF-Token": tokenFromPage },
-  credentials: "include",
-  body: JSON.stringify({ name: "Alice" })
-})
-```
+## Production considerations
 
-## Behavior
+Use SameSite cookies and HTTPS. APIs using bearer tokens generally do not need CSRF, but browser cookie flows do.
 
-- Safe methods such as `GET`, `HEAD`, and `OPTIONS` are bypassed.
-- A missing token cookie is generated automatically.
-- Unsafe methods require an allowed origin and matching `HeaderName` token.
-
-## Best practice
-
-Use CSRF for cookie-authenticated browser sessions. API-key, bearer-token, and signed webhook routes usually do not need CSRF.

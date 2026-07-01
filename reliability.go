@@ -74,6 +74,13 @@ type IdempotencyRepository interface {
 	Close() error
 }
 
+// IdempotencyJanitor is an optional extension for repositories that can purge
+// expired idempotency records. It is useful for long-running services where
+// replay records should not grow without bounds.
+type IdempotencyJanitor interface {
+	PurgeExpired(context.Context, time.Time) (int, error)
+}
+
 // QueueStorage is the persistence contract used by DurableQueue. A DBMS backend
 // should implement Claim atomically, for example using SELECT ... FOR UPDATE SKIP
 // LOCKED or an UPDATE ... RETURNING lease pattern.
@@ -86,6 +93,29 @@ type QueueStorage interface {
 	Recover(context.Context) error
 	Stats(context.Context) (QueueStats, error)
 	Close() error
+}
+
+// QueueJobLister is an optional extension for QueueStorage implementations that
+// can expose jobs for admin/API tooling. The state value should be one of
+// pending, processing, done or failed; an empty state means all states. Limit <=
+// 0 lets the implementation choose a safe default.
+type QueueJobLister interface {
+	ListJobs(context.Context, string, int) ([]QueueJobSnapshot, error)
+}
+
+// QueueFailedOperator is an optional extension for QueueStorage implementations
+// that can safely move failed jobs back to pending or discard them from the DLQ.
+type QueueFailedOperator interface {
+	RequeueFailed(context.Context, string) error
+	DiscardFailed(context.Context, string) error
+}
+
+// QueueJanitor is an optional extension for QueueStorage implementations that
+// can purge old terminal jobs. State should normally be done or failed. Before
+// controls the UpdatedAt cutoff. Limit <= 0 lets implementations choose a safe
+// default.
+type QueueJanitor interface {
+	PurgeJobs(context.Context, string, time.Time, int) (int, error)
 }
 
 // Queue is the application-facing async job queue contract.
@@ -102,6 +132,22 @@ type Reliability struct {
 	journal RequestJournalStore
 	idem    IdempotencyRepository
 	queue   *DurableQueue
+}
+
+// PurgeExpiredIdempotency removes expired replay records when the configured
+// repository supports cleanup. File, memory and SQL adapters implement this.
+func (r *Reliability) PurgeExpiredIdempotency(ctx context.Context, now time.Time) (int, error) {
+	if r == nil || r.idem == nil {
+		return 0, errors.New("fh: idempotency disabled")
+	}
+	janitor, ok := r.idem.(IdempotencyJanitor)
+	if !ok {
+		return 0, errors.New("fh: idempotency purge unsupported by repository")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return janitor.PurgeExpired(ctx, now)
 }
 
 func NewReliability(cfg ReliabilityConfig) (*Reliability, error) {
@@ -205,7 +251,7 @@ func (r *Reliability) Close() error {
 	}
 	var first error
 	if r.queue != nil {
-		if err := r.queue.Close(); err != nil && first == nil {
+		if err := r.queue.Close(); err != nil {
 			first = err
 		}
 	}
@@ -517,6 +563,28 @@ func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType
 	rec.UpdatedAt = now
 	return s.appendLocked(rec)
 }
+func (s *IdempotencyStore) PurgeExpired(ctx context.Context, now time.Time) (int, error) {
+	if s == nil {
+		return 0, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	purged := 0
+	for key, rec := range s.records {
+		if rec != nil && !rec.ExpiresAt.IsZero() && !rec.ExpiresAt.After(now) {
+			delete(s.records, key)
+			purged++
+		}
+	}
+	return purged, nil
+}
+
 func cleanReplayHeaders(in map[string][]string) map[string][]string {
 	if len(in) == 0 {
 		return nil
@@ -599,6 +667,27 @@ type QueueEvent struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 type QueueStats struct{ Pending, Processing, Done, Failed int }
+
+// QueueJobSnapshot is a redacted, admin-safe view of a durable queue job. It is
+// intentionally metadata-first; payload previews are bounded to avoid leaking or
+// returning very large bodies from ops endpoints.
+type QueueJobSnapshot struct {
+	ID             string            `json:"id"`
+	Type           string            `json:"type"`
+	State          string            `json:"state"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	Attempts       int               `json:"attempts"`
+	MaxAttempts    int               `json:"max_attempts"`
+	VisibleAt      time.Time         `json:"visible_at"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+	LastError      string            `json:"last_error,omitempty"`
+	Priority       int               `json:"priority,omitempty"`
+	RunAt          time.Time         `json:"run_at,omitempty"`
+	ConcurrencyKey string            `json:"concurrency_key,omitempty"`
+	PayloadBytes   int               `json:"payload_bytes"`
+	PayloadPreview string            `json:"payload_preview,omitempty"`
+}
 
 type DurableQueue struct {
 	cfg        DurableQueueConfig
@@ -802,6 +891,19 @@ func (q *DurableQueue) Stats() (QueueStats, error) {
 		return QueueStats{}, nil
 	}
 	return q.store.Stats(context.Background())
+}
+
+// ListJobs returns queue jobs for admin/ops usage when the storage supports it.
+// state may be empty, pending, processing, done or failed.
+func (q *DurableQueue) ListJobs(ctx context.Context, state string, limit int) ([]QueueJobSnapshot, error) {
+	if q == nil || q.store == nil {
+		return nil, errors.New("fh: queue disabled")
+	}
+	lister, ok := q.store.(QueueJobLister)
+	if !ok {
+		return nil, errors.New("fh: queue job listing unsupported by storage")
+	}
+	return lister.ListJobs(ctx, state, limit)
 }
 
 // FileQueueStorage is the default file/directory based QueueStorage.
@@ -1349,17 +1451,115 @@ func AtomicHandoff(c Ctx, jobType string, payload any, opts ...QueueJob) (string
 	return q.EnqueueJob(spec, json.RawMessage(raw))
 }
 
+func (q *DurableQueue) PurgeJobs(ctx context.Context, state string, before time.Time, limit int) (int, error) {
+	if q == nil || q.store == nil {
+		return 0, errors.New("fh: queue disabled")
+	}
+	janitor, ok := q.store.(QueueJanitor)
+	if !ok {
+		return 0, errors.New("fh: queue purge unsupported by storage")
+	}
+	if before.IsZero() {
+		before = time.Now().UTC()
+	}
+	return janitor.PurgeJobs(ctx, state, before, limit)
+}
+
 func (q *DurableQueue) RetryFailed(ctx context.Context, id string) error {
-	if fs, ok := q.store.(*FileQueueStorage); ok {
-		return fs.RequeueFailed(ctx, id)
+	if q == nil || q.store == nil {
+		return errors.New("fh: queue disabled")
+	}
+	if op, ok := q.store.(QueueFailedOperator); ok {
+		return op.RequeueFailed(ctx, id)
 	}
 	return errors.New("fh: retry failed unsupported by storage")
 }
 func (q *DurableQueue) DiscardFailed(ctx context.Context, id string) error {
-	if fs, ok := q.store.(*FileQueueStorage); ok {
-		return fs.DiscardFailed(ctx, id)
+	if q == nil || q.store == nil {
+		return errors.New("fh: queue disabled")
+	}
+	if op, ok := q.store.(QueueFailedOperator); ok {
+		return op.DiscardFailed(ctx, id)
 	}
 	return errors.New("fh: discard failed unsupported by storage")
+}
+
+func snapshotQueueJob(state string, job *QueueJob) QueueJobSnapshot {
+	if job == nil {
+		return QueueJobSnapshot{State: state}
+	}
+	preview := string(job.Payload)
+	const maxPreview = 512
+	if len(preview) > maxPreview {
+		preview = preview[:maxPreview] + "..."
+	}
+	return QueueJobSnapshot{ID: job.ID, Type: job.Type, State: state, Headers: cloneStringMap(job.Headers), Attempts: job.Attempts, MaxAttempts: job.MaxAttempts, VisibleAt: job.VisibleAt, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt, LastError: job.LastError, Priority: job.Priority, RunAt: job.RunAt, ConcurrencyKey: job.ConcurrencyKey, PayloadBytes: len(job.Payload), PayloadPreview: preview}
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func validQueueState(state string) bool {
+	switch state {
+	case "", "pending", "processing", "done", "failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeQueueListLimit(limit int) int {
+	if limit <= 0 {
+		return 100
+	}
+	if limit > 1000 {
+		return 1000
+	}
+	return limit
+}
+
+func (s *FileQueueStorage) ListJobs(ctx context.Context, state string, limit int) ([]QueueJobSnapshot, error) {
+	if !validQueueState(state) {
+		return nil, errors.New("fh: invalid queue state")
+	}
+	limit = normalizeQueueListLimit(limit)
+	states := []string{state}
+	if state == "" {
+		states = []string{"pending", "processing", "failed", "done"}
+	}
+	out := make([]QueueJobSnapshot, 0, min(limit, 64))
+	for _, st := range states {
+		entries, err := os.ReadDir(filepath.Join(s.dir, st))
+		if err != nil {
+			return nil, err
+		}
+		for _, ent := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
+				continue
+			}
+			job, err := readJob(filepath.Join(s.dir, st, ent.Name()))
+			if err != nil {
+				continue
+			}
+			out = append(out, snapshotQueueJob(st, job))
+			if len(out) >= limit {
+				return out, nil
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out, nil
 }
 func (s *FileQueueStorage) RequeueFailed(ctx context.Context, id string) error {
 	path := filepath.Join(s.dir, "failed", id+".json")
@@ -1376,4 +1576,44 @@ func (s *FileQueueStorage) RequeueFailed(ctx context.Context, id string) error {
 }
 func (s *FileQueueStorage) DiscardFailed(ctx context.Context, id string) error {
 	return os.Remove(filepath.Join(s.dir, "failed", id+".json"))
+}
+
+func (s *FileQueueStorage) PurgeJobs(ctx context.Context, state string, before time.Time, limit int) (int, error) {
+	if state == "" {
+		state = "done"
+	}
+	if state != "done" && state != "failed" {
+		return 0, errors.New("fh: only done or failed jobs can be purged")
+	}
+	if before.IsZero() {
+		before = time.Now().UTC()
+	}
+	limit = normalizeQueueListLimit(limit)
+	dir := filepath.Join(s.dir, state)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	purged := 0
+	for _, ent := range entries {
+		if err := ctx.Err(); err != nil {
+			return purged, err
+		}
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, ent.Name())
+		job, err := readJob(path)
+		if err != nil || job == nil || job.UpdatedAt.After(before) {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return purged, err
+		}
+		purged++
+		if purged >= limit {
+			break
+		}
+	}
+	return purged, nil
 }

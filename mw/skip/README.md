@@ -1,48 +1,36 @@
-# skip middleware
+# Skip Middleware
 
-`skip` wraps another middleware and skips it when a predicate matches. It also provides a rich predicate toolkit.
+## What it does
 
-## Import
+Conditionally bypasses another middleware based on a predicate. It is useful for excluding health checks, static assets, or public routes.
 
-```go
-import "github.com/oarkflow/fh/mw/skip"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Use(skip.New(logger.New(), skip.Prefixes("/static/", "/_fh/metrics")))
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/skip"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(skip.New(logger.New(logger.Config{}), func(c fh.Ctx) bool { return c.Path() == "/health" }))
+
+	app.Get("/health", func(c fh.Ctx) error { return c.String(fh.StatusOK, "ok") })
+}
 ```
 
-## Multiple predicates
+## Impact
 
-```go
-app.Use(skip.NewWithConfig(compress.New(), skip.Config{
-    Logic: skip.LogicAny,
-    Predicates: []skip.Predicate{
-        skip.Static(),
-        skip.Health(),
-        skip.Methods("HEAD"),
-    },
-}))
-```
+Adds a predicate check per request. Helps avoid unnecessary middleware work on excluded routes.
 
-## Predicate examples
+## Ordering guidance
 
-```go
-skip.Paths("/health", "/ready")
-skip.Prefixes("/assets/", "/static/")
-skip.Suffixes(".png", ".jpg")
-skip.Globs("/public/*")
-skip.Methods("OPTIONS")
-skip.HeaderExists("Authorization")
-skip.QueryEquals("debug", "true")
-skip.SafeMethods()
-skip.Not(skip.Static())
-skip.Any(skip.Health(), skip.Static())
-skip.All(skip.Methods("GET"), skip.Prefixes("/public/"))
-```
+Wrap only the middleware that should be skipped. Keep predicates cheap and deterministic.
 
-## Best practice
+## Production considerations
 
-Use `skip` to keep middleware composition explicit instead of adding skip logic inside every middleware configuration.
+Avoid broad skips that bypass security accidentally. Add tests for protected and skipped paths.
+

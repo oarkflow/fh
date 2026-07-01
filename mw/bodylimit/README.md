@@ -1,43 +1,38 @@
-# bodylimit middleware
+# Body Limit Middleware
 
-`bodylimit` rejects requests whose buffered body exceeds a configured byte limit.
+## What it does
 
-## Import
+Rejects requests whose body exceeds the configured maximum size. It protects memory, CPU, and storage from oversized payloads.
 
-```go
-import "github.com/oarkflow/fh/mw/bodylimit"
-```
-
-## Global limit
+## How to implement
 
 ```go
-app.Use(bodylimit.New(16 << 20)) // 16 MiB
-```
+package main
 
-## Route-specific limit
-
-```go
-app.Post("/avatar",
-    bodylimit.New(2 << 20),
-    uploadAvatar,
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/bodylimit"
 )
+
+func main() {
+	app := fh.New()
+	app.Use(bodylimit.New(10 << 20))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-## Skip selected requests
+## Impact
 
-```go
-app.Use(bodylimit.WithConfig(bodylimit.Config{
-    Limit: 8 << 20,
-    Next: func(c *fh.Ctx) bool {
-        return c.Path() == "/webhooks/large-provider"
-    },
-}))
-```
+Reduces DoS risk and prevents accidental large uploads from exhausting resources. Minimal overhead.
 
-## Behavior
+## Ordering guidance
 
-When the request body is too large, the middleware returns a `413 Payload Too Large` error.
+Run before body parsing, typed handlers, compression, validation, or handlers that read the body.
 
-## Best practice
+## Production considerations
 
-Set both server-level body size limits and route-level middleware limits for sensitive endpoints. Put this middleware early, before JSON parsing or expensive authentication work.
+Set different limits by route where needed. File-upload routes should use streaming and explicit limits. Return clear errors without echoing payload content.
+

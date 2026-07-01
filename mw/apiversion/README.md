@@ -1,45 +1,38 @@
-# apiversion middleware
+# API Version Middleware
 
-`apiversion` reads an API version from a request header, applies a default version, rejects unsupported versions, and emits deprecation metadata.
+## What it does
 
-## Import
+Extracts and validates API version information from headers, query parameters, or route context so the app can enforce supported versions.
 
-```go
-import "github.com/oarkflow/fh/mw/apiversion"
-```
-
-## Usage
+## How to implement
 
 ```go
-app.Use(apiversion.New(apiversion.Config{
-    Header:  "Accept-Version",
-    Default: "2026-06-01",
-    Supported: []string{
-        "2026-01-01",
-        "2026-06-01",
-    },
-    Deprecated: map[string]string{
-        "2026-01-01": "2026-12-31",
-    },
-}))
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/apiversion"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(apiversion.New(apiversion.Config{Header: "X-API-Version", Supported: []string{"v1", "v2"}, Default: "v1"}))
+
+	app.Get("/", func(c fh.Ctx) error {
+		return c.String(fh.StatusOK, "ok")
+	})
+}
 ```
 
-Inside a handler:
+## Impact
 
-```go
-app.Get("/users", func(c *fh.Ctx) error {
-    version, _ := c.Locals("api_version").(string)
-    return c.JSON(fh.Map{"version": version})
-})
-```
+Prevents unsupported client versions from reaching handlers and provides consistent API lifecycle behavior.
 
-## Response headers for deprecated versions
+## Ordering guidance
 
-When a request uses a deprecated version, the middleware sets:
+Run before contract validation and handlers. Run after rewrite/proxy normalization if the version is encoded in the path.
 
-- `Deprecation: true`
-- `Sunset: <configured date>`
+## Production considerations
 
-## Best practice
+Document deprecation dates, use `Sunset`/deprecation headers where applicable, and add contract tests per supported version.
 
-Use date-based API versions for long-lived public APIs and keep OpenAPI schemas aligned per version.

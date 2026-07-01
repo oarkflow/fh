@@ -1,6 +1,7 @@
 package cors
 
 import (
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -58,6 +59,10 @@ func New(config ...Config) fh.HandlerFunc {
 	cfg := DefaultConfig
 	if len(config) > 0 {
 		cfg = mergeConfig(cfg, config[0])
+	}
+
+	if err := validateConfig(cfg); err != nil {
+		panic(err)
 	}
 
 	if cfg.OriginStore == nil {
@@ -141,6 +146,25 @@ func New(config ...Config) fh.HandlerFunc {
 
 		return ctx.Next()
 	}
+}
+
+func validateConfig(cfg Config) error {
+	if cfg.AllowCredentials && originListHasWildcard(cfg.AllowOrigins) && cfg.AllowOriginFunc == nil && cfg.OriginStore == nil {
+		return fmt.Errorf("cors: AllowCredentials cannot be used with wildcard AllowOrigins; configure explicit origins or AllowOriginFunc")
+	}
+	if cfg.PreflightStatus < 0 || cfg.PreflightStatus > 999 {
+		return fmt.Errorf("cors: invalid PreflightStatus %d", cfg.PreflightStatus)
+	}
+	return nil
+}
+
+func originListHasWildcard(origins []string) bool {
+	for _, o := range origins {
+		if strings.TrimSpace(o) == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeConfig(base Config, override Config) Config {

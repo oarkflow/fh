@@ -1,37 +1,36 @@
-# rewrite middleware
+# Rewrite Middleware
 
-`rewrite` rewrites request paths using ordered rules. Rules can match by path pattern and can be constrained by method and host.
+## What it does
 
-## Import
+Rewrites request paths or hosts according to configured rules. It is useful for migrations, vanity URLs, and gateway routing.
 
-```go
-import "github.com/oarkflow/fh/mw/rewrite"
-```
-
-## Basic usage
+## How to implement
 
 ```go
-app.Use(rewrite.New(
-    rewrite.Rule{From: "/old", To: "/new"},
-    rewrite.Rule{From: "/v1/users/:id", To: "/users/:id"},
-))
+package main
+
+import (
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/rewrite"
+)
+
+func main() {
+	app := fh.New()
+	app.Use(rewrite.New(rewrite.Rule{From: "/old", To: "/new"}))
+
+	app.Get("/new", func(c fh.Ctx) error { return c.String(fh.StatusOK, "new") })
+}
 ```
 
-## With host and method constraints
+## Impact
 
-```go
-app.Use(rewrite.WithConfig(rewrite.Config{
-    Rules: []rewrite.Rule{
-        {
-            From: "/api/:tenant/*",
-            To: "/tenants/:tenant/*",
-            Methods: []string{"GET", "POST"},
-            Host: "*.internal.example.com",
-        },
-    },
-}))
-```
+Low overhead per rule. Poorly designed rules can make routing confusing.
 
-## Best practice
+## Ordering guidance
 
-Place rewrite before route matching or route groups that depend on the rewritten path. Keep rewrite rules deterministic and avoid broad catch-all rules before specific rules.
+Run before router-dependent middleware/handlers if the rewritten path should drive route matching.
+
+## Production considerations
+
+Keep rewrite rules explicit and tested. Avoid open redirect patterns and log rewrites during migrations.
+
