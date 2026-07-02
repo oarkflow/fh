@@ -808,15 +808,6 @@ func (a *App) runShutdownHooks() {
 	})
 }
 
-func (a *App) setConnActive(conn net.Conn, active bool) {
-	a.connMu.Lock()
-	state := a.conns[conn]
-	a.connMu.Unlock()
-	if state != nil {
-		state.active.Store(active)
-	}
-}
-
 func (a *App) setH2Conn(conn net.Conn, h2c *h2Conn) {
 	a.connMu.Lock()
 	if state := a.conns[conn]; state != nil {
@@ -1361,7 +1352,105 @@ func defaultErrorHandler(ctx Ctx, err error) {
 }
 
 func defaultNotFoundHandler(ctx Ctx) error {
+	// Skip logging for static file requests (js, css, json, png, jpg, etc.)
+	if isStaticFile(ctx.Path()) {
+		return ctx.SendStatus(404)
+	}
 	return NotFound("Resource not found")
+}
+
+func isStaticFile(path string) bool {
+	n := len(path)
+	if n < 3 {
+		return false
+	}
+
+	// Find extension start from the end.
+	// Stop at slash so `/api/users.v1/list` does not scan too far.
+	dot := -1
+	for i := n - 1; i >= 0; i-- {
+		switch path[i] {
+		case '.':
+			dot = i
+			i = -1
+		case '/', '\\':
+			i = -1
+		}
+	}
+
+	if dot < 0 || dot == n-1 {
+		return false
+	}
+
+	ext := path[dot:]
+
+	switch len(ext) {
+	case 3:
+		return eqExt(ext, ".js") ||
+			eqExt(ext, ".gz")
+
+	case 4:
+		switch lower(ext[1]) {
+		case 'c':
+			return eqExt(ext, ".css") || eqExt(ext, ".csv")
+		case 'g':
+			return eqExt(ext, ".gif")
+		case 'i':
+			return eqExt(ext, ".ico")
+		case 'j':
+			return eqExt(ext, ".jpg")
+		case 'm':
+			return eqExt(ext, ".mp3") || eqExt(ext, ".mp4")
+		case 'o':
+			return eqExt(ext, ".ogg") || eqExt(ext, ".otf")
+		case 'p':
+			return eqExt(ext, ".png") || eqExt(ext, ".pdf")
+		case 's':
+			return eqExt(ext, ".svg")
+		case 't':
+			return eqExt(ext, ".ttf") || eqExt(ext, ".txt") || eqExt(ext, ".tar")
+		case 'w':
+			return eqExt(ext, ".wav")
+		case 'x':
+			return eqExt(ext, ".xml")
+		case 'z':
+			return eqExt(ext, ".zip")
+		}
+
+	case 5:
+		switch lower(ext[1]) {
+		case 'h':
+			return eqExt(ext, ".html")
+		case 'j':
+			return eqExt(ext, ".json") || eqExt(ext, ".jpeg")
+		case 'w':
+			return eqExt(ext, ".webm") || eqExt(ext, ".webp") || eqExt(ext, ".woff")
+		}
+
+	case 6:
+		return eqExt(ext, ".woff2")
+	}
+
+	return false
+}
+
+func eqExt(s, ext string) bool {
+	if len(s) != len(ext) {
+		return false
+	}
+	for i := 0; i < len(ext); i++ {
+		if lower(s[i]) != ext[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func lower(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 func defaultMethodNotAllowedHandler(ctx Ctx, allowed []string) error {
