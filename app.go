@@ -287,9 +287,10 @@ type App struct {
 	healthMu     sync.RWMutex
 	healthChecks []registeredHealthCheck
 	openapi      OpenAPIConfig
-	reliability  *Reliability
-	audit        AuditSink
-	drainingCh   chan struct{} // closed when draining starts, signals all connection contexts
+	hasMiddleware bool
+	reliability   *Reliability
+	audit         AuditSink
+	drainingCh    chan struct{} // closed when draining starts, signals all connection contexts
 }
 
 type connState struct {
@@ -390,6 +391,7 @@ func buildApp(cfg Config) *App {
 	}
 
 	app.router.UnsafeParams = !cfg.SafeParams
+	app.hasMiddleware = len(app.middleware) > 0
 
 	if cfg.MaxConnections > 0 {
 		app.sem = make(chan struct{}, cfg.MaxConnections)
@@ -493,6 +495,7 @@ func (a *App) Use(handlers ...HandlerFunc) *App {
 	defer a.buildMu.Unlock()
 	a.assertMutable()
 	a.middleware = append(a.middleware, handlers...)
+	a.hasMiddleware = true
 	return a
 }
 
@@ -1115,6 +1118,10 @@ func (a *App) serveConn(conn net.Conn) {
 			}
 		}
 
+		if len(ctx.Header.Method) == 4 && ctx.Header.Method[0] == 'H' && ctx.Header.Method[1] == 'E' && ctx.Header.Method[2] == 'A' && ctx.Header.Method[3] == 'D' {
+			ctx.flags |= ctxFlagHEAD
+		}
+
 		// Derive a per-request context only when it adds observable value. In the
 		// default request path there is no per-request timeout, so reusing the
 		// connection context avoids context.WithCancel allocation/work on every
@@ -1190,64 +1197,77 @@ func (a *App) dispatch(ctx *DefaultCtx) {
 }
 
 func (a *App) dispatchCore(ctx *DefaultCtx) {
-	for rewrites := 0; ; rewrites++ {
-		if rewrites > 8 {
-			a.cfg.ErrorHandler(ctx, NewHTTPError(StatusLoopDetected, "REWRITE_LOOP", "Too many internal rewrites"))
+	ctx.params = ctx.params[:0]
+	path := ctx.path()
+
+	if a.router.hasPrebuilt && ctx.canRouteStaticPrebuilt() {
+		if resp := a.router.FindPrebuiltResponseBytes(ctx.Header.Method, path); resp != nil {
+			ctx.responded = true
+			_ = writeAll(ctx.conn, resp)
 			return
 		}
+	}
+
+	handler := a.router.FindBytes(ctx.Header.Method, path, &ctx.params)
+	if handler == nil && bytesEqualFold(ctx.Header.Method, MethodHEADBytes) {
 		ctx.params = ctx.params[:0]
-		path := ctx.path()
-		if ctx.canRouteStaticPrebuilt() {
-			if resp := a.router.FindPrebuiltResponseBytes(ctx.Header.Method, path); resp != nil {
-				ctx.responded = true
-				_ = writeAll(ctx.conn, resp)
+		handler = a.router.FindBytes(MethodGETBytes, path, &ctx.params)
+	}
+
+	if handler == nil {
+		allowed := a.router.Allowed(path)
+		if bytesEqualFold(ctx.Header.Method, MethodOPTIONSBytes) && len(path) == 1 && path[0] == '*' {
+			allowed = a.router.Methods()
+		}
+		fallback := func(ctx Ctx) error {
+			if len(allowed) == 0 {
+				return a.cfg.NotFoundHandler(ctx)
+			}
+			ctx.Set("Allow", strings.Join(allowed, ", "))
+			if bytesEqualFold(ctx.RequestHeader().Method, MethodOPTIONSBytes) {
+				return a.cfg.OptionsHandler(ctx, allowed)
+			}
+			return a.cfg.MethodNotAllowed(ctx, allowed)
+		}
+		if a.hasMiddleware {
+			handler = a.chain([]HandlerFunc{fallback})
+		} else {
+			handler = fallback
+		}
+	}
+
+	err := handler(ctx)
+	if errors.Is(err, ErrRewrite) {
+		if ctx.responded {
+			return
+		}
+		for rewrites := 1; ; rewrites++ {
+			if rewrites > 8 {
+				a.cfg.ErrorHandler(ctx, NewHTTPError(StatusLoopDetected, "REWRITE_LOOP", "Too many internal rewrites"))
 				return
 			}
-		}
-		handler := a.router.FindBytes(ctx.Header.Method, path, &ctx.params)
-		if handler == nil && bytesEqualFold(ctx.Header.Method, MethodHEADBytes) {
 			ctx.params = ctx.params[:0]
-			handler = a.router.FindBytes(MethodGETBytes, path, &ctx.params)
-		}
-
-		if handler == nil {
-			ctx.params = ctx.params[:0]
-			allowed := a.router.Allowed(path)
-			if bytesEqualFold(ctx.Header.Method, MethodOPTIONSBytes) && len(path) == 1 && path[0] == '*' {
-				allowed = a.router.Methods()
+			path = ctx.path()
+			handler = a.router.FindBytes(ctx.Header.Method, path, &ctx.params)
+			if handler == nil {
+				return
 			}
-			fallback := func(ctx Ctx) error {
-				if len(allowed) == 0 {
-					return a.cfg.NotFoundHandler(ctx)
-				}
-				ctx.Set("Allow", strings.Join(allowed, ", "))
-				if bytesEqualFold(ctx.RequestHeader().Method, MethodOPTIONSBytes) {
-					return a.cfg.OptionsHandler(ctx, allowed)
-				}
-				return a.cfg.MethodNotAllowed(ctx, allowed)
+			err = handler(ctx)
+			if !errors.Is(err, ErrRewrite) {
+				break
 			}
-			if len(a.middleware) > 0 {
-				handler = a.chain([]HandlerFunc{fallback})
-			} else {
-				handler = fallback
-			}
-		}
-
-		err := handler(ctx)
-		if errors.Is(err, ErrRewrite) {
 			if ctx.responded {
 				return
 			}
-			continue
 		}
-		if err != nil {
-			if !ctx.responded {
-				a.cfg.ErrorHandler(ctx, err)
-			}
-		} else if !ctx.responded {
-			_ = ctx.SendStatus(200)
+	}
+
+	if err != nil {
+		if !ctx.responded {
+			a.cfg.ErrorHandler(ctx, err)
 		}
-		return
+	} else if !ctx.responded {
+		_ = ctx.SendStatus(200)
 	}
 }
 

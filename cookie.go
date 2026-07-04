@@ -218,6 +218,7 @@ func (c *DefaultCtx) SetCookie(cookie *Cookie) {
 		return
 	}
 	c.responseCookies = append(c.responseCookies, *cookie)
+	c.flags |= ctxFlagHasExtraResp
 }
 
 // GetCookie returns the value of a named cookie from the request.

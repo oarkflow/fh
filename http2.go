@@ -842,6 +842,7 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 		defer func() { <-h.streamSem }()
 		ctx := acquireCtx(h.conn, h.app)
 		ctx.h2 = &h2Response{conn: h, stream: s}
+		ctx.flags |= ctxFlagH2
 		ctx.Header.Method = s2b(s.method)
 		ctx.Header.URI = s2b(s.path)
 		ctx.Header.RequestTarget = ctx.Header.URI

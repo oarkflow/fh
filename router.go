@@ -48,6 +48,8 @@ type Router struct {
 	staticShortcutGET, staticShortcutPOST, staticShortcutPUT, staticShortcutDELETE, staticShortcutPATCH, staticShortcutHEAD, staticShortcutOPTIONS, staticShortcutCONNECT, staticShortcutTRACE, staticShortcutQUERY                  []staticShortcut
 	prebuiltGET, prebuiltPOST, prebuiltPUT, prebuiltDELETE, prebuiltPATCH, prebuiltHEAD, prebuiltOPTIONS, prebuiltCONNECT, prebuiltTRACE, prebuiltQUERY                                                                            []prebuiltResponse
 
+	hasPrebuilt bool
+
 	named      map[string]namedRoute
 	routeNames map[string]string
 	routes     map[string]struct{}
@@ -597,6 +599,7 @@ func (r *Router) addStaticShortcut(method string, fr staticShortcut) {
 }
 
 func (r *Router) addPrebuiltResponse(method, path string, resp []byte) {
+	r.hasPrebuilt = true
 	fr := prebuiltResponse{path: path, resp: resp}
 	switch method {
 	case "GET":
@@ -1256,31 +1259,15 @@ func prebuildStatic200(contentType, body []byte) []byte {
 func (c *DefaultCtx) canStaticPrebuilt() bool {
 	return c.status == StatusOK &&
 		!c.responded &&
-		c.h2 == nil &&
-		c.bodyTransform == nil &&
-		!c.captureResponseBody &&
-		c.chCount == 0 &&
-		len(c.extraHeaders) == 0 &&
-		len(c.responseCookies) == 0 &&
-		len(c.responseTrailers) == 0 &&
-		len(c.beforeResponse) == 0 &&
+		c.flags == 0 &&
 		c.Header.KeepAlive &&
 		!c.forceClose &&
-		!methodIs(c.Header.Method, 'H', 'E', 'A', 'D') &&
 		!c.server.cfg.SendDateHeader && !c.server.cfg.SendKeepAliveHeader
 }
 
 func (c *DefaultCtx) canRouteStaticPrebuilt() bool {
-	return c.h2 == nil &&
-		c.bodyTransform == nil &&
-		!c.captureResponseBody &&
-		c.chCount == 0 &&
-		len(c.extraHeaders) == 0 &&
-		len(c.responseCookies) == 0 &&
-		len(c.responseTrailers) == 0 &&
-		len(c.beforeResponse) == 0 &&
+	return c.flags == 0 &&
 		c.Header.KeepAlive &&
 		!c.forceClose &&
-		!methodIs(c.Header.Method, 'H', 'E', 'A', 'D') &&
 		!c.server.cfg.SendDateHeader && !c.server.cfg.SendKeepAliveHeader
 }

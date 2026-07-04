@@ -315,6 +315,7 @@ func (c *DefaultCtx) Problem(p Problem) error {
 		p.Type = "about:blank"
 	}
 	c.status = p.Status
+	c.flags |= ctxFlagNon200
 	c.contentType = []byte("application/problem+json; charset=utf-8")
 	b, err := json.Marshal(p)
 	if err != nil {
@@ -487,6 +488,7 @@ func (c *DefaultCtx) fallbackErrorResponse(status int, code, title string) error
 	}
 	body := `{"type":"about:blank","title":"` + escapeJSONString(title) + `","status":` + fmt.Sprint(status) + `,"code":"` + escapeJSONString(code) + `"}`
 	c.status = status
+	c.flags |= ctxFlagNon200
 	c.contentType = []byte("application/problem+json; charset=utf-8")
 	return c.writeResponseString(body)
 }

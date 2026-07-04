@@ -14,6 +14,15 @@ import (
 	"time"
 )
 
+const (
+	ctxFlagH2            = 1 << 0
+	ctxFlagBodyTransform = 1 << 1
+	ctxFlagCaptureBody   = 1 << 2
+	ctxFlagHasExtraResp  = 1 << 3 // headers, cookies, trailers, beforeResponse
+	ctxFlagHEAD          = 1 << 4
+	ctxFlagNon200        = 1 << 5 // status != StatusOK
+)
+
 var (
 	dateBuf            atomic.Value
 	dateCacheUnix      int64
@@ -201,6 +210,7 @@ type DefaultCtx struct {
 	captureResponseBody bool
 	bodyParserMapPtr    uintptr
 	bodyParserRawJSON   []byte
+	flags               uint32
 }
 
 type localEntry struct {
@@ -236,14 +246,12 @@ func releaseCtx(c *DefaultCtx) {
 
 func (c *DefaultCtx) reset() {
 	c.Header.reset()
-	clear(c.params)
 	c.params = c.params[:0]
 	c.status = 200
 	if c.chCount > 0 {
 		clear(c.customHeaders[:c.chCount])
 	}
 	c.chCount = 0
-	clear(c.extraHeaders)
 	c.extraHeaders = c.extraHeaders[:0]
 	c.body = nil
 	c.responseBody = c.responseBody[:0]
@@ -252,9 +260,7 @@ func (c *DefaultCtx) reset() {
 	c.forceClose = false
 	c.upgraded = false
 	c.upgradeBuffered = nil
-	clear(c.trailers)
 	c.trailers = c.trailers[:0]
-	clear(c.responseTrailers)
 	c.responseTrailers = c.responseTrailers[:0]
 	c.requestContext = context.Background()
 	c.originalURI = c.originalURI[:0]
@@ -264,24 +270,24 @@ func (c *DefaultCtx) reset() {
 		clear(c.locals[:c.lcount])
 	}
 	c.lcount = 0
-	clear(c.localOverflow)
 	c.queryParsed = false
 	c.qcount = 0
-	clear(c.queryParams)
 	c.queryParams = c.queryParams[:0]
 	c.handlers = nil
 	c.handlerIndex = 0
 	c.cachedIP = ""
-	clear(c.responseCookies)
 	c.responseCookies = c.responseCookies[:0]
 	c.responseTime = time.Time{}
-	clear(c.beforeResponse)
 	c.beforeResponse = c.beforeResponse[:0]
 	c.beforeRan = false
 	c.multipartForm = nil
 	c.multipartErr = nil
 	c.multipartParsed = false
+	c.flags = 0
 	c.captureResponseBody = c.server != nil && c.server.cfg.CaptureResponseBody
+	if c.captureResponseBody {
+		c.flags |= ctxFlagCaptureBody
+	}
 	c.bodyParserMapPtr = 0
 	c.bodyParserRawJSON = nil
 }
@@ -297,6 +303,7 @@ func (c *DefaultCtx) CaptureResponseBody() { c.captureResponseBody = true }
 func (c *DefaultCtx) OnBeforeResponse(fn func(Ctx) error) {
 	if fn != nil && !c.responded && !c.beforeRan {
 		c.beforeResponse = append(c.beforeResponse, fn)
+		c.flags |= ctxFlagHasExtraResp
 	}
 }
 
@@ -627,6 +634,7 @@ func (c *DefaultCtx) SetTrailer(key, value string) {
 		}
 	}
 	c.responseTrailers = append(c.responseTrailers, Header{Key: []byte(key), Value: []byte(value)})
+	c.flags |= ctxFlagHasExtraResp
 }
 
 func (c *DefaultCtx) BodyParser(v any) error {
@@ -688,7 +696,10 @@ func (c *DefaultCtx) Deadline() (time.Time, bool) {
 
 // TransformBody installs a buffered response transformation. It is intended
 // for middleware such as gzip compression and does not affect Stream output.
-func (c *DefaultCtx) TransformBody(fn func([]byte) ([]byte, error)) { c.bodyTransform = fn }
+func (c *DefaultCtx) TransformBody(fn func([]byte) ([]byte, error)) {
+	c.bodyTransform = fn
+	c.flags |= ctxFlagBodyTransform
+}
 
 // AddBodyTransform appends a response transformation without replacing an
 // existing middleware transformation.
@@ -699,6 +710,7 @@ func (c *DefaultCtx) AddBodyTransform(fn func([]byte) ([]byte, error)) {
 	previous := c.bodyTransform
 	if previous == nil {
 		c.bodyTransform = fn
+		c.flags |= ctxFlagBodyTransform
 		return
 	}
 	c.bodyTransform = func(body []byte) ([]byte, error) {
@@ -785,6 +797,9 @@ func (c *DefaultCtx) Status(code int) Ctx {
 		code = 500
 	}
 	c.status = code
+	if code != StatusOK {
+		c.flags |= ctxFlagNon200
+	}
 	return c
 }
 
@@ -825,6 +840,7 @@ func (c *DefaultCtx) Set(key, value string) {
 	} else {
 		c.extraHeaders = append(c.extraHeaders, Header{Key: k, Value: v})
 	}
+	c.flags |= ctxFlagHasExtraResp
 }
 
 // Append adds a comma-separated response header value without replacing an
@@ -1030,6 +1046,9 @@ func (c *DefaultCtx) Render(name string, data any, layout ...string) error {
 
 func (c *DefaultCtx) SendStatus(code int) error {
 	c.status = code
+	if code != StatusOK {
+		c.flags |= ctxFlagNon200
+	}
 	return c.writeResponse(nil)
 }
 
@@ -1039,6 +1058,7 @@ func (c *DefaultCtx) Redirect(location string, code ...int) error {
 		sc = code[0]
 	}
 	c.status = sc
+	c.flags |= ctxFlagNon200
 	c.Set("Location", location)
 	return c.writeResponse(nil)
 }
@@ -1189,7 +1209,7 @@ func (c *DefaultCtx) writeResponseString(s string) error {
 	buf = append(buf, '\r', '\n')
 
 	// Body
-	if bodyAllowed && !methodIs(c.Header.Method, 'H', 'E', 'A', 'D') {
+	if bodyAllowed && c.flags&ctxFlagHEAD == 0 {
 		if hasTrailers {
 			// Write body as a single chunk
 			if len(s) > 0 {
@@ -1567,7 +1587,7 @@ func (c *DefaultCtx) writeResponse(body []byte) error {
 	buf = append(buf, '\r', '\n')
 
 	// RFC 9110: a HEAD response has the same headers as GET but no content.
-	if bodyAllowed && !methodIs(c.Header.Method, 'H', 'E', 'A', 'D') {
+	if bodyAllowed && c.flags&ctxFlagHEAD == 0 {
 		if hasTrailers {
 			if len(body) > 0 {
 				buf = appendHex(buf, len(body))
@@ -1593,9 +1613,7 @@ func (c *DefaultCtx) writeResponse(body []byte) error {
 }
 
 func (c *DefaultCtx) canDirectWrite200() bool {
-	return !c.responded && c.status == StatusOK && c.h2 == nil && c.bodyTransform == nil && !c.captureResponseBody &&
-		c.chCount == 0 && len(c.extraHeaders) == 0 && len(c.responseCookies) == 0 && len(c.responseTrailers) == 0 &&
-		len(c.beforeResponse) == 0 && !methodIs(c.Header.Method, 'H', 'E', 'A', 'D')
+	return !c.responded && c.status == StatusOK && c.flags == 0
 }
 
 func (c *DefaultCtx) writeDirect200String(s string) error {
