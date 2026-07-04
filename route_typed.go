@@ -56,8 +56,11 @@ func (a *App) ConnectTyped(path string, handler any, middleware ...HandlerFunc) 
 func (a *App) TraceTyped(path string, handler any, middleware ...HandlerFunc) *App {
 	return a.addTyped("TRACE", path, handler, middleware...)
 }
+func (a *App) QueryTyped(path string, handler any, middleware ...HandlerFunc) *App {
+	return a.addTyped("QUERY", path, handler, middleware...)
+}
 func (a *App) AllTyped(path string, handler any, middleware ...HandlerFunc) *App {
-	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"} {
+	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "QUERY"} {
 		a.addTyped(m, path, handler, middleware...)
 	}
 	return a

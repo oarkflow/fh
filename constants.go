@@ -254,6 +254,7 @@ const (
 	MethodCONNECT = "CONNECT"
 	MethodOPTIONS = "OPTIONS"
 	MethodTRACE   = "TRACE"
+	MethodQUERY   = "QUERY"
 
 	MethodCOPY       = "COPY"
 	MethodLOCK       = "LOCK"
@@ -592,6 +593,7 @@ var (
 	MethodCONNECTBytes = []byte(MethodCONNECT)
 	MethodOPTIONSBytes = []byte(MethodOPTIONS)
 	MethodTRACEBytes   = []byte(MethodTRACE)
+	MethodQUERYBytes   = []byte(MethodQUERY)
 
 	MethodCOPYBytes      = []byte(MethodCOPY)
 	MethodLOCKBytes      = []byte(MethodLOCK)

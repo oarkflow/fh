@@ -40,7 +40,27 @@ app.DeleteTyped(path, handler)
 app.OptionsTyped(path, handler)
 app.ConnectTyped(path, handler)
 app.TraceTyped(path, handler)
-app.AllTyped(path, handler)  // registers all 9 methods
+app.QueryTyped(path, handler)
+app.AllTyped(path, handler)  // registers all 10 methods
+```
+
+QUERY typed endpoints work like POST (accept a body) but are safe and idempotent:
+
+```go
+type SearchRequest struct {
+    Query string `json:"query" validate:"required"`
+    Page  int    `json:"page"`
+}
+
+type SearchResponse struct {
+    Results []SearchResult `json:"results"`
+    Total   int            `json:"total"`
+}
+
+app.QueryTyped("/search", func(c *fh.Ctx, req SearchRequest) (SearchResponse, error) {
+    results, total := search(req.Query, req.Page)
+    return SearchResponse{Results: results, Total: total}, nil
+})
 ```
 
 Typed methods are also available on route groups:

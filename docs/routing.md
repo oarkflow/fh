@@ -17,6 +17,7 @@ app.Head("/users/:id", headUser)
 app.Options("/users", optionsUsers)
 app.Connect("/proxy", proxyConnect)
 app.Trace("/debug", traceHandler)
+app.Query("/search", searchHandler)
 ```
 
 ### Named Parameters (`:param`)
@@ -53,11 +54,18 @@ c.Params("name", "guest")  // returns "guest" if not found
 ### Method Routing
 
 ```go
-// Register all 9 HTTP methods at once
+// Register all 10 HTTP methods at once
 app.All("/webhook", webhookHandler)
 
 // Register custom method
 app.Add("PURGE", "/cache", purgeHandler)
+
+// QUERY method (RFC 9485) — safe, idempotent, body-bearing method for search
+app.Query("/search", func(c *fh.Ctx) error {
+    var q SearchRequest
+    c.BodyParser(&q)
+    return c.JSON(search(q))
+})
 
 // HEAD falls back to GET handler automatically if no HEAD route is registered
 ```

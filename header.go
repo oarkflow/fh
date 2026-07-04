@@ -75,6 +75,7 @@ const (
 	MethodCONNECTStr = "CONNECT"
 	MethodOPTIONSStr = "OPTIONS"
 	MethodTRACEStr   = "TRACE"
+	MethodQUERYStr   = "QUERY"
 )
 
 // ErrMalformedRequest is returned when the request cannot be parsed.

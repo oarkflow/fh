@@ -476,9 +476,12 @@ func (a *App) Connect(path string, handlers ...HandlerFunc) *App {
 func (a *App) Trace(path string, handlers ...HandlerFunc) *App {
 	return a.Add("TRACE", path, handlers...)
 }
+func (a *App) Query(path string, handlers ...HandlerFunc) *App {
+	return a.Add("QUERY", path, handlers...)
+}
 
 func (a *App) All(path string, handlers ...HandlerFunc) *App {
-	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"} {
+	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "QUERY"} {
 		a.Add(m, path, handlers...)
 	}
 	return a

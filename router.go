@@ -42,11 +42,11 @@ type Router struct {
 	// Cached common-method pointers remove two map lookups from the request hot
 	// path. The generic maps remain authoritative for custom methods, URL
 	// generation, Allowed(), and build-time validation.
-	treeGET, treePOST, treePUT, treeDELETE, treePATCH, treeHEAD, treeOPTIONS, treeCONNECT, treeTRACE                                                                                           *node
-	staticGET, staticPOST, staticPUT, staticDELETE, staticPATCH, staticHEAD, staticOPTIONS, staticCONNECT, staticTRACE                                                                         map[string]HandlerFunc
-	paramGET, paramPOST, paramPUT, paramDELETE, paramPATCH, paramHEAD, paramOPTIONS, paramCONNECT, paramTRACE                                                                                  []paramShortcut
-	staticShortcutGET, staticShortcutPOST, staticShortcutPUT, staticShortcutDELETE, staticShortcutPATCH, staticShortcutHEAD, staticShortcutOPTIONS, staticShortcutCONNECT, staticShortcutTRACE []staticShortcut
-	prebuiltGET, prebuiltPOST, prebuiltPUT, prebuiltDELETE, prebuiltPATCH, prebuiltHEAD, prebuiltOPTIONS, prebuiltCONNECT, prebuiltTRACE                                                       []prebuiltResponse
+	treeGET, treePOST, treePUT, treeDELETE, treePATCH, treeHEAD, treeOPTIONS, treeCONNECT, treeTRACE, treeQUERY                                                                                                                    *node
+	staticGET, staticPOST, staticPUT, staticDELETE, staticPATCH, staticHEAD, staticOPTIONS, staticCONNECT, staticTRACE, staticQUERY                                                                                                  map[string]HandlerFunc
+	paramGET, paramPOST, paramPUT, paramDELETE, paramPATCH, paramHEAD, paramOPTIONS, paramCONNECT, paramTRACE, paramQUERY                                                                                                           []paramShortcut
+	staticShortcutGET, staticShortcutPOST, staticShortcutPUT, staticShortcutDELETE, staticShortcutPATCH, staticShortcutHEAD, staticShortcutOPTIONS, staticShortcutCONNECT, staticShortcutTRACE, staticShortcutQUERY                  []staticShortcut
+	prebuiltGET, prebuiltPOST, prebuiltPUT, prebuiltDELETE, prebuiltPATCH, prebuiltHEAD, prebuiltOPTIONS, prebuiltCONNECT, prebuiltTRACE, prebuiltQUERY                                                                            []prebuiltResponse
 
 	named      map[string]namedRoute
 	routeNames map[string]string
@@ -349,6 +349,9 @@ func (r *Router) findBytesCanonical(method, path []byte, params *[]Param) Handle
 		if method[0] == 'T' && method[1] == 'R' && method[2] == 'A' && method[3] == 'C' && method[4] == 'E' {
 			return r.findNoLockBytesCore(r.staticShortcutTRACE, r.staticTRACE, r.paramTRACE, r.treeTRACE, path, params)
 		}
+		if method[0] == 'Q' && method[1] == 'U' && method[2] == 'E' && method[3] == 'R' && method[4] == 'Y' {
+			return r.findNoLockBytesCore(r.staticShortcutQUERY, r.staticQUERY, r.paramQUERY, r.treeQUERY, path, params)
+		}
 	case 6:
 		if method[0] == 'D' && method[1] == 'E' && method[2] == 'L' && method[3] == 'E' && method[4] == 'T' && method[5] == 'E' {
 			return r.findNoLockBytesCore(r.staticShortcutDELETE, r.staticDELETE, r.paramDELETE, r.treeDELETE, path, params)
@@ -469,6 +472,7 @@ func (r *Router) allowedNoLock(path []byte) []string {
 		"CONNECT",
 		"OPTIONS",
 		"TRACE",
+		"QUERY",
 	}
 
 	lookupPath := cleanLookupPath(path)
@@ -587,6 +591,8 @@ func (r *Router) addStaticShortcut(method string, fr staticShortcut) {
 		r.staticShortcutCONNECT = append(r.staticShortcutCONNECT, fr)
 	case "TRACE":
 		r.staticShortcutTRACE = append(r.staticShortcutTRACE, fr)
+	case "QUERY":
+		r.staticShortcutQUERY = append(r.staticShortcutQUERY, fr)
 	}
 }
 
@@ -611,6 +617,8 @@ func (r *Router) addPrebuiltResponse(method, path string, resp []byte) {
 		r.prebuiltCONNECT = append(r.prebuiltCONNECT, fr)
 	case "TRACE":
 		r.prebuiltTRACE = append(r.prebuiltTRACE, fr)
+	case "QUERY":
+		r.prebuiltQUERY = append(r.prebuiltQUERY, fr)
 	}
 }
 
@@ -651,6 +659,9 @@ func (r *Router) FindPrebuiltResponseBytes(method, path []byte) []byte {
 		}
 		if method[0] == 'T' && method[1] == 'R' && method[2] == 'A' && method[3] == 'C' && method[4] == 'E' {
 			return matchPrebuiltResponse(r.prebuiltTRACE, path)
+		}
+		if method[0] == 'Q' && method[1] == 'U' && method[2] == 'E' && method[3] == 'R' && method[4] == 'Y' {
+			return matchPrebuiltResponse(r.prebuiltQUERY, path)
 		}
 	case 6:
 		if method[0] == 'D' && method[1] == 'E' && method[2] == 'L' && method[3] == 'E' && method[4] == 'T' && method[5] == 'E' {
@@ -736,6 +747,8 @@ func (r *Router) addParamShortcut(method string, fr paramShortcut) {
 		r.paramCONNECT = append(r.paramCONNECT, fr)
 	case "TRACE":
 		r.paramTRACE = append(r.paramTRACE, fr)
+	case "QUERY":
+		r.paramQUERY = append(r.paramQUERY, fr)
 	}
 }
 
@@ -794,6 +807,8 @@ func (r *Router) setCommonTree(method string, root *node) {
 		r.treeCONNECT = root
 	case "TRACE":
 		r.treeTRACE = root
+	case "QUERY":
+		r.treeQUERY = root
 	}
 }
 
@@ -817,6 +832,8 @@ func (r *Router) setCommonStatic(method string, m map[string]HandlerFunc) {
 		r.staticCONNECT = m
 	case "TRACE":
 		r.staticTRACE = m
+	case "QUERY":
+		r.staticQUERY = m
 	}
 }
 

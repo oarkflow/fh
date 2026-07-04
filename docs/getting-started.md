@@ -53,6 +53,13 @@ app.Head("/users/:id", headUser)
 app.Options("/users", optionsUsers)
 app.All("/webhook", webhookHandler) // matches any HTTP method
 app.Add("PURGE", "/cache", purgeCache) // custom method
+
+// QUERY (RFC 9485) — safe/idempotent method with request body for search/query
+app.Query("/search", func(c *fh.Ctx) error {
+    var q SearchRequest
+    c.BodyParser(&q)
+    return c.JSON(search(q))
+})
 ```
 
 ### Handler Signature

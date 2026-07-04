@@ -84,9 +84,12 @@ func (g *Group) Connect(path string, handlers ...HandlerFunc) *Group {
 func (g *Group) Trace(path string, handlers ...HandlerFunc) *Group {
 	return g.add("TRACE", path, handlers...)
 }
+func (g *Group) Query(path string, handlers ...HandlerFunc) *Group {
+	return g.add("QUERY", path, handlers...)
+}
 
 func (g *Group) All(path string, handlers ...HandlerFunc) *Group {
-	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"} {
+	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "QUERY"} {
 		g.add(m, path, handlers...)
 	}
 	return g
@@ -119,8 +122,11 @@ func (g *Group) ConnectTyped(path string, handler any, middleware ...HandlerFunc
 func (g *Group) TraceTyped(path string, handler any, middleware ...HandlerFunc) *Group {
 	return g.addTyped("TRACE", path, handler, middleware...)
 }
+func (g *Group) QueryTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	return g.addTyped("QUERY", path, handler, middleware...)
+}
 func (g *Group) AllTyped(path string, handler any, middleware ...HandlerFunc) *Group {
-	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"} {
+	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "QUERY"} {
 		g.addTyped(m, path, handler, middleware...)
 	}
 	return g
