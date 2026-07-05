@@ -964,3 +964,25 @@ This package includes additional production support added after the security/cor
 - `cluster` package for node heartbeat and lease-based leader election.
 - `config` package for JSON/env driven `fh.Config` loading.
 - `docs/REMAINING_GAPS_AND_CONTINUED_IMPLEMENTATION.md` with the current gap list and next implementation priorities.
+
+## Root-package HTTP client
+
+This archive includes a new production-grade outbound HTTP client directly in the root `fh` package. Use `fh.NewClient`, `fh.ClientConfig`, `fh.ClientMiddleware`, `fh.Request`, and `fh.Response` without creating a separate `client/` package.
+
+Key capabilities:
+
+- high-performance connection pooling with HTTP/1.1, HTTPS and HTTP/2 support through Go's hardened transport
+- fluent request builder with headers, query params, path params, cookies, JSON, form, multipart, raw bytes, strings and stream bodies
+- typed helpers: `fh.GetJSON[T]`, `fh.PostJSON[Req,Res]`, `fh.PutJSON[Req,Res]`
+- `fh` JSON engine integration through `CurrentJSONEngine()`
+- lifecycle hooks for request, retry, redirect, DNS, connect, TLS, connection reuse and response stages
+- middleware chain: logger, recover, headers, auth, API key, HMAC signing, idempotency, gzip request compression, bulkhead, rate limiting, circuit breaker and body limits
+- resilience: retry policies, jitter backoff, Retry-After support, circuit breaker, bulkhead and async/batch execution
+- security: strict outbound SSRF policy, allowed/blocked hosts, HTTPS requirement, redirect policy and sensitive URL/header redaction
+- response helpers for bytes, string, JSON decode, streaming, safe drain/close and save-to-file
+
+See `docs/http-client.md` and `examples/http_client` for usage.
+
+### Root HTTP Client Continuation
+
+The outbound HTTP client lives directly in the root `fh` package. It now includes additional production features beyond the initial implementation: replayable retry bodies, service clients, request-id/trace middleware, in-memory HTTP cache, status enforcement, token-source auth, round-robin load balancing, streaming/atomic downloads, and stricter dial-path SSRF checks.

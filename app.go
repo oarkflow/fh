@@ -264,29 +264,29 @@ var ErrRewrite = errors.New("fh: reroute rewritten request")
 
 // App is the top-level application object. Create with New().
 type App struct {
-	cfg          Config
-	router       *Router
-	hooks        Hooks
-	logger       Logger
-	middleware   []HandlerFunc
-	sem          chan struct{}
-	listener     net.Listener
-	activeConn   sync.WaitGroup
-	closed       atomic.Bool
-	draining     atomic.Bool
-	connMu       sync.Mutex
-	conns        map[net.Conn]*connState
-	shutdownOnce sync.Once
-	started      atomic.Bool
-	buildMu      sync.Mutex
-	groups       []*Group
-	lastRoute    namedRoute
-	errorCounts  sync.Map // error code -> *atomic.Uint64
-	routeMetaMu  sync.RWMutex
-	routeMeta    []RouteInfo
-	healthMu     sync.RWMutex
-	healthChecks []registeredHealthCheck
-	openapi      OpenAPIConfig
+	cfg           Config
+	router        *Router
+	hooks         Hooks
+	logger        Logger
+	middleware    []HandlerFunc
+	sem           chan struct{}
+	listener      net.Listener
+	activeConn    sync.WaitGroup
+	closed        atomic.Bool
+	draining      atomic.Bool
+	connMu        sync.Mutex
+	conns         map[net.Conn]*connState
+	shutdownOnce  sync.Once
+	started       atomic.Bool
+	buildMu       sync.Mutex
+	groups        []*Group
+	lastRoute     namedRoute
+	errorCounts   sync.Map // error code -> *atomic.Uint64
+	routeMetaMu   sync.RWMutex
+	routeMeta     []RouteInfo
+	healthMu      sync.RWMutex
+	healthChecks  []registeredHealthCheck
+	openapi       OpenAPIConfig
 	hasMiddleware bool
 	reliability   *Reliability
 	audit         AuditSink
@@ -1249,8 +1249,27 @@ func (a *App) dispatchCore(ctx *DefaultCtx) {
 			ctx.params = ctx.params[:0]
 			path = ctx.path()
 			handler = a.router.FindBytes(ctx.Header.Method, path, &ctx.params)
+			if handler == nil && bytesEqualFold(ctx.Header.Method, MethodHEADBytes) {
+				ctx.params = ctx.params[:0]
+				handler = a.router.FindBytes(MethodGETBytes, path, &ctx.params)
+			}
 			if handler == nil {
-				return
+				allowed := a.router.Allowed(path)
+				fallback := func(ctx Ctx) error {
+					if len(allowed) == 0 {
+						return a.cfg.NotFoundHandler(ctx)
+					}
+					ctx.Set("Allow", strings.Join(allowed, ", "))
+					if bytesEqualFold(ctx.RequestHeader().Method, MethodOPTIONSBytes) {
+						return a.cfg.OptionsHandler(ctx, allowed)
+					}
+					return a.cfg.MethodNotAllowed(ctx, allowed)
+				}
+				if a.hasMiddleware {
+					handler = a.chain([]HandlerFunc{fallback})
+				} else {
+					handler = fallback
+				}
 			}
 			err = handler(ctx)
 			if !errors.Is(err, ErrRewrite) {
