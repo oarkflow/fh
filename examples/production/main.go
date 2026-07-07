@@ -24,7 +24,7 @@ import (
 	"github.com/oarkflow/fh/mw/tenantlimit"
 	"github.com/oarkflow/fh/mw/tracing"
 	"github.com/oarkflow/fh/mw/webhook"
-	"github.com/oarkflow/fh/storage/memory"
+	"github.com/oarkflow/fh/pkg/storage/memory"
 )
 
 func main() {
