@@ -323,7 +323,35 @@ func New(opts ...Option) *App {
 //	    WriteTimeout: 10 * time.Second,
 //	})
 func NewWithConfig(cfg Config) *App {
+	applyConfigDefaults(&cfg)
 	return buildApp(cfg)
+}
+
+// applyConfigDefaults fills fields whose zero value means "not configured".
+// Boolean fields are intentionally left untouched because false can be an
+// explicit choice.
+func applyConfigDefaults(cfg *Config) {
+	if cfg.ReadBufferSize <= 0 {
+		cfg.ReadBufferSize = defaultConfig.ReadBufferSize
+	}
+	if cfg.MaxRequestBodySize <= 0 {
+		cfg.MaxRequestBodySize = defaultConfig.MaxRequestBodySize
+	}
+	if cfg.MaxHeaderListSize <= 0 {
+		cfg.MaxHeaderListSize = defaultConfig.MaxHeaderListSize
+	}
+	if cfg.MaxHeaderCount <= 0 {
+		cfg.MaxHeaderCount = defaultConfig.MaxHeaderCount
+	}
+	if cfg.MaxRequestLineSize <= 0 {
+		cfg.MaxRequestLineSize = defaultConfig.MaxRequestLineSize
+	}
+	if cfg.MaxConcurrentStreams == 0 {
+		cfg.MaxConcurrentStreams = defaultConfig.MaxConcurrentStreams
+	}
+	if cfg.Environment == "" {
+		cfg.Environment = defaultConfig.Environment
+	}
 }
 
 // buildApp constructs an *App from a fully resolved Config. It applies default
