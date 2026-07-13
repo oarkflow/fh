@@ -143,16 +143,27 @@ func validCookieDomain(domain string) bool {
 	return labelLen > 0 && labelLen <= 63
 }
 
-// Sign signs the cookie value with HMAC-SHA256.
-// The signed format is "value.base64_url_hmac".
+// Sign signs the cookie value with HMAC-SHA256, binding the cookie's Name
+// into the MAC. The signed format is "value.base64_url_hmac".
+//
+// Binding Name matters: without it, a signature is valid for its value
+// alone regardless of which cookie it's attached to. Two cookies signed
+// with the same secret that ever hold the same value (e.g. "role=admin"
+// and, independently, "flag=admin") would then carry an identical
+// signature — letting an attacker copy a signed value they legitimately
+// received under one cookie name into a different cookie name and have it
+// verify as authentic there too.
 func (c *Cookie) Sign(secret []byte) {
 	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(c.Name))
+	mac.Write([]byte{0})
 	mac.Write([]byte(c.Value))
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	c.Value = c.Value + "." + sig
 }
 
-// Verify checks the HMAC signature on a signed cookie value.
+// Verify checks the HMAC signature on a signed cookie value, requiring it
+// to have been signed for this exact cookie Name (see Sign).
 func (c *Cookie) Verify(secret []byte) bool {
 	i := strings.LastIndexByte(c.Value, '.')
 	if i < 0 {
@@ -168,6 +179,8 @@ func (c *Cookie) Verify(secret []byte) bool {
 		return false
 	}
 	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(c.Name))
+	mac.Write([]byte{0})
 	mac.Write([]byte(value))
 	return hmac.Equal(sig, mac.Sum(nil))
 }
