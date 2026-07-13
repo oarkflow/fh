@@ -43,13 +43,23 @@ type Store interface {
 type UsageHook func(ctx fh.Ctx, rec KeyRecord)
 
 type Config struct {
-	Header         string
-	Query          string
-	Cookie         string
-	Keys           []string
-	Lookup         LookupFunc
-	HashedKeys     map[string]string
-	Store          Store
+	Header string
+	Query  string
+	Cookie string
+	// Keys, Lookup, and HashedKeys authenticate a key with no revocation or
+	// scope metadata attached (unlike Store, whose KeyRecord carries
+	// Scopes/Revoked/ExpiresAt). A key accepted through these paths cannot
+	// be revoked without redeploying the app, and if RequiredScopes is set,
+	// these paths can never satisfy it (see RequiredScopes below) — use
+	// Store for any key that needs revocation or scope enforcement.
+	Keys       []string
+	Lookup     LookupFunc
+	HashedKeys map[string]string
+	Store      Store
+	// RequiredScopes is enforced uniformly across every auth path. Keys
+	// authenticated via Lookup/Keys/HashedKeys carry no scope metadata, so
+	// they are rejected whenever RequiredScopes is non-empty rather than
+	// silently bypassing the requirement.
 	RequiredScopes []string
 	SetPrincipal   bool
 	OnUsage        UsageHook
@@ -90,7 +100,7 @@ func New(config Config) fh.HandlerFunc {
 				if err != nil {
 					return config.Error(c)
 				}
-				if exists && VerifyRecord(c, key, r) && hasScopes(r.Scopes, config.RequiredScopes) {
+				if exists && VerifyRecord(c, key, r) {
 					rec, recordOK, ok = r, true, true
 				}
 			}
@@ -112,6 +122,14 @@ func New(config Config) fh.HandlerFunc {
 					break
 				}
 			}
+		}
+		// Enforced uniformly regardless of which path authenticated the
+		// key: Lookup/Keys/HashedKeys carry no scope metadata, so if the
+		// app requires scopes, a key from those paths can never satisfy it
+		// and must be rejected rather than silently bypassing the
+		// requirement (previously only the Store path checked scopes).
+		if ok && len(config.RequiredScopes) > 0 && !hasScopes(rec.Scopes, config.RequiredScopes) {
+			ok = false
 		}
 		if !ok {
 			return config.Error(c)

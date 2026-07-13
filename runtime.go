@@ -28,14 +28,18 @@ func (a *App) RuntimeInfo() RuntimeInfo {
 
 func (a *App) IsDraining() bool { return a != nil && a.draining.Load() }
 
-func (a *App) EnableHealth(prefix string) *App {
+// EnableHealth mounts liveness/readiness routes. /ready surfaces raw
+// health-check error strings (which can include DSNs or internal
+// hostnames), so in deployments reachable from outside a trusted network,
+// pass an auth middleware.
+func (a *App) EnableHealth(prefix string, middleware ...HandlerFunc) *App {
 	if prefix == "" {
 		prefix = "/_fh"
 	}
 	prefix = trimRightSlash(prefix)
-	a.Get(prefix+"/health", func(c Ctx) error { return c.JSON(Map{"status": "ok", "time": time.Now().UTC()}) })
-	a.Get(prefix+"/live", func(c Ctx) error { return c.JSON(Map{"status": "alive"}) })
-	a.Get(prefix+"/ready", func(c Ctx) error {
+	a.Get(prefix+"/health", withHandlers(middleware, func(c Ctx) error { return c.JSON(Map{"status": "ok", "time": time.Now().UTC()}) })...)
+	a.Get(prefix+"/live", withHandlers(middleware, func(c Ctx) error { return c.JSON(Map{"status": "alive"}) })...)
+	a.Get(prefix+"/ready", withHandlers(middleware, func(c Ctx) error {
 		ready, checks := a.HealthStatus(c.Context())
 		if !ready {
 			status := "unready"
@@ -45,25 +49,29 @@ func (a *App) EnableHealth(prefix string) *App {
 			return c.Status(StatusServiceUnavailable).JSON(Map{"status": status, "checks": checks})
 		}
 		return c.JSON(Map{"status": "ready", "checks": checks})
-	})
+	})...)
 	return a
 }
 
-func (a *App) EnableRuntime(prefix string) *App {
+// EnableRuntime mounts runtime/route-table/queue-stats introspection routes.
+// /routes exposes the full route table annotated with which routes require
+// auth — a reconnaissance map for an attacker — so pass an auth middleware
+// in any deployment reachable from outside a trusted network.
+func (a *App) EnableRuntime(prefix string, middleware ...HandlerFunc) *App {
 	if prefix == "" {
 		prefix = "/_fh"
 	}
 	prefix = trimRightSlash(prefix)
-	a.Get(prefix+"/runtime", func(c Ctx) error { return c.JSON(a.RuntimeInfo()) })
-	a.EnableRouteList(prefix + "/routes")
+	a.Get(prefix+"/runtime", withHandlers(middleware, func(c Ctx) error { return c.JSON(a.RuntimeInfo()) })...)
+	a.EnableRouteList(prefix+"/routes", middleware...)
 	if a.reliability != nil && a.reliability.queue != nil {
-		a.Get(prefix+"/queue/stats", func(c Ctx) error {
+		a.Get(prefix+"/queue/stats", withHandlers(middleware, func(c Ctx) error {
 			st, err := a.reliability.queue.Stats()
 			if err != nil {
 				return err
 			}
 			return c.JSON(st)
-		})
+		})...)
 	}
 	return a
 }

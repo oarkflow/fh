@@ -3,9 +3,10 @@
 // the others receive the same response. This is critical for preventing
 // thundering herd on cache misses and duplicate API calls.
 //
-// Requests are considered identical if they have the same method, path,
-// and sorted query string. POST/PUT/PATCH bodies can optionally be included
-// in the key via the BodyKey option.
+// Requests are considered identical if they have the same method and full
+// URL (path + query string). POST/PUT/PATCH bodies can optionally be
+// included in the key via IncludeBody. Requests carrying an Authorization
+// or (by default) Cookie header are never coalesced.
 package coalesce
 
 import (
@@ -41,6 +42,14 @@ type Config struct {
 	// IncludeBody if true includes POST/PUT/PATCH body in the key. Default: false.
 	IncludeBody bool
 
+	// AllowRequestCookies permits coalescing requests that carry a Cookie
+	// header. Default false: requests with an Authorization or Cookie
+	// header are never coalesced, since fanning out one caller's
+	// personalized/authenticated response to concurrent waiters would leak
+	// it to different callers who happened to request the same path at the
+	// same time.
+	AllowRequestCookies bool
+
 	// Next is an optional skip function.
 	Next func(ctx fh.Ctx) bool
 }
@@ -62,6 +71,7 @@ func New(config ...Config) fh.HandlerFunc {
 			cfg.MaxEntries = config[0].MaxEntries
 		}
 		cfg.IncludeBody = config[0].IncludeBody
+		cfg.AllowRequestCookies = config[0].AllowRequestCookies
 		cfg.Next = config[0].Next
 	}
 
@@ -79,6 +89,17 @@ func New(config ...Config) fh.HandlerFunc {
 
 		method := ctx.Method()
 		if method != "GET" && method != "HEAD" && !cfg.IncludeBody {
+			return ctx.Next()
+		}
+
+		// Never fan out a coalesced response for requests carrying
+		// per-caller credentials, unless the operator explicitly opts in
+		// for cookies (and even then, distinct callers with distinct
+		// cookies will still coalesce onto the same entry unless the app
+		// also disables coalescing for those routes — this only restores
+		// the same-caller-only default other identity-bearing requests
+		// get).
+		if ctx.Get("Authorization") != "" || (!cfg.AllowRequestCookies && ctx.Get("Cookie") != "") {
 			return ctx.Next()
 		}
 
@@ -205,7 +226,10 @@ func coalesceKey(ctx fh.Ctx, includeBody bool) string {
 	h := sha256.New()
 	h.Write([]byte(ctx.Method()))
 	h.Write([]byte{0})
-	h.Write([]byte(ctx.Path()))
+	// OriginalURL includes the query string, so two concurrent requests to
+	// the same path differing only by query (e.g. ?q=foo vs ?q=bar) never
+	// collide onto the same in-flight entry.
+	h.Write([]byte(ctx.OriginalURL()))
 
 	if includeBody {
 		h.Write([]byte{0})

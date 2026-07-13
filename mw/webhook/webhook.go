@@ -10,6 +10,7 @@ import (
 	"hash"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
@@ -45,6 +46,14 @@ func New(cfg Config) fh.HandlerFunc {
 	}
 	if cfg.Algorithm == "" {
 		cfg.Algorithm = "sha256"
+	}
+	if cfg.Replay == nil {
+		// Without a replay store, a captured (signature, timestamp) pair
+		// can be resent as many times as an attacker likes within the
+		// tolerance window. Default to a bounded in-memory store so replay
+		// protection applies out of the box; pass a distributed ReplayStore
+		// (e.g. Redis-backed) for multi-instance deployments.
+		cfg.Replay = newMemoryReplayStore()
 	}
 	if cfg.Error == nil {
 		cfg.Error = func(c fh.Ctx, err error) error {
@@ -117,6 +126,34 @@ func Verify(c fh.Ctx, cfg Config) error {
 	}
 	return nil
 }
+// memoryReplayStore is the default ReplayStore used when Config.Replay is
+// unset. It is process-local; deployments running multiple instances behind
+// a load balancer should supply a shared store (e.g. Redis-backed) instead.
+type memoryReplayStore struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
+
+func newMemoryReplayStore() *memoryReplayStore {
+	return &memoryReplayStore{seen: map[string]time.Time{}}
+}
+
+func (s *memoryReplayStore) Seen(key string, ttl time.Duration) bool {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, exp := range s.seen {
+		if exp.Before(now) {
+			delete(s.seen, k)
+		}
+	}
+	if exp, ok := s.seen[key]; ok && exp.After(now) {
+		return true
+	}
+	s.seen[key] = now.Add(ttl)
+	return false
+}
+
 func algo(a string) (func() hash.Hash, bool) {
 	switch strings.ToLower(a) {
 	case "sha256":

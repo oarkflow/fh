@@ -1,4 +1,4 @@
-package signature
+package webhook
 
 import (
 	"crypto/hmac"
@@ -66,13 +66,13 @@ func doRequest(t *testing.T, addr, method, path, body string, headers map[string
 	return
 }
 
-func signPayload(secret []byte, ts, body string) string {
+func sign(secret []byte, ts, body string) string {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(ts + "." + body))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func TestSignatureReplayIsRejectedByDefault(t *testing.T) {
+func TestReplayIsRejectedByDefault(t *testing.T) {
 	secret := []byte("s3cr3t")
 	app := fh.New()
 	app.Use(New(Config{Secret: secret}))
@@ -81,7 +81,7 @@ func TestSignatureReplayIsRejectedByDefault(t *testing.T) {
 
 	body := `{"event":"ping"}`
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	sig := "sha256=" + signPayload(secret, ts, body)
+	sig := sign(secret, ts, body)
 	headers := map[string]string{"X-Signature": sig, "X-Timestamp": ts}
 
 	code, _ := doRequest(t, addr, "POST", "/hook", body, headers)
@@ -91,22 +91,25 @@ func TestSignatureReplayIsRejectedByDefault(t *testing.T) {
 
 	code, _ = doRequest(t, addr, "POST", "/hook", body, headers)
 	if code == 200 {
-		t.Fatal("expected replayed signed request to be rejected by default")
+		t.Fatal("expected replayed webhook delivery to be rejected by default")
 	}
 }
 
-func TestParseTimestampSupportsUnixAndRFC3339(t *testing.T) {
-	want := time.Unix(1_700_000_000, 0).UTC()
-	for _, value := range []string{"1700000000", want.Format(time.RFC3339)} {
-		got, err := parseTimestamp(value)
-		if err != nil {
-			t.Fatalf("parse %q: %v", value, err)
+func TestDistinctDeliveriesAreNotTreatedAsReplay(t *testing.T) {
+	secret := []byte("s3cr3t")
+	app := fh.New()
+	app.Use(New(Config{Secret: secret}))
+	app.Post("/hook", func(c fh.Ctx) error { return c.SendString("ok") })
+	addr := testServer(t, app)
+
+	for i := 0; i < 2; i++ {
+		body := fmt.Sprintf(`{"event":"ping","n":%d}`, i)
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		sig := sign(secret, ts, body)
+		headers := map[string]string{"X-Signature": sig, "X-Timestamp": ts}
+		code, _ := doRequest(t, addr, "POST", "/hook", body, headers)
+		if code != 200 {
+			t.Fatalf("delivery %d: expected 200, got %d", i, code)
 		}
-		if !got.Equal(want) {
-			t.Fatalf("parse %q = %v, want %v", value, got, want)
-		}
-	}
-	if _, err := parseTimestamp("not-a-time"); err == nil {
-		t.Fatal("invalid timestamp was accepted")
 	}
 }

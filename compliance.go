@@ -47,6 +47,16 @@ type ComplianceConfig struct {
 	ExposeEndpoints bool              `json:"expose_endpoints,omitempty"`
 	EndpointPrefix  string            `json:"endpoint_prefix,omitempty"`
 
+	// EndpointAuth guards the compliance/health/runtime introspection routes
+	// mounted by ExposeEndpoints. These routes expose the full route table
+	// (including which routes lack auth), config internals, and queue
+	// depth — a reconnaissance goldmine if left unauthenticated. Set this
+	// (e.g. to an mw/basicauth, mw/apikey, or IP-allowlist handler) before
+	// enabling ExposeEndpoints in any deployment reachable from outside a
+	// trusted network. Left empty, ValidateSecurity reports a critical
+	// finding and a startup warning is logged.
+	EndpointAuth []HandlerFunc `json:"-"`
+
 	// FailOnCritical panics at app construction when ValidateSecurity finds a
 	// critical production issue. This is useful in CI and strict deployments.
 	FailOnCritical bool `json:"fail_on_critical,omitempty"`
@@ -266,6 +276,9 @@ func (a *App) ValidateSecurity() []SecurityFinding {
 	if a.cfg.Compliance.Enabled && !a.cfg.Reliability.Enabled {
 		f = append(f, SecurityFinding{"high", "RELIABILITY_DISABLED", "compliance mode should enable reliability", "enable Config.Reliability", ""})
 	}
+	if a.cfg.Compliance.ExposeEndpoints && len(a.cfg.Compliance.EndpointAuth) == 0 {
+		f = append(f, SecurityFinding{"critical", "COMPLIANCE_ENDPOINTS_UNAUTHENTICATED", "compliance/health/runtime introspection endpoints are exposed with no auth middleware, leaking route security posture and config internals to any caller", "set Config.Compliance.EndpointAuth (or fh.WithComplianceEndpointAuth) to an auth middleware", ""})
+	}
 	for _, r := range a.Routes() {
 		unsafe := r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" || r.Method == "DELETE"
 		if unsafe && r.Security.IdempotencyRequired && !a.cfg.Reliability.IdempotencyEnabled {
@@ -298,15 +311,30 @@ func (a *App) ComplianceReport() ComplianceReport {
 	return ComplianceReport{GeneratedAt: time.Now().UTC(), Mode: a.cfg.Mode, Profile: a.cfg.Compliance.Profile, Controls: a.ComplianceControls(), Findings: a.ValidateSecurity(), Routes: a.Routes(), Config: a.SafeConfig()}
 }
 
-func (a *App) EnableComplianceEndpoints(prefix string) *App {
+// withHandlers returns a fresh slice combining middleware with h, safe to
+// pass to multiple a.Get calls without the handlers aliasing/overwriting
+// each other's slot in a shared backing array.
+func withHandlers(middleware []HandlerFunc, h HandlerFunc) []HandlerFunc {
+	out := make([]HandlerFunc, len(middleware)+1)
+	copy(out, middleware)
+	out[len(middleware)] = h
+	return out
+}
+
+// EnableComplianceEndpoints mounts compliance/config introspection routes.
+// These expose security posture details (which routes require auth, redaction
+// /audit status, config limits) — pass an auth middleware (e.g. mw/basicauth,
+// mw/apikey, IP allowlist) so this route group isn't reachable by anyone who
+// can reach the server.
+func (a *App) EnableComplianceEndpoints(prefix string, middleware ...HandlerFunc) *App {
 	if prefix == "" {
 		prefix = "/_fh"
 	}
 	prefix = strings.TrimRight(prefix, "/")
-	a.Get(prefix+"/compliance", func(c Ctx) error { return c.JSON(a.ComplianceReport()) })
-	a.Get(prefix+"/compliance/controls", func(c Ctx) error { return c.JSON(a.ComplianceControls()) })
-	a.Get(prefix+"/compliance/findings", func(c Ctx) error { return c.JSON(a.ValidateSecurity()) })
-	a.Get(prefix+"/config/safe", func(c Ctx) error { return c.JSON(a.SafeConfig()) })
+	a.Get(prefix+"/compliance", withHandlers(middleware, func(c Ctx) error { return c.JSON(a.ComplianceReport()) })...)
+	a.Get(prefix+"/compliance/controls", withHandlers(middleware, func(c Ctx) error { return c.JSON(a.ComplianceControls()) })...)
+	a.Get(prefix+"/compliance/findings", withHandlers(middleware, func(c Ctx) error { return c.JSON(a.ValidateSecurity()) })...)
+	a.Get(prefix+"/config/safe", withHandlers(middleware, func(c Ctx) error { return c.JSON(a.SafeConfig()) })...)
 	return a
 }
 

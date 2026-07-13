@@ -36,3 +36,7 @@ Run after security middleware when proxying protected routes. Run after real IP/
 
 Set timeouts, max body size, header allow/deny lists, upstream health checks, circuit breakers, and retry budgets. Avoid blindly forwarding sensitive internal headers.
 
+## SSRF protection
+
+By default this middleware refuses to dial well-known cloud metadata endpoints (169.254.169.254, 169.254.170.2, fd00:ec2::254) even if `Target` or a custom `Director` ever resolves there — this closes the metadata-credential-theft class of SSRF. The check happens at dial time against the resolved IP (not just the configured hostname), so DNS rebinding cannot bypass it. Set `DisableSSRFGuard: true` only if this proxy intentionally targets a metadata endpoint. Use `DeniedCIDRs` to additionally block private ranges (e.g. `10.0.0.0/8`) if `Target`/`Director` could ever be influenced by request data.
+

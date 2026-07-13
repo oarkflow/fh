@@ -31,6 +31,7 @@ type Limiter struct {
 	windowSize time.Duration
 	rate       int
 	burst      int
+	maxKeys    int
 }
 
 type window struct {
@@ -111,6 +112,7 @@ func NewLimiter(config ...Config) *Limiter {
 		windowSize: cfg.Window,
 		rate:       cfg.Rate,
 		burst:      cfg.Burst,
+		maxKeys:    cfg.MaxKeys,
 	}
 
 	go l.cleanup(cfg.CleanupInterval, cfg.MaxKeys)
@@ -127,7 +129,11 @@ func (l *Limiter) Allow(key string) (bool, int, time.Duration) {
 	now := time.Now()
 	w, exists := l.windows[key]
 	if !exists {
-		if len(l.windows) >= 65536 {
+		maxKeys := l.maxKeys
+		if maxKeys <= 0 {
+			maxKeys = 65536
+		}
+		if len(l.windows) >= maxKeys {
 			l.evictOldest()
 		}
 		w = &window{
@@ -165,18 +171,22 @@ func (l *Limiter) Allow(key string) (bool, int, time.Duration) {
 
 	// Add new timestamp.
 	if w.count == len(w.timestamps) {
-		// Compact: shift timestamps to front.
+		// Compact: shift timestamps to front, reclaiming space freed by
+		// expiry so we don't append (and grow the slice) unnecessarily.
 		n := w.count - w.head
 		copy(w.timestamps, w.timestamps[w.head:w.count])
 		w.head = 0
 		w.count = n
-		if cap(w.timestamps) < n+l.rate {
-			newTs := make([]time.Time, n+l.rate)
-			copy(newTs, w.timestamps[:n])
-			w.timestamps = newTs
-		}
 	}
-	w.timestamps[w.count] = now
+	// timestamps is allocated with length 0 (only capacity pre-reserved),
+	// so the first write — and any write once count has caught back up to
+	// the slice's current length even after compaction — must grow the
+	// slice via append rather than indexing past its length.
+	if w.count < len(w.timestamps) {
+		w.timestamps[w.count] = now
+	} else {
+		w.timestamps = append(w.timestamps, now)
+	}
 	w.count++
 
 	return true, remaining - 1, 0

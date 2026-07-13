@@ -36,3 +36,7 @@ Run after body limit/request hash and before handlers. Pair with replay protecti
 
 Use timestamp skew limits, key IDs, key rotation, constant-time comparison, and distributed replay stores.
 
+## Replay protection
+
+Replay protection is on by default: `Config.Replay` falls back to a bounded in-memory store if unset, so a captured signature cannot be resent within `Tolerance`. This default store is process-local — for multi-instance deployments behind a load balancer, supply a shared `ReplayStore` (e.g. Redis-backed) so replay detection works across instances.
+

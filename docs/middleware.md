@@ -524,25 +524,28 @@ Signed cookie sessions with `MemoryStore` and `FileStore`.
 ```go
 import "github.com/oarkflow/fh/mw/session"
 
-app.Use(session.New(session.Config{
-    Secret: "session-secret",
-    Store:  session.NewMemoryStore(),
-}))
+manager := session.NewSessionManager(
+    session.NewMemoryStore(5*time.Minute), // GC interval; bounded at 100k sessions by default
+    session.SessionSecret([]byte("at-least-32-bytes-of-random-secret")),
+)
+app.Use(session.New(manager))
 
 // In a handler:
-session.Get("user_id")     // get value
-session.Set("user_id", 42) // set value
-session.Delete("user_id")  // delete value
-session.Flash("message")   // flash message
-session.Destroy()          // destroy session
-session.Save()             // save and set cookie
+sess := session.Get(c)
+sess.Get("user_id")     // get value
+sess.Set("user_id", 42) // set value
+sess.Delete("user_id")  // delete value
+sess.Flash("message")   // flash message
+manager.Destroy(c, sess)    // destroy session (server-side + cookie)
+manager.Regenerate(c, sess) // rotate session ID; call after login to prevent fixation
 ```
 
-| Config | Description |
+| SessionOption | Description |
 |--------|-------------|
-| `Secret` | Cookie signing secret |
-| `Store` | Session store (MemoryStore, FileStore, or custom) |
-| `CookieName` | Cookie name (default: `session`) |
+| `SessionSecret` / `SessionSecrets` | Cookie signing secret(s) (HMAC-signed, rotatable) |
+| `SessionCookieName` | Cookie name (default: `session`) |
+| `SessionMaxAge` | Session lifetime |
+| `SessionSecure` / `SessionHTTPOnly` / `SessionSameSite` | Cookie attributes (secure defaults) |
 | `MaxAge` | Session TTL |
 | `HTTPOnly` | HTTPOnly flag (default: true) |
 | `Secure` | Secure flag |

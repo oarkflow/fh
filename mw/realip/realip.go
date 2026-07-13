@@ -1,6 +1,7 @@
 package realip
 
 import (
+	"log/slog"
 	"net"
 	"strings"
 
@@ -22,6 +23,15 @@ func New(cfg Config) fh.HandlerFunc {
 	}
 	if cfg.LocalKey == "" {
 		cfg.LocalKey = "real_ip"
+	}
+	if cfg.TrustAll {
+		// TrustAll accepts forwarding headers from any peer, including the
+		// public internet. Any downstream logic keyed on client IP
+		// (rate limiting, IP allowlists, audit trails) becomes trivially
+		// spoofable by sending a fake X-Forwarded-For/Forwarded header
+		// unless this listener is genuinely unreachable except through a
+		// trusted edge.
+		slog.Warn("fh/mw/realip: TrustAll is enabled — any client can spoof its IP via forwarding headers; only use this when the listener is unreachable except through a trusted edge")
 	}
 	return func(c fh.Ctx) error {
 		remote := net.ParseIP(c.IP())

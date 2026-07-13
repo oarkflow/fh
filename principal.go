@@ -154,6 +154,14 @@ func TenantID(c Ctx) string {
 	return tenant
 }
 
+// TenantExtractor resolves a tenant ID, preferring the authenticated
+// Principal's TenantID and any value already stored in Locals. The default
+// fallback, HeaderString("X-Tenant-ID"), trusts a raw client header — only
+// safe when a trusted upstream strips/overwrites that header before it
+// reaches fh. In multi-tenant deployments without such an upstream, pass
+// explicit sources that omit the header fallback (or validate it against a
+// known-tenant list downstream) to prevent cross-tenant access via a
+// spoofed X-Tenant-ID.
 func TenantExtractor(sources ...Extractor[string]) Extractor[string] {
 	if len(sources) == 0 {
 		sources = []Extractor[string]{
@@ -242,6 +250,18 @@ func StaticString(value string) Extractor[string] {
 	return func(Ctx) (string, bool, error) { return value, value != "", nil }
 }
 
+// HeaderString reads name directly from the request and trusts it as-is.
+//
+// WARNING: this is a raw client input, not an authentication result. Wiring
+// it straight into ID/TenantID/Roles (e.g. via PrincipalExtractors or
+// TenantResolver) lets any caller set their own identity, tenant, or roles
+// by sending the header themselves — there is no verification step here,
+// unlike mw/jwt (signature-verified claims) or mw/mtls (TLS-verified
+// certificate). Only use HeaderString for identity/authorization fields when
+// a trusted upstream (e.g. an API gateway or sidecar on a network path the
+// caller cannot reach directly) strips or overwrites this header before it
+// reaches fh; otherwise prefer an extractor backed by a verified source
+// (JWT claims, verified mTLS subject, or a session store).
 func HeaderString(name string) Extractor[string] {
 	return func(c Ctx) (string, bool, error) {
 		if c == nil {
@@ -290,6 +310,10 @@ func LocalString(key string) Extractor[string] {
 	}
 }
 
+// HeaderCSV reads a comma-separated list from name and trusts it as-is.
+// See the WARNING on HeaderString: this is unverified client input and must
+// not be used for Roles/Scopes/Permissions unless a trusted upstream
+// guarantees the header cannot be set by the caller directly.
 func HeaderCSV(name string) Extractor[[]string] {
 	return func(c Ctx) ([]string, bool, error) {
 		if c == nil {

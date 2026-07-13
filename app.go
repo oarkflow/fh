@@ -237,6 +237,16 @@ func WithCompliance(cc ComplianceConfig) Option {
 	return func(c *Config) { c.Compliance = cc }
 }
 
+// WithComplianceEndpointAuth sets (without disturbing any other Compliance
+// field already set by an earlier option, e.g. NewEnterprise's defaults)
+// the auth middleware guarding the /_fh/* compliance/health/runtime
+// introspection endpoints mounted when Compliance.ExposeEndpoints is true.
+// Apply this after NewEnterprise/NewProduction, or ExposeEndpoints mounts
+// those routes with no authentication.
+func WithComplianceEndpointAuth(middleware ...HandlerFunc) Option {
+	return func(c *Config) { c.Compliance.EndpointAuth = middleware }
+}
+
 // WithMode selects the runtime profile. ModeFast keeps benchmark-oriented
 // defaults; ModeProduction and ModeStrict enable safer network defaults.
 func WithMode(mode Mode) Option {
@@ -261,6 +271,13 @@ func NewProduction(opts ...Option) *App {
 
 // NewEnterprise creates an app with strict protocol validation, audit,
 // reliability, redaction and compliance evidence endpoints enabled.
+//
+// The compliance/health/runtime endpoints this mounts (/_fh/compliance,
+// /_fh/routes, /_fh/runtime, /_fh/config/safe, ...) expose security posture
+// details including the full route table annotated with which routes lack
+// auth. Pass fh.WithComplianceEndpointAuth(yourAuthMiddleware) as one of
+// opts so these routes aren't reachable unauthenticated; omitting it logs a
+// startup warning and surfaces a critical finding from ValidateSecurity.
 func NewEnterprise(opts ...Option) *App {
 	all := append([]Option{WithMode(ModeEnterprise), WithCompliance(ComplianceConfig{Enabled: true, Profile: ComplianceEnterprise, Strict: true, ExposeEndpoints: true})}, opts...)
 	return New(all...)
@@ -426,9 +443,12 @@ func buildApp(cfg Config) *App {
 	}
 
 	if cfg.Compliance.ExposeEndpoints {
-		app.EnableComplianceEndpoints(cfg.Compliance.EndpointPrefix)
-		app.EnableHealth(cfg.Compliance.EndpointPrefix)
-		app.EnableRuntime(cfg.Compliance.EndpointPrefix)
+		if len(cfg.Compliance.EndpointAuth) == 0 {
+			app.Logger().Warn("fh: Compliance.ExposeEndpoints is enabled with no Compliance.EndpointAuth — /_fh/* routes (route table, config, health, queue stats) are reachable with no authentication; set Config.Compliance.EndpointAuth or fh.WithComplianceEndpointAuth")
+		}
+		app.EnableComplianceEndpoints(cfg.Compliance.EndpointPrefix, cfg.Compliance.EndpointAuth...)
+		app.EnableHealth(cfg.Compliance.EndpointPrefix, cfg.Compliance.EndpointAuth...)
+		app.EnableRuntime(cfg.Compliance.EndpointPrefix, cfg.Compliance.EndpointAuth...)
 	}
 	if cfg.Compliance.FailOnCritical && hasCritical(app.ValidateSecurity()) {
 		panic("fh: critical compliance/security findings")

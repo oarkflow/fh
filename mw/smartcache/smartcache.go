@@ -78,8 +78,21 @@ type Config struct {
 	// Next is an optional skip function.
 	Next func(ctx fh.Ctx) bool
 
-	// KeyFunc generates a cache key from the request. Default: method + path + sorted query.
+	// KeyFunc generates a cache key from the request. Default: method + path + query.
 	KeyFunc func(ctx fh.Ctx) string
+
+	// VaryHeaders lists additional request headers folded into the cache
+	// key (e.g. "Accept-Encoding", "Accept-Language") so a response cached
+	// for one variant (compressed, localized, ...) is never served to a
+	// request that asked for a different one.
+	VaryHeaders []string
+
+	// AllowRequestCookies permits caching/serving requests that carry a
+	// Cookie header. Default false: requests with an Authorization or
+	// Cookie header are never read from or written to the shared cache,
+	// since a personalized/authenticated response could otherwise be
+	// cached and served to a different caller on the same path.
+	AllowRequestCookies bool
 }
 
 // DefaultConfig returns the default configuration.
@@ -120,6 +133,10 @@ func New(config ...Config) fh.HandlerFunc {
 		if c.KeyFunc != nil {
 			cfg.KeyFunc = c.KeyFunc
 		}
+		if c.VaryHeaders != nil {
+			cfg.VaryHeaders = c.VaryHeaders
+		}
+		cfg.AllowRequestCookies = c.AllowRequestCookies
 	}
 
 	if cfg.Store == nil {
@@ -146,9 +163,21 @@ func New(config ...Config) fh.HandlerFunc {
 			return ctx.Next()
 		}
 
-		key := cfg.KeyFunc(ctx)
+		// Never read from or write to the shared cache for requests
+		// carrying per-caller credentials, unless the operator explicitly
+		// opts in for cookies. Without this, one caller's
+		// personalized/authenticated response could be cached and served
+		// to a different caller requesting the same path.
+		if ctx.Get("Authorization") != "" || (!cfg.AllowRequestCookies && ctx.Get("Cookie") != "") {
+			return ctx.Next()
+		}
+
+		var key string
+		if cfg.KeyFunc != nil {
+			key = cfg.KeyFunc(ctx)
+		}
 		if key == "" {
-			key = defaultKey(ctx)
+			key = defaultKey(ctx, cfg.VaryHeaders)
 		}
 
 		// Check cache for existing response.
@@ -185,11 +214,18 @@ func New(config ...Config) fh.HandlerFunc {
 			return nil
 		}
 
-		// Parse Cache-Control from request.
-		cc := parseCacheControl(ctx.Get("Cache-Control"))
+		// A response that sets a cookie is per-caller by definition (a new
+		// session, a rotated token, ...) and must never be shared from a
+		// common cache, regardless of Cache-Control.
+		if ctx.HasResponseCookies() {
+			return nil
+		}
 
-		// Don't cache responses with no-store or private.
-		if cc.NoStore {
+		// Parse the response's own Cache-Control (not the request's — a
+		// handler marking its response private/no-store must be honored
+		// even if the incoming request had no Cache-Control at all).
+		respCC := parseCacheControl(ctx.ResponseHeader("Cache-Control"))
+		if respCC.NoStore || respCC.Private {
 			return nil
 		}
 
@@ -198,6 +234,7 @@ func New(config ...Config) fh.HandlerFunc {
 			Headers:    ctx.GetRespHeaders(),
 			Body:       body,
 			Stored:     time.Now(),
+			CC:         respCC,
 		}
 
 		// Generate ETag if not present.
@@ -208,10 +245,6 @@ func New(config ...Config) fh.HandlerFunc {
 		} else {
 			resp.ETag = resp.Headers["ETag"][0]
 		}
-
-		// Parse response Cache-Control.
-		respCC := parseCacheControl(ctx.Get("Cache-Control"))
-		resp.CC = respCC
 
 		if respCC.MaxAge > 0 {
 			resp.Expires = time.Now().Add(respCC.MaxAge)
@@ -378,15 +411,19 @@ func parseCacheControl(header string) CacheControl {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-func defaultKey(ctx fh.Ctx) string {
+func defaultKey(ctx fh.Ctx, varyHeaders []string) string {
 	var b strings.Builder
 	b.WriteString(ctx.Method())
 	b.WriteByte(0)
-	b.WriteString(ctx.Path())
-	qs := ctx.Get("Sort-Query") // may be empty
-	if qs != "" {
+	// OriginalURL includes the query string, so two requests differing
+	// only by query (e.g. ?userId=1 vs ?userId=2) never collide on the
+	// same cache entry.
+	b.WriteString(ctx.OriginalURL())
+	for _, h := range varyHeaders {
 		b.WriteByte(0)
-		b.WriteString(qs)
+		b.WriteString(strings.ToLower(h))
+		b.WriteByte('=')
+		b.WriteString(ctx.Get(h))
 	}
 	return b.String()
 }

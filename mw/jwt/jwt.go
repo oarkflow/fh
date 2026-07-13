@@ -132,18 +132,29 @@ func Verify(c fh.Ctx, token string, cfg Config, allowed map[string]bool) (map[st
 	if !allowed[alg] {
 		return nil, nil, fmt.Errorf("algorithm %s is not allowed", alg)
 	}
-	key := cfg.Secret
-	if cfg.KeyFunc != nil {
+	// Key selection is strictly bound to the token's algorithm family so a
+	// public key configured for RS*/ES*/PS* verification can never be handed
+	// to the HMAC path (and vice versa). Without this, a token with a forged
+	// "alg":"HS256" header could be verified using an asymmetric public key's
+	// bytes as the HMAC secret — public keys are not secret, so anyone with
+	// the public key (routinely distributed, e.g. via JWKS) could forge
+	// arbitrary tokens. See CVE class: JWT algorithm confusion.
+	var key []byte
+	_, isHMAC := jwtHash(alg)
+	switch {
+	case cfg.KeyFunc != nil:
 		key, err = cfg.KeyFunc(c, header, claims)
 		if err != nil {
 			return nil, nil, err
 		}
-	} else if len(cfg.PublicKeys) > 0 {
-		if kid, _ := header["kid"].(string); kid != "" {
+	case isHMAC:
+		key = cfg.Secret
+	default:
+		if kid, _ := header["kid"].(string); kid != "" && len(cfg.PublicKeys) > 0 {
 			key = cfg.PublicKeys[kid]
+		} else if len(cfg.PublicKeys) == 0 {
+			key = cfg.PublicKeyPEM
 		}
-	} else if len(cfg.PublicKeyPEM) > 0 {
-		key = cfg.PublicKeyPEM
 	}
 	if len(key) == 0 {
 		return nil, nil, errors.New("missing verification key")

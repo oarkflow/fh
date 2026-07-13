@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +22,27 @@ type Config struct {
 	Timeout      time.Duration
 	Director     func(*http.Request)
 	ErrorHandler func(fh.Ctx, error) error
+
+	// DisableSSRFGuard turns off the default block on proxying to well-known
+	// cloud metadata endpoints (169.254.169.254, 169.254.170.2,
+	// fd00:ec2::254). No legitimate reverse-proxy target is ever a metadata
+	// endpoint, so this guard is on by default; disable only if this proxy
+	// is intentionally used as a metadata sidecar.
+	DisableSSRFGuard bool
+
+	// DeniedCIDRs additionally blocks proxying to targets whose resolved IP
+	// falls within any of these networks (e.g. "127.0.0.0/8", "10.0.0.0/8").
+	// Opt-in: many legitimate proxy targets are private-network services, so
+	// nothing beyond the metadata guard is blocked unless configured here.
+	DeniedCIDRs []string
+}
+
+// defaultDeniedCIDRs are cloud metadata endpoints that should never be a
+// legitimate reverse-proxy target regardless of deployment.
+var defaultDeniedCIDRs = []string{
+	"169.254.169.254/32", // AWS/GCP/Azure/DigitalOcean/Alibaba/Oracle IMDS
+	"169.254.170.2/32",   // AWS ECS task metadata
+	"fd00:ec2::254/128",  // AWS IMDSv2 IPv6
 }
 
 func New(cfg Config) fh.HandlerFunc {
@@ -27,10 +50,21 @@ func New(cfg Config) fh.HandlerFunc {
 	if err != nil {
 		panic(err)
 	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	if cfg.Timeout > 0 {
-		proxy.Transport = &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: cfg.Timeout, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: cfg.Timeout, ResponseHeaderTimeout: cfg.Timeout}
+	denyNets, err := parseCIDRs(cfg)
+	if err != nil {
+		panic(err)
 	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	dialer := &net.Dialer{Timeout: cfg.Timeout, KeepAlive: 30 * time.Second}
+	transport := &http.Transport{
+		Proxy:       http.ProxyFromEnvironment,
+		DialContext: guardedDialContext(dialer, denyNets),
+	}
+	if cfg.Timeout > 0 {
+		transport.TLSHandshakeTimeout = cfg.Timeout
+		transport.ResponseHeaderTimeout = cfg.Timeout
+	}
+	proxy.Transport = transport
 	direct := proxy.Director
 	proxy.Director = func(r *http.Request) {
 		direct(r)
@@ -61,6 +95,60 @@ func New(cfg Config) fh.HandlerFunc {
 			return c.SendStatus(writer.status)
 		}
 		return writer.err
+	}
+}
+
+func parseCIDRs(cfg Config) ([]*net.IPNet, error) {
+	var raw []string
+	if !cfg.DisableSSRFGuard {
+		raw = append(raw, defaultDeniedCIDRs...)
+	}
+	raw = append(raw, cfg.DeniedCIDRs...)
+	nets := make([]*net.IPNet, 0, len(raw))
+	for _, c := range raw {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: invalid denied CIDR %q: %w", c, err)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
+}
+
+// guardedDialContext resolves the target host once, rejects any resolved IP
+// that falls within denyNets, and then dials the validated IP directly
+// (rather than letting the transport re-resolve the hostname), which also
+// defeats DNS-rebinding attacks where the name resolves to an allowed IP at
+// validation time and a denied IP at connect time.
+func guardedDialContext(base *net.Dialer, denyNets []*net.IPNet) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, ip := range ips {
+			for _, denied := range denyNets {
+				if denied.Contains(ip) {
+					return nil, fmt.Errorf("proxy: target %s resolves to denied address %s", host, ip)
+				}
+			}
+		}
+		for _, ip := range ips {
+			conn, err := base.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("proxy: no addresses found for %s", host)
+		}
+		return nil, lastErr
 	}
 }
 

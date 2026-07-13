@@ -315,8 +315,14 @@ func (r *Reliability) Middleware() HandlerFunc {
 			if !validExternalID(key) {
 				return c.Status(StatusBadRequest).JSON(Map{"error": "invalid_idempotency_key", "request_id": requestID})
 			}
+			// Scope the store key to the caller's identity so an attacker
+			// who guesses or observes another caller's Idempotency-Key
+			// cannot replay that caller's cached response: the raw header
+			// value is global client input, not proof of who sent the
+			// original request.
+			scopedKey := idempotencyIdentity(c) + "\x00" + key
 			reqHash := hashRequest(c.RequestHeader().Method, []byte(c.Path()), c.Body())
-			decision, rec, err := r.idem.Begin(key, reqHash, c.Method(), c.Path())
+			decision, rec, err := r.idem.Begin(scopedKey, reqHash, c.Method(), c.Path())
 			if err != nil {
 				return err
 			}
@@ -340,11 +346,22 @@ func (r *Reliability) Middleware() HandlerFunc {
 			c.Locals("fh.idem_started", true)
 			c.CaptureResponseBody()
 			c.OnBeforeResponse(func(ctx Ctx) error {
-				return r.idem.Complete(key, reqHash, ctx.StatusCode(), ctx.ResponseHeader(HeaderContentType), ctx.GetRespHeaders(), ctx.ResponseBody())
+				return r.idem.Complete(scopedKey, reqHash, ctx.StatusCode(), ctx.ResponseHeader(HeaderContentType), ctx.GetRespHeaders(), ctx.ResponseBody())
 			})
 		}
 		return c.Next()
 	}
+}
+
+// idempotencyIdentity returns a best-effort caller identity used to scope
+// idempotency keys so two different callers can never collide on the same
+// Idempotency-Key value. Prefers the authenticated Principal (JWT/mTLS/API
+// key/session); falls back to client IP for unauthenticated routes.
+func idempotencyIdentity(c Ctx) string {
+	if p, ok := PrincipalFrom(c); ok && p.ID != "" {
+		return "principal:" + p.Type + ":" + p.ID
+	}
+	return "ip:" + c.IP()
 }
 
 func isUnsafeMethod(m []byte) bool {
@@ -1380,8 +1397,21 @@ func (i *Inbox) Accept(ctx context.Context, ev InboxEvent, queueType string) (st
 	if ev.EventID == "" {
 		return "", errors.New("fh: inbox event id required")
 	}
+	// Reject malformed Source/EventID up front: both flow unvalidated into
+	// the dedup key below, and a caller-reachable Accept (e.g. behind a
+	// webhook endpoint) could otherwise pre-seed an oversized or
+	// separator-colliding key to poison the dedup cache ahead of a
+	// legitimate event, causing it to be silently treated as a duplicate
+	// and dropped.
+	if !validExternalID(ev.EventID) || (ev.Source != "" && !validExternalID(ev.Source)) {
+		return "", errors.New("fh: invalid inbox source or event id")
+	}
 	b, _ := json.Marshal(ev)
-	key := ev.Source + ":" + ev.EventID
+	// Length-prefixed rather than a plain "source:eventID" join: since both
+	// fields may themselves legally contain ':' (validExternalID allows it),
+	// a naive join lets Source="a:b",EventID="c" collide with Source="a",
+	// EventID="b:c" on the same dedup key.
+	key := strconv.Itoa(len(ev.Source)) + ":" + ev.Source + ":" + strconv.Itoa(len(ev.EventID)) + ":" + ev.EventID
 	if i.idem != nil {
 		dec, _, err := i.idem.Begin(key, hashBody(b), "INBOX", ev.Source)
 		if err != nil {
@@ -1562,6 +1592,9 @@ func (s *FileQueueStorage) ListJobs(ctx context.Context, state string, limit int
 	return out, nil
 }
 func (s *FileQueueStorage) RequeueFailed(ctx context.Context, id string) error {
+	if !validQueueJobID(id) {
+		return errors.New("fh: invalid queue job id")
+	}
 	path := filepath.Join(s.dir, "failed", id+".json")
 	j, err := readJob(path)
 	if err != nil {
@@ -1575,7 +1608,28 @@ func (s *FileQueueStorage) RequeueFailed(ctx context.Context, id string) error {
 	return os.Remove(path)
 }
 func (s *FileQueueStorage) DiscardFailed(ctx context.Context, id string) error {
+	if !validQueueJobID(id) {
+		return errors.New("fh: invalid queue job id")
+	}
 	return os.Remove(filepath.Join(s.dir, "failed", id+".json"))
+}
+
+// validQueueJobID rejects anything that isn't a plain job-id token
+// (newQueueID only ever produces "job_<base36>_<base36>"), closing off path
+// traversal via a crafted id (e.g. "../../pending/other-job" or an absolute
+// path) reaching RequeueFailed/DiscardFailed's filepath.Join.
+func validQueueJobID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *FileQueueStorage) PurgeJobs(ctx context.Context, state string, before time.Time, limit int) (int, error) {

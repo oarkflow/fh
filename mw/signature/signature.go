@@ -6,12 +6,19 @@ import (
 	"encoding/hex"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
 )
 
 type SecretResolver func(ctx fh.Ctx, keyID string) [][]byte
+
+// ReplayStore records signatures already seen within their tolerance
+// window so a captured (signature, timestamp) pair cannot be replayed.
+type ReplayStore interface {
+	Seen(key string, ttl time.Duration) bool
+}
 
 type Config struct {
 	Secrets         [][]byte
@@ -23,7 +30,12 @@ type Config struct {
 	Scheme          string
 	Tolerance       time.Duration
 	SignedPayload   func(fh.Ctx, string) []byte
-	Next            func(fh.Ctx) bool
+	// Replay guards against a captured signature being resent within the
+	// tolerance window. Defaults to a bounded in-memory store; supply a
+	// distributed ReplayStore (e.g. Redis-backed) for multi-instance
+	// deployments where process-local state is insufficient.
+	Replay ReplayStore
+	Next   func(fh.Ctx) bool
 }
 
 func New(config Config) fh.HandlerFunc {
@@ -38,6 +50,9 @@ func New(config Config) fh.HandlerFunc {
 	}
 	if config.Tolerance <= 0 {
 		config.Tolerance = 5 * time.Minute
+	}
+	if config.Replay == nil {
+		config.Replay = newMemoryReplayStore()
 	}
 	return func(c fh.Ctx) error {
 		if config.Next != nil && config.Next(c) {
@@ -89,11 +104,42 @@ func New(config Config) fh.HandlerFunc {
 			mac := hmac.New(sha256.New, secret)
 			mac.Write(payload)
 			if hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
+				if config.Replay.Seen(sig+":"+ts, config.Tolerance) {
+					return fh.NewHTTPError(fh.StatusConflict, "SIGNATURE_REPLAYED", "signature has already been used")
+				}
 				return c.Next()
 			}
 		}
 		return fh.NewHTTPError(fh.StatusUnauthorized, "SIGNATURE_INVALID", "signature is invalid")
 	}
+}
+
+// memoryReplayStore is the default ReplayStore used when Config.Replay is
+// unset. It is process-local; deployments running multiple instances behind
+// a load balancer should supply a shared store instead.
+type memoryReplayStore struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
+
+func newMemoryReplayStore() *memoryReplayStore {
+	return &memoryReplayStore{seen: map[string]time.Time{}}
+}
+
+func (s *memoryReplayStore) Seen(key string, ttl time.Duration) bool {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, exp := range s.seen {
+		if exp.Before(now) {
+			delete(s.seen, k)
+		}
+	}
+	if exp, ok := s.seen[key]; ok && exp.After(now) {
+		return true
+	}
+	s.seen[key] = now.Add(ttl)
+	return false
 }
 
 func parseCombinedSignature(value string) (timestamp, signature string, ok bool) {

@@ -385,6 +385,52 @@ func TestStaticBrowse(t *testing.T) {
 	}
 }
 
+func TestStaticBrowseEscapesFilenames(t *testing.T) {
+	dir := t.TempDir()
+	xssName := `<img src=x onerror=alert(1)>.txt`
+	os.WriteFile(filepath.Join(dir, xssName), []byte("payload"), 0644)
+
+	app := fh.New()
+	app.Static("/static", dir, fh.StaticConfig{
+		Browse: true,
+	})
+	addr := testServer(t, app)
+
+	code, body := doRequest(t, addr, "GET", "/static/", "", nil)
+	if code != 200 {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	if strings.Contains(body, "<img src=x onerror=alert(1)>") {
+		t.Fatalf("directory listing reflected unescaped filename (XSS), got: %s", body)
+	}
+	if !strings.Contains(body, "&lt;img src=x onerror=alert(1)&gt;") {
+		t.Fatalf("expected escaped filename in directory listing, got: %s", body)
+	}
+}
+
+func TestStaticBrowseHidesDotfilesByDefault(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=1"), 0644)
+	os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("ok"), 0644)
+
+	app := fh.New()
+	app.Static("/static", dir, fh.StaticConfig{
+		Browse: true,
+	})
+	addr := testServer(t, app)
+
+	code, body := doRequest(t, addr, "GET", "/static/", "", nil)
+	if code != 200 {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	if strings.Contains(body, ".env") {
+		t.Fatalf("expected dotfile to be hidden from directory listing, got: %s", body)
+	}
+	if !strings.Contains(body, "visible.txt") {
+		t.Fatalf("expected visible.txt in directory listing, got: %s", body)
+	}
+}
+
 func TestStaticBrowseForbidden(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "subdir"), 0755)

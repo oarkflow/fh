@@ -13,6 +13,38 @@ import (
 	"time"
 )
 
+// TestIdempotencyIdentityScopesDifferentCallers proves the fix for
+// cross-user idempotency replay: the scoped store key must differ between
+// two distinct authenticated principals (and fall back to IP when no
+// principal is set), so an attacker who learns a victim's raw
+// Idempotency-Key header value cannot use it to replay the victim's cached
+// response.
+func TestIdempotencyIdentityScopesDifferentCallers(t *testing.T) {
+	app := New()
+	c1 := &DefaultCtx{server: app}
+	c1.reset()
+	SetPrincipal(c1, Principal{ID: "user-a", Type: "user"})
+
+	c2 := &DefaultCtx{server: app}
+	c2.reset()
+	SetPrincipal(c2, Principal{ID: "user-b", Type: "user"})
+
+	id1 := idempotencyIdentity(c1)
+	id2 := idempotencyIdentity(c2)
+	if id1 == id2 {
+		t.Fatalf("expected different identities for different principals, got identical: %q", id1)
+	}
+
+	// Same principal must scope identically across requests so legitimate
+	// same-caller retries still replay correctly.
+	c3 := &DefaultCtx{server: app}
+	c3.reset()
+	SetPrincipal(c3, Principal{ID: "user-a", Type: "user"})
+	if got := idempotencyIdentity(c3); got != id1 {
+		t.Fatalf("expected same identity for same principal, got %q vs %q", got, id1)
+	}
+}
+
 func TestIdempotencyStoreReplayAndConflict(t *testing.T) {
 	store, err := OpenIdempotencyStore(filepath.Join(t.TempDir(), "idem.jsonl"), time.Hour)
 	if err != nil {
@@ -201,6 +233,100 @@ func (m *memoryQueueStorage) Stats(ctx context.Context) (QueueStats, error) {
 	return QueueStats{Pending: len(m.pending), Processing: len(m.processing), Done: m.done, Failed: m.failed}, nil
 }
 func (m *memoryQueueStorage) Close() error { return nil }
+
+// TestQueueAdminRejectsPathTraversalJobID proves RequeueFailed/DiscardFailed
+// reject a crafted job id before it ever reaches filepath.Join, so an admin
+// caller (or an attacker who reaches this route via a misconfigured
+// mw/admin auth) cannot escape the queue's failed/ directory.
+func TestQueueAdminRejectsPathTraversalJobID(t *testing.T) {
+	dir := t.TempDir()
+	q, err := OpenDurableQueue(DurableQueueConfig{Dir: dir, Workers: 1, MaxAttempts: 1, PollInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	q.Register("boom", func(context.Context, *QueueJob) error { return errors.New("fail") })
+	if err := q.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Enqueue("boom", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	deadline := time.Now().Add(2 * time.Second)
+	var jobID string
+	for time.Now().Before(deadline) {
+		jobs, _ := q.ListJobs(ctx, "failed", 10)
+		if len(jobs) == 1 {
+			jobID = jobs[0].ID
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if jobID == "" {
+		t.Fatal("job never reached failed state")
+	}
+
+	// Sentinel file outside the queue dir that a traversal payload targets.
+	sentinel := filepath.Join(filepath.Dir(dir), "sentinel-"+filepath.Base(dir)+".txt")
+	if err := os.WriteFile(sentinel, []byte("do-not-delete"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(sentinel)
+
+	traversalID := "../../" + filepath.Base(filepath.Dir(dir)) + "/sentinel-" + filepath.Base(dir)
+	if err := q.DiscardFailed(ctx, traversalID); err == nil {
+		t.Fatal("expected path-traversal job id to be rejected")
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("sentinel file outside queue dir was affected by rejected traversal id: %v", err)
+	}
+	if err := q.RetryFailed(ctx, "../etc/passwd"); err == nil {
+		t.Fatal("expected path-traversal job id to be rejected by RetryFailed")
+	}
+
+	// Legitimate operation with the real job id still works.
+	if err := q.DiscardFailed(ctx, jobID); err != nil {
+		t.Fatalf("expected legitimate DiscardFailed to succeed, got %v", err)
+	}
+}
+
+// TestInboxAcceptRejectsMalformedIdentifiers proves Source/EventID are
+// validated before being folded into the dedup key, and that the key
+// encoding can't let two different (Source, EventID) pairs collide via the
+// ":" delimiter (e.g. Source="a:b",EventID="c" vs Source="a",EventID="b:c").
+func TestInboxAcceptRejectsMalformedIdentifiers(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewReliability(ReliabilityConfig{Enabled: true, IdempotencyEnabled: true, QueueEnabled: true, DataDir: dir, QueueWorkers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.queue.Close()
+	inbox := r.Inbox()
+	inbox.q.Register("inbox.test", func(context.Context, *QueueJob) error { return nil })
+	inbox.q.Register("inbox.a", func(context.Context, *QueueJob) error { return nil })
+	inbox.q.Register("inbox.a:b", func(context.Context, *QueueJob) error { return nil })
+
+	if _, err := inbox.Accept(context.Background(), InboxEvent{Source: "test", EventID: "not valid!"}, "inbox.test"); err == nil {
+		t.Fatal("expected malformed EventID to be rejected")
+	}
+	if _, err := inbox.Accept(context.Background(), InboxEvent{Source: "not valid!", EventID: "evt-1"}, "inbox.test"); err == nil {
+		t.Fatal("expected malformed Source to be rejected")
+	}
+
+	// Two distinct (Source, EventID) pairs that would collide under a naive
+	// "source:eventID" join must be treated as distinct events, not a
+	// replay of one another.
+	id1, err := inbox.Accept(context.Background(), InboxEvent{Source: "a:b", EventID: "c"}, "inbox.a:b")
+	if err != nil || id1 == "" {
+		t.Fatalf("expected first distinct event accepted, id=%q err=%v", id1, err)
+	}
+	id2, err := inbox.Accept(context.Background(), InboxEvent{Source: "a", EventID: "b:c"}, "inbox.a")
+	if err != nil || id2 == "" {
+		t.Fatalf("expected second distinct event (collision-prone pair) accepted, id=%q err=%v", id2, err)
+	}
+}
 
 func TestDurableQueueUsesQueueStorageInterface(t *testing.T) {
 	store := newMemoryQueueStorage()

@@ -82,7 +82,18 @@ func getBytes() *[]byte {
 	return bytesPool.Get().(*[]byte)
 }
 
+// maxPooledBytesCap bounds what putBytes will return to the shared pool.
+// Without this, a single large response (echoed upload, large JSON dump,
+// streamed body) permanently inflates the backing array of whichever pool
+// slot it lands in, and that oversized buffer is then reused or sits idle
+// across unrelated future requests — a sync.Pool memory-bloat pattern.
+// Mirrors putBuf's fixed-size-only pooling below.
+const maxPooledBytesCap = 1 << 20 // 1MB
+
 func putBytes(b *[]byte) {
+	if cap(*b) > maxPooledBytesCap {
+		return
+	}
 	*b = (*b)[:0]
 	bytesPool.Put(b)
 }

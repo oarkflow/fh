@@ -128,7 +128,12 @@ type Config struct {
 	MaxHeaderBytes int
 
 	// RequireTLS rejects Basic Auth unless the request appears to be HTTPS.
-	// Recommended in production behind TLS.
+	// Default: false — Basic Auth sends credentials as base64 (not
+	// encrypted) on the wire, so without RequireTLS (and, behind a proxy,
+	// TrustProxyHeaders) this middleware will accept credentials over
+	// plain HTTP with no warning. Set RequireTLS true in any deployment
+	// where TLS isn't otherwise guaranteed to terminate before this
+	// middleware runs.
 	RequireTLS bool
 
 	// TrustProxyHeaders allows X-Forwarded-Proto / X-Forwarded-Ssl checks.

@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"io/fs"
 	"mime"
@@ -47,6 +48,11 @@ type StaticConfig struct {
 	// resolving the file. When true, both /dir and /dir/ serve the same
 	// content without a redirect.
 	StripSlash bool
+
+	// ShowHidden includes dotfiles (e.g. .env, .git) in directory listings.
+	// Defaults to false so accidental secrets/metadata in the served root
+	// are not exposed through Browse.
+	ShowHidden bool
 }
 
 func (c *StaticConfig) indexFile() string {
@@ -376,6 +382,16 @@ func (s *staticFS) listDir(c Ctx, upath string) error {
 		return c.Status(500).SendString("Internal Server Error")
 	}
 
+	if !s.cfg.ShowHidden {
+		visible := entries[:0]
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), ".") {
+				visible = append(visible, entry)
+			}
+		}
+		entries = visible
+	}
+
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].IsDir() != entries[j].IsDir() {
 			return entries[i].IsDir()
@@ -383,13 +399,19 @@ func (s *staticFS) listDir(c Ctx, upath string) error {
 		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
 	})
 
+	// Entry names come from the filesystem and the path comes from the
+	// request URL; both are escaped before being written into HTML since
+	// either can be attacker-influenced (e.g. a file uploaded elsewhere on
+	// the served root with a name like "<script>...").
+	safePath := html.EscapeString(upath)
+
 	var buf bytes.Buffer
 	buf.WriteString("<!DOCTYPE html><html><head><meta charset=\"utf-8\">")
 	buf.WriteString("<title>Index of ")
-	buf.WriteString(upath)
+	buf.WriteString(safePath)
 	buf.WriteString("</title></head><body>")
 	buf.WriteString("<h1>Index of ")
-	buf.WriteString(upath)
+	buf.WriteString(safePath)
 	buf.WriteString("</h1><hr><ul>")
 
 	if upath != "." {
@@ -397,7 +419,9 @@ func (s *staticFS) listDir(c Ctx, upath string) error {
 	}
 
 	for _, entry := range entries {
-		name := entry.Name()
+		// html.EscapeString escapes & < > " ' which is safe both inside the
+		// href="..." attribute and as element text content.
+		name := html.EscapeString(entry.Name())
 		if entry.IsDir() {
 			buf.WriteString("<li><a href=\"")
 			buf.WriteString(name)

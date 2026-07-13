@@ -425,11 +425,15 @@ func (a *App) OpenAPI() map[string]any {
 
 const docsHTML = `<!doctype html><html><head><title>fh API Docs</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:system-ui;margin:2rem;max-width:980px}pre{background:#f6f8fa;padding:1rem;overflow:auto}</style></head><body><h1>fh API Docs</h1><p>OpenAPI JSON is available at <a href="/openapi.json">/openapi.json</a>.</p><pre id="spec">Loading...</pre><script>fetch('/openapi.json').then(r=>r.json()).then(j=>spec.textContent=JSON.stringify(j,null,2))</script></body></html>`
 
-func (a *App) EnableRouteList(path string) *App {
+// EnableRouteList mounts a route-table introspection endpoint. It reveals
+// every route's path, method, and security metadata (including which routes
+// have no auth requirement) — pass an auth middleware in deployments
+// reachable from outside a trusted network.
+func (a *App) EnableRouteList(path string, middleware ...HandlerFunc) *App {
 	if path == "" {
 		path = "/_fh/routes"
 	}
-	a.Get(path, func(c Ctx) error { return c.JSON(a.Routes()) })
+	a.Get(path, withHandlers(middleware, func(c Ctx) error { return c.JSON(a.Routes()) })...)
 	return a
 }
 
