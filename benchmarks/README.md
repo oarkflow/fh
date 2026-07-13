@@ -27,8 +27,9 @@ Benchmarks comparing **fh** against HTTP frameworks from Go, Python, Node.js, PH
 | JSON | GET | `/json` | Return `{"message":"Hello, World!"}` |
 | Params | GET | `/users/42` | Route parameter extraction + JSON response |
 | Query | GET | `/search?q=benchmark` | Query string parameter + JSON response |
-| Echo | POST | `/echo` | Parse JSON body and echo back |
+| Echo | POST | `/echo` | Parse a JSON object and serialize it back |
 | Users | GET | `/users` | Serialize array of 100 user objects |
+| Method dispatch | all supported | `/methods/<method>` | Identical static response over GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, CONNECT, TRACE, and QUERY |
 
 ## Requirements
 
@@ -49,7 +50,7 @@ cd benchmarks
 bash run.sh
 ```
 
-This installs dependencies, starts each server, runs all 6 scenarios with 100 concurrent connections for 10 seconds each, and prints a comparison table.
+This installs dependencies, starts each server, runs the workload scenarios and complete method-dispatch matrix with 100 concurrent connections for 10 seconds each, and prints a comparison table.
 
 ### Custom Configuration
 
@@ -57,9 +58,15 @@ This installs dependencies, starts each server, runs all 6 scenarios with 100 co
 # Run with 50 connections for 5 seconds
 bash run.sh -c 50 -d 5
 
+# Use five rotating rounds and report the median
+bash run.sh -d 5 -n 5
+
 # Benchmark only specific servers
 bash run.sh --server fh
 bash run.sh --server gin --server fiber
+
+# Run only matching scenarios
+bash run.sh --scenario query
 
 # Show help
 bash run.sh -h
@@ -138,13 +145,18 @@ benchmarks/
 ## Adding a New Server
 
 1. Create a directory under `servers/<lang>/<name>/`
-2. Implement the 6 endpoints (Plaintext, JSON, Params, Query, Echo, Users)
+2. Implement the workload endpoints and complete method-dispatch matrix
 3. Add a `Server` entry in `main.go` with the correct port, start command, and language
 4. Run `bash run.sh --server <name>` to test
 
 ## Notes
 
 - All servers run on `127.0.0.1` with keep-alive enabled
+- All three use the same HTTP/1 throughput profile: 16 KiB read buffers, 4 MiB body limits, no request/write/idle timeout, and no Date or Server response header. Handlers use ordinary framework APIs (`SendString`, JSON encode/decode, params, and query access); fh does not use static/prebuilt response helpers.
+- Every scenario passes a preflight gate that requires byte-identical response bodies and equivalent media types from successful servers before timing starts
+- Scenarios run back-to-back across frameworks for three rounds by default; the first framework rotates per scenario and round, and the median round is reported
+- The method matrix uses one persistent raw HTTP/1.1 driver because Bombardier rejects CONNECT, TRACE, and QUERY and has different client paths for its supported methods
+- The users-array workload performs real JSON serialization on every request in all three frameworks; it does not use repeated string concatenation or a cached payload
 - Benchmarks use [bombardier](https://github.com/codesenberg/bombardier) for consistent cross-language measurement
 - Results may vary significantly based on hardware, OS, and runtime versions
-- For best results, run each benchmark multiple times and average
+- Treat one-second runs as smoke tests. For publishable results, use at least 5–10 seconds and repeat runs on an otherwise idle machine

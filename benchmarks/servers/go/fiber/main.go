@@ -22,7 +22,11 @@ func init() {
 }
 
 func main() {
-	app := fiber.New()
+	app := fiber.New(fiber.Config{
+		DisableDefaultDate: true,
+		ReadBufferSize:     16 << 10,
+		BodyLimit:          4 << 20,
+	})
 
 	app.Get("/plaintext", func(c fiber.Ctx) error {
 		return c.SendString("Hello, World!")
@@ -53,6 +57,19 @@ func main() {
 	app.Get("/users", func(c fiber.Ctx) error {
 		return c.JSON(users)
 	})
+
+	methodReply := func(c fiber.Ctx) error { return c.SendString("OK") }
+	app.Get("/methods/get", methodReply)
+	app.Head("/methods/head", methodReply)
+	app.Post("/methods/post", methodReply)
+	app.Put("/methods/put", methodReply)
+	app.Patch("/methods/patch", methodReply)
+	app.Delete("/methods/delete", methodReply)
+	app.Options("/methods/options", methodReply)
+	app.Add([]string{"CONNECT"}, "/methods/connect", methodReply)
+	app.Add([]string{"TRACE"}, "/methods/trace", methodReply)
+	// Fiber rejects extension methods such as QUERY at registration time. The
+	// benchmark keeps the scenario so that unsupported methods are visible.
 
 	log.Fatal(app.Listen(":3003"))
 }

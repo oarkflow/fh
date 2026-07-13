@@ -22,7 +22,7 @@ func init() {
 }
 
 func main() {
-	app := fh.New(
+	app := fh.NewFast(
 		fh.WithDisableHTTP2(true),
 		fh.WithDisablePanicRecovery(true),
 	)
@@ -30,19 +30,16 @@ func main() {
 	app.Get("/plaintext", func(c fh.Ctx) error {
 		return c.SendString("Hello, World!")
 	})
-
 	app.Get("/json", func(c fh.Ctx) error {
 		return c.JSON(fh.Map{"message": "Hello, World!"})
 	})
 
 	app.Get("/users/:id", func(c fh.Ctx) error {
-		id := c.Params("id")
-		return c.JSON(User{Name: "User " + id})
+		return c.JSON(User{Name: "User " + c.Params("id")})
 	})
 
 	app.Get("/search", func(c fh.Ctx) error {
-		q := c.Query("q")
-		return c.JSON(fh.Map{"query": q})
+		return c.JSON(fh.Map{"query": c.Query("q")})
 	})
 
 	app.Post("/echo", func(c fh.Ctx) error {
@@ -56,6 +53,18 @@ func main() {
 	app.Get("/users", func(c fh.Ctx) error {
 		return c.JSON(users)
 	})
+
+	methodReply := func(c fh.Ctx) error { return c.SendString("OK") }
+	app.Get("/methods/get", methodReply)
+	app.Head("/methods/head", methodReply)
+	app.Post("/methods/post", methodReply)
+	app.Put("/methods/put", methodReply)
+	app.Patch("/methods/patch", methodReply)
+	app.Delete("/methods/delete", methodReply)
+	app.Options("/methods/options", methodReply)
+	app.Connect("/methods/connect", methodReply)
+	app.Trace("/methods/trace", methodReply)
+	app.Query("/methods/query", methodReply)
 
 	log.Fatal(app.Listen(":3001"))
 }

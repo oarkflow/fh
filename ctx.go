@@ -1465,14 +1465,24 @@ func (c *DefaultCtx) writeDirectJSONAppender200(app JSONAppender) error {
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
 	}
-	body := (*c.writeBuf)[:0]
+	base := (*c.writeBuf)[:0]
+	if cap(base) < directJSONHeaderReserve {
+		base = append(base, make([]byte, directJSONHeaderReserve)...)
+	} else {
+		base = base[:directJSONHeaderReserve]
+	}
+	body := base[directJSONHeaderReserve:directJSONHeaderReserve]
 	out, err := app.AppendJSON(body)
 	if err != nil {
-		*c.writeBuf = body[:0]
+		*c.writeBuf = base[:0]
 		return err
 	}
-	*c.writeBuf = out
+	return c.writeDirectJSONBytes200(base, out)
+}
 
+const directJSONHeaderReserve = 192
+
+func (c *DefaultCtx) writeDirectJSONBytes200(base, out []byte) error {
 	c.responded = true
 	var stack [256]byte
 	header := stack[:0]
@@ -1495,7 +1505,19 @@ func (c *DefaultCtx) writeDirectJSONAppender200(app JSONAppender) error {
 	} else {
 		header = append(header, "Connection: close\r\n\r\n"...)
 	}
-	return writeBuffers(c.conn, header, out)
+	if len(out) > 0 && &out[0] != &base[:directJSONHeaderReserve+1][directJSONHeaderReserve] {
+		// An unusually large appender outgrew the pooled buffer. Preserve the
+		// zero-copy large-body behavior when the body moved to a new allocation.
+		*c.writeBuf = out
+		return writeBuffers(c.conn, header, out)
+	}
+	// The direct JSON encoders write the body after reserved headroom. Backfill
+	// the now-known header and send one contiguous buffer without moving the body.
+	start := directJSONHeaderReserve - len(header)
+	copy(base[start:directJSONHeaderReserve], header)
+	full := base[:directJSONHeaderReserve+len(out)]
+	*c.writeBuf = full
+	return writeAll(c.conn, full[start:])
 }
 
 // writeResponse writes a response with a byte body.

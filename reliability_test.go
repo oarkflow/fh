@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,6 +131,7 @@ func TestRequestJournalAppend(t *testing.T) {
 }
 
 type memoryQueueStorage struct {
+	mu           sync.Mutex
 	pending      []*QueueJob
 	processing   map[string]*QueueJob
 	done, failed int
@@ -139,12 +141,16 @@ func newMemoryQueueStorage() *memoryQueueStorage {
 	return &memoryQueueStorage{processing: map[string]*QueueJob{}}
 }
 func (m *memoryQueueStorage) Enqueue(ctx context.Context, j *QueueJob) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	cp := *j
 	cp.Payload = append([]byte(nil), j.Payload...)
 	m.pending = append(m.pending, &cp)
 	return nil
 }
 func (m *memoryQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJob, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if len(m.pending) == 0 {
 		return nil, ErrQueueEmpty
 	}
@@ -154,25 +160,35 @@ func (m *memoryQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJo
 	return j, nil
 }
 func (m *memoryQueueStorage) Complete(ctx context.Context, j *QueueJob) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	delete(m.processing, j.ID)
 	m.done++
 	return nil
 }
 func (m *memoryQueueStorage) Retry(ctx context.Context, j *QueueJob, err error, d time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	j.Attempts++
 	if j.Attempts >= j.MaxAttempts {
-		return m.Fail(ctx, j, err)
+		delete(m.processing, j.ID)
+		m.failed++
+		return nil
 	}
 	delete(m.processing, j.ID)
 	m.pending = append(m.pending, j)
 	return nil
 }
 func (m *memoryQueueStorage) Fail(ctx context.Context, j *QueueJob, err error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	delete(m.processing, j.ID)
 	m.failed++
 	return nil
 }
 func (m *memoryQueueStorage) Recover(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for id, j := range m.processing {
 		delete(m.processing, id)
 		m.pending = append(m.pending, j)
@@ -180,6 +196,8 @@ func (m *memoryQueueStorage) Recover(ctx context.Context) error {
 	return nil
 }
 func (m *memoryQueueStorage) Stats(ctx context.Context) (QueueStats, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return QueueStats{Pending: len(m.pending), Processing: len(m.processing), Done: m.done, Failed: m.failed}, nil
 }
 func (m *memoryQueueStorage) Close() error { return nil }

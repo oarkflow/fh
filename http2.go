@@ -125,6 +125,10 @@ type h2Conn struct {
 
 	// SETTINGS ACK timeout
 	settingsTimer *time.Timer
+
+	// HTTP/2 Server Push support
+	pushState       *h2PushState
+	peerEnablePush  atomicBool
 }
 
 type h2Stream struct {
@@ -176,6 +180,8 @@ func newH2Conn(app *App, conn net.Conn) *h2Conn {
 	h.enc = hpack.NewEncoder(&h.encBuf)
 	h.dec = hpack.NewDecoder(4096, func(hpack.HeaderField) {})
 	h.dec.SetMaxStringLength(maxH2HeaderListSize(app))
+	h.pushState = newPushState(maxH2ConcurrentStreams(app))
+	h.peerEnablePush.Store(true) // default: client allows push
 	return h
 }
 

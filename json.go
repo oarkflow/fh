@@ -9,6 +9,8 @@ import (
 
 type JSONValue struct{ v any }
 
+var jsonSupportedTypeCache sync.Map // map[reflect.Type]bool
+
 func (f JSONValue) AppendJSON(dst []byte) ([]byte, error) {
 	out, _, err := appendJSONValueRef(dst, reflect.ValueOf(f.v))
 	return out, err
@@ -18,7 +20,13 @@ func supportsJSON(v any) bool {
 	if v == nil {
 		return false
 	}
-	return JSONTypeSupported(reflect.TypeOf(v), make(map[reflect.Type]bool, 4))
+	t := reflect.TypeOf(v)
+	if supported, ok := jsonSupportedTypeCache.Load(t); ok {
+		return supported.(bool)
+	}
+	supported := JSONTypeSupported(t, make(map[reflect.Type]bool, 4))
+	actual, _ := jsonSupportedTypeCache.LoadOrStore(t, supported)
+	return actual.(bool)
 }
 
 func JSONTypeSupported(t reflect.Type, seen map[reflect.Type]bool) bool {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"strconv"
 
@@ -31,33 +32,47 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 
 	case method == "GET" && string(path) == "/json":
 		ctx.SetContentType("application/json")
-		ctx.SetBodyString(`{"message":"Hello, World!"}`)
+		body, _ := json.Marshal(map[string]string{"message": "Hello, World!"})
+		ctx.SetBody(body)
 
 	case method == "GET" && len(path) > 7 && path[:7] == "/users/":
 		id := path[7:]
 		ctx.SetContentType("application/json")
-		ctx.SetBodyString(`{"id":0,"name":"User ` + id + `"}`)
+		body, _ := json.Marshal(User{Name: "User " + id})
+		ctx.SetBody(body)
 
 	case method == "GET" && string(path) == "/search":
 		q := string(ctx.QueryArgs().Peek("q"))
 		ctx.SetContentType("application/json")
-		ctx.SetBodyString(`{"query":"` + q + `"}`)
+		body, _ := json.Marshal(map[string]string{"query": q})
+		ctx.SetBody(body)
 
 	case method == "POST" && string(path) == "/echo":
 		ctx.SetContentType("application/json")
-		ctx.SetBody(ctx.PostBody())
+		var value map[string]any
+		if err := json.Unmarshal(ctx.PostBody(), &value); err != nil {
+			ctx.SetStatusCode(400)
+			return
+		}
+		body, _ := json.Marshal(value)
+		ctx.SetBody(body)
 
 	case method == "GET" && string(path) == "/users":
 		ctx.SetContentType("application/json")
-		usersJson := `[`
-		for i, u := range users {
-			if i > 0 {
-				usersJson += `,`
-			}
-			usersJson += `{"id":` + strconv.Itoa(u.ID) + `,"name":"` + u.Name + `"}`
-		}
-		usersJson += `]`
-		ctx.SetBodyString(usersJson)
+		body, _ := json.Marshal(users)
+		ctx.SetBody(body)
+
+	case method == "GET" && path == "/methods/get",
+		method == "HEAD" && path == "/methods/head",
+		method == "POST" && path == "/methods/post",
+		method == "PUT" && path == "/methods/put",
+		method == "PATCH" && path == "/methods/patch",
+		method == "DELETE" && path == "/methods/delete",
+		method == "OPTIONS" && path == "/methods/options",
+		method == "CONNECT" && path == "/methods/connect",
+		method == "TRACE" && path == "/methods/trace",
+		method == "QUERY" && path == "/methods/query":
+		ctx.SetBodyString("OK")
 
 	default:
 		ctx.SetStatusCode(404)
@@ -66,5 +81,12 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 }
 
 func main() {
-	log.Fatal(fasthttp.ListenAndServe(":3004", requestHandler))
+	server := &fasthttp.Server{
+		Handler:               requestHandler,
+		ReadBufferSize:        16 << 10,
+		MaxRequestBodySize:    4 << 20,
+		NoDefaultDate:         true,
+		NoDefaultServerHeader: true,
+	}
+	log.Fatal(server.ListenAndServe(":3004"))
 }
