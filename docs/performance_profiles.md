@@ -4,7 +4,7 @@ fh now separates benchmark-oriented speed from strict production and enterprise 
 
 ## Fast
 
-Use `fh.NewFast()` or `fh.New(fh.WithMode(fh.ModeFast))` for trusted benchmark paths. This keeps benchmark-sensitive defaults such as no Date header. Prefer explicit byte APIs in handlers:
+Use `fh.NewFast()` or `fh.New(fh.WithMode(fh.ModeFast))` for trusted benchmark paths. This keeps benchmark-sensitive defaults such as no Date header and omits per-request graceful-shutdown activity tracking. Fast-mode shutdown closes HTTP/1 connections immediately; use `NewProduction` when in-flight requests must drain. Prefer explicit byte APIs in handlers:
 
 ```go
 app := fh.NewFast()

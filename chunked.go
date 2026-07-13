@@ -17,15 +17,20 @@ const maxChunkLine = 4096
 // readChunkedBody decodes one RFC 9112 chunked body. Initial may also contain
 // bytes from the next pipelined request; those are returned as leftover.
 func readChunkedBody(conn net.Conn, initial []byte, maxBody int, timeout time.Duration) (body, leftover []byte, trailers []Header, err error) {
+	// Arm one absolute body deadline. Resetting it for every chunk would let a
+	// slow sender keep the connection alive indefinitely by periodically sending
+	// a byte. A zero timeout intentionally leaves the caller's deadline intact.
+	if timeout > 0 {
+		if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	wire := append(make([]byte, 0, len(initial)+4096), initial...)
 	pos := 0
 	body = make([]byte, 0, minInt(len(initial), maxBody))
 
 	readMore := func() error {
 		var scratch [4096]byte
-		if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-			return err
-		}
 		n, readErr := conn.Read(scratch[:])
 		if n > 0 {
 			wire = append(wire, scratch[:n]...)

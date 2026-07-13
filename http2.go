@@ -3,6 +3,7 @@ package fh
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -127,8 +128,8 @@ type h2Conn struct {
 	settingsTimer *time.Timer
 
 	// HTTP/2 Server Push support
-	pushState       *h2PushState
-	peerEnablePush  atomicBool
+	pushState      *h2PushState
+	peerEnablePush atomicBool
 }
 
 type h2Stream struct {
@@ -171,7 +172,11 @@ func newH2Conn(app *App, conn net.Conn) *h2Conn {
 		localMaxConcurrentStreams: maxH2ConcurrentStreams(app),
 		resetWindowStart:          time.Now(),
 	}
-	h.ctx, h.cancel = context.WithCancel(context.Background())
+	baseContext := context.Background()
+	if tc, ok := conn.(*tls.Conn); ok {
+		baseContext = WithTLSState(baseContext, tc.ConnectionState())
+	}
+	h.ctx, h.cancel = context.WithCancel(baseContext)
 	h.peerMaxFrame.Store(h2DefaultFrame)
 	h.localMaxFrame.Store(h2DefaultFrame)
 	h.peerMaxHeaderList.Store(^uint32(0))
@@ -807,23 +812,24 @@ func (h *h2Conn) handleWindowUpdate(f h2Frame) error {
 		h.mu.Lock()
 		s := h.streams[f.streamID]
 		idle := s == nil && f.streamID > h.lastStream
+		h.mu.Unlock()
 		if idle {
-			h.mu.Unlock()
 			return h2ConnError{h2ProtocolError}
 		}
 		if s != nil {
+			// sendWindow participates in the DATA writer's wait predicate and is
+			// therefore protected by flowMu, not the stream registry mutex.
+			h.flowMu.Lock()
 			if s.sendWindow+inc > h2MaxWindow {
-				h.mu.Unlock()
+				h.flowMu.Unlock()
 				// RFC 7540 §6.9.1: stream-level overflow is a stream error
 				h.sendRST(f.streamID, h2FlowControlError)
 				return nil
 			}
 			s.sendWindow += inc
+			h.flowCond.Broadcast()
+			h.flowMu.Unlock()
 		}
-		h.mu.Unlock()
-		h.flowMu.Lock()
-		h.flowCond.Broadcast()
-		h.flowMu.Unlock()
 	}
 	return nil
 }

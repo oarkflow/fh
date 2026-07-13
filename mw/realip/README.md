@@ -16,7 +16,8 @@ import (
 
 func main() {
 	app := fh.New()
-	app.Use(realip.New(realip.Config{}))
+	_, edge, _ := net.ParseCIDR("10.20.0.0/16")
+	app.Use(realip.New(realip.Config{TrustedProxies: []*net.IPNet{edge}}))
 
 	app.Get("/", func(c fh.Ctx) error {
 		return c.String(fh.StatusOK, "ok")
@@ -34,5 +35,7 @@ Run very early before logger, rate limiter, IP whitelist, audit, and authz decis
 
 ## Production considerations
 
-Only trust proxy headers from trusted proxy CIDRs. Otherwise attackers can spoof client IPs.
-
+Forwarding headers are ignored unless the socket peer belongs to a configured
+`TrustedProxies` CIDR. The middleware walks multi-proxy chains from right to
+left and stops at the first untrusted hop. `TrustAll` is available only for
+isolated test/listener setups where untrusted clients cannot connect directly.

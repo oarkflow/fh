@@ -23,9 +23,18 @@ fi
 echo "[setup] Using $BOMB"
 echo ""
 
-# Run benchmark
+# Run benchmark. Pin the harness (and its in-process raw HTTP driver for the
+# /methods/* matrix) to the upper half of the cores; main.go pins the servers
+# under test to the lower half. Without this split the load generator and the
+# servers fight for the same cores and scheduler noise exceeds the real
+# differences between frameworks.
 echo "[run] Starting benchmarks..."
-go run main.go "$@"
+NPROC=$(nproc)
+if command -v taskset >/dev/null 2>&1 && [ "$NPROC" -ge 4 ]; then
+    taskset -c "$((NPROC / 2))-$((NPROC - 1))" go run main.go "$@"
+else
+    go run main.go "$@"
+fi
 
 echo ""
 echo "Done! Check results/ for output."

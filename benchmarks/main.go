@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,13 +137,33 @@ func waitForServer(port int, timeout time.Duration) bool {
 	return false
 }
 
+// serverCores / clientCores split the machine so the servers under test and
+// the load generator do not fight for the same cores. Unpinned, both sides
+// thrash the Go scheduler (25-30% of CPU in runtime lock contention at 1M+
+// req/s) and run-to-run noise exceeds the real differences between frameworks.
+func coreSplit() (serverCores, clientCores string, ok bool) {
+	n := runtime.NumCPU()
+	if n < 4 {
+		return "", "", false
+	}
+	if _, err := exec.LookPath("taskset"); err != nil {
+		return "", "", false
+	}
+	half := n / 2
+	return fmt.Sprintf("0-%d", half-1), fmt.Sprintf("%d-%d", half, n-1), true
+}
+
 func startServer(s Server) (*exec.Cmd, error) {
 	var cmd *exec.Cmd
 
 	switch s.Lang {
 	case "Go":
 		absDir, _ := filepath.Abs(s.RunDir)
-		cmd = exec.Command("go", "run", ".")
+		if serverCores, _, ok := coreSplit(); ok {
+			cmd = exec.Command("taskset", "-c", serverCores, "go", "run", ".")
+		} else {
+			cmd = exec.Command("go", "run", ".")
+		}
 		cmd.Dir = absDir
 	}
 
@@ -180,7 +201,12 @@ func runBombardier(url, method, body, header string, duration int, connections i
 	}
 	args = append(args, url)
 
-	cmd := exec.Command(bombPath, args...)
+	var cmd *exec.Cmd
+	if _, clientCores, ok := coreSplit(); ok {
+		cmd = exec.Command("taskset", append([]string{"-c", clientCores, bombPath}, args...)...)
+	} else {
+		cmd = exec.Command(bombPath, args...)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return BenchmarkResult{}, fmt.Errorf("bombardier %s: %w\n%s", url, err, string(output))

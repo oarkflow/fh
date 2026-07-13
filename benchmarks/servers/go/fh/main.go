@@ -2,7 +2,10 @@ package main
 
 import (
 	"log"
+	"os"
+	"runtime/pprof"
 	"strconv"
+	"time"
 
 	"github.com/oarkflow/fh"
 )
@@ -22,6 +25,7 @@ func init() {
 }
 
 func main() {
+	startCPUProfile()
 	app := fh.NewFast(
 		fh.WithDisableHTTP2(true),
 		fh.WithDisablePanicRecovery(true),
@@ -67,4 +71,34 @@ func main() {
 	app.Query("/methods/query", methodReply)
 
 	log.Fatal(app.Listen(":3001"))
+}
+
+// startCPUProfile enables an opt-in, fixed-duration profile for framework
+// development without putting a profiling branch in the server hot path.
+// Example: FH_CPU_PROFILE=/tmp/fh.pprof FH_PROFILE_DURATION=10s go run .
+func startCPUProfile() {
+	path := os.Getenv("FH_CPU_PROFILE")
+	if path == "" {
+		return
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err = pprof.StartCPUProfile(f); err != nil {
+		_ = f.Close()
+		log.Fatal(err)
+	}
+	duration := 10 * time.Second
+	if raw := os.Getenv("FH_PROFILE_DURATION"); raw != "" {
+		if parsed, parseErr := time.ParseDuration(raw); parseErr == nil && parsed > 0 {
+			duration = parsed
+		}
+	}
+	go func() {
+		time.Sleep(duration)
+		pprof.StopCPUProfile()
+		_ = f.Close()
+		os.Exit(0)
+	}()
 }

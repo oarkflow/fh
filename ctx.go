@@ -80,6 +80,7 @@ type Ctx interface {
 	BodyCopy() []byte
 	BodyRaw() []byte
 	QueryParser(v any) error
+	HeaderParser(v any) error
 	Trailer(name string) string
 	SetTrailer(key, value string)
 	BodyParser(v any) error
@@ -195,6 +196,12 @@ type DefaultCtx struct {
 
 	readBuf  *[]byte
 	writeBuf *[]byte
+	// writeBufPooled distinguishes the general pool used by standalone/H2
+	// contexts from the HTTP/1 connection-owned buffer. A keep-alive connection
+	// processes requests serially, so its response buffer can be reused without
+	// a sync.Pool round trip on every request.
+	writeBufPooled  bool
+	connectionOwned bool
 
 	queryParsed bool
 	queryParams []Param
@@ -232,23 +239,54 @@ func acquireCtx(conn net.Conn, app *App) *DefaultCtx {
 	c := ctxPool.Get().(*DefaultCtx)
 	c.conn = conn
 	c.server = app
+	c.connectionOwned = false
 	c.reset()
+	return c
+}
+
+func acquireHTTP1Ctx(conn net.Conn, app *App, state *connState) *DefaultCtx {
+	if state == nil {
+		return acquireCtx(conn, app)
+	}
+	c := state.ctx
+	if c == nil {
+		c = &DefaultCtx{
+			params:      make([]Param, 0, 8),
+			queryParams: make([]Param, 0, 8),
+		}
+		state.ctx = c
+	}
+	c.conn = conn
+	c.server = app
+	c.connectionOwned = true
+	c.reset()
+	c.writeBuf = &state.writeBuf
 	return c
 }
 
 func releaseCtx(c *DefaultCtx) {
 	if c.writeBuf != nil {
-		putBytes(c.writeBuf)
+		if c.writeBufPooled {
+			putBytes(c.writeBuf)
+		}
 		c.writeBuf = nil
+		c.writeBufPooled = false
 	}
-	ctxPool.Put(c)
+	if !c.connectionOwned {
+		ctxPool.Put(c)
+	}
 }
 
 func (c *DefaultCtx) reset() {
-	c.Header.reset()
+	retainConnectionRefs := c.connectionOwned && c.server != nil && c.server.fastHTTP1
+	if retainConnectionRefs {
+		c.Header.resetRetained()
+	} else {
+		c.Header.reset()
+	}
 	c.params = c.params[:0]
 	c.status = 200
-	if c.chCount > 0 {
+	if c.chCount > 0 && !retainConnectionRefs {
 		clear(c.customHeaders[:c.chCount])
 	}
 	c.chCount = 0
@@ -266,10 +304,13 @@ func (c *DefaultCtx) reset() {
 	c.originalURI = c.originalURI[:0]
 	c.bodyTransform = nil
 	c.h2 = nil
-	if c.lcount > 0 {
+	if c.lcount > 0 && !retainConnectionRefs {
 		clear(c.locals[:c.lcount])
 	}
 	c.lcount = 0
+	if len(c.localOverflow) > 0 {
+		clear(c.localOverflow)
+	}
 	c.queryParsed = false
 	c.qcount = 0
 	c.queryParams = c.queryParams[:0]
@@ -605,6 +646,16 @@ func (c *DefaultCtx) QueryParser(v any) error {
 	}
 	var fc formCodec
 	return fc.Unmarshal(uri[qi+1:], v)
+}
+
+// HeaderParser decodes request headers into v using `header` struct tags.
+// Supported target types: *map[string]string, *map[string][]string, or a
+// struct pointer where each exported field is matched by the header name
+// specified in its `header:"name"` tag (case-insensitive).  When the tag is
+// absent the lower-cased field name is used.  Supported field types are
+// string, []string, int, int64, uint64, float64, bool, and *string.
+func (c *DefaultCtx) HeaderParser(v any) error {
+	return DecodeHeaders(&c.Header, v)
 }
 
 // Trailer returns a decoded chunked request trailer by name.
@@ -1146,6 +1197,7 @@ func (c *DefaultCtx) writeResponseString(s string) error {
 	c.responded = true
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
+		c.writeBufPooled = true
 	}
 	buf := (*c.writeBuf)[:0]
 
@@ -1237,8 +1289,31 @@ func (c *DefaultCtx) writeResponseString(s string) error {
 }
 
 func (c *DefaultCtx) writeJSONMapStringString(m map[string]string) error {
+	if c.canDirectWrite200() {
+		if c.writeBuf == nil {
+			c.writeBuf = getBytes()
+			c.writeBufPooled = true
+		}
+		base := (*c.writeBuf)[:0]
+		if cap(base) < directJSONHeaderReserve {
+			base = append(base, make([]byte, directJSONHeaderReserve)...)
+		} else {
+			base = base[:directJSONHeaderReserve]
+		}
+		body := appendJSONMapStringString(base[directJSONHeaderReserve:directJSONHeaderReserve], m)
+		return c.writeDirectJSONBytes200(base, body)
+	}
 	bp := jsonBytePool.Get().(*[]byte)
-	body := (*bp)[:0]
+	body := appendJSONMapStringString((*bp)[:0], m)
+	err := c.writeResponse(body)
+	if cap(body) <= 64<<10 {
+		*bp = body[:0]
+		jsonBytePool.Put(bp)
+	}
+	return err
+}
+
+func appendJSONMapStringString(body []byte, m map[string]string) []byte {
 	body = append(body, '{')
 	i := 0
 	for k, v := range m {
@@ -1250,8 +1325,36 @@ func (c *DefaultCtx) writeJSONMapStringString(m map[string]string) error {
 		body = appendJSONString(body, v)
 		i++
 	}
-	body = append(body, '}')
-	err := c.writeResponse(body)
+	return append(body, '}')
+}
+
+func (c *DefaultCtx) writeJSONMapStringAny(m map[string]any) error {
+	if c.canDirectWrite200() {
+		if c.writeBuf == nil {
+			c.writeBuf = getBytes()
+			c.writeBufPooled = true
+		}
+		base := (*c.writeBuf)[:0]
+		if cap(base) < directJSONHeaderReserve {
+			base = append(base, make([]byte, directJSONHeaderReserve)...)
+		} else {
+			base = base[:directJSONHeaderReserve]
+		}
+		body, err := appendJSONMapStringAny(base[directJSONHeaderReserve:directJSONHeaderReserve], m)
+		if err != nil {
+			*c.writeBuf = base[:0]
+			return err
+		}
+		return c.writeDirectJSONBytes200(base, body)
+	}
+	bp := jsonBytePool.Get().(*[]byte)
+	body, err := appendJSONMapStringAny((*bp)[:0], m)
+	if err != nil {
+		*bp = body[:0]
+		jsonBytePool.Put(bp)
+		return err
+	}
+	err = c.writeResponse(body)
 	if cap(body) <= 64<<10 {
 		*bp = body[:0]
 		jsonBytePool.Put(bp)
@@ -1259,9 +1362,7 @@ func (c *DefaultCtx) writeJSONMapStringString(m map[string]string) error {
 	return err
 }
 
-func (c *DefaultCtx) writeJSONMapStringAny(m map[string]any) error {
-	bp := jsonBytePool.Get().(*[]byte)
-	body := (*bp)[:0]
+func appendJSONMapStringAny(body []byte, m map[string]any) ([]byte, error) {
 	body = append(body, '{')
 	i := 0
 	for k, v := range m {
@@ -1273,19 +1374,11 @@ func (c *DefaultCtx) writeJSONMapStringAny(m map[string]any) error {
 		var err error
 		body, err = appendJSONValue(body, v)
 		if err != nil {
-			*bp = body[:0]
-			jsonBytePool.Put(bp)
-			return err
+			return body, err
 		}
 		i++
 	}
-	body = append(body, '}')
-	err := c.writeResponse(body)
-	if cap(body) <= 64<<10 {
-		*bp = body[:0]
-		jsonBytePool.Put(bp)
-	}
-	return err
+	return append(body, '}'), nil
 }
 
 func appendJSONValue(dst []byte, v any) ([]byte, error) {
@@ -1464,6 +1557,7 @@ func (c *DefaultCtx) writeJSONAppender(app JSONAppender) error {
 func (c *DefaultCtx) writeDirectJSONAppender200(app JSONAppender) error {
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
+		c.writeBufPooled = true
 	}
 	base := (*c.writeBuf)[:0]
 	if cap(base) < directJSONHeaderReserve {
@@ -1484,8 +1578,21 @@ const directJSONHeaderReserve = 192
 
 func (c *DefaultCtx) writeDirectJSONBytes200(base, out []byte) error {
 	c.responded = true
-	var stack [256]byte
-	header := stack[:0]
+	if len(out) < directHeaderCacheSize && (len(out) == 0 || &out[0] == &base[:directJSONHeaderReserve+1][directJSONHeaderReserve]) && !c.server.cfg.SendDateHeader &&
+		!c.server.cfg.SendKeepAliveHeader && c.Header.KeepAlive && !c.forceClose {
+		header := directJSON200Headers[len(out)]
+		start := directJSONHeaderReserve - len(header)
+		copy(base[start:directJSONHeaderReserve], header)
+		full := base[:directJSONHeaderReserve+len(out)]
+		*c.writeBuf = full
+		return writeAll(c.conn, full[start:])
+	}
+	// Assemble the header in the unused prefix of the connection-owned response
+	// buffer. A local [256]byte header escaped to the heap because the large-body
+	// branch passed it to net.Buffers, adding one allocation to every small JSON
+	// response. The body starts after directJSONHeaderReserve, so this prefix is
+	// safe to use until the final backfill below.
+	header := base[:0]
 	header = append(header, "HTTP/1.1 200 OK\r\n"...)
 	if c.server.cfg.SendDateHeader {
 		header = append(header, cachedDate()...)
@@ -1508,7 +1615,9 @@ func (c *DefaultCtx) writeDirectJSONBytes200(base, out []byte) error {
 	if len(out) > 0 && &out[0] != &base[:directJSONHeaderReserve+1][directJSONHeaderReserve] {
 		// An unusually large appender outgrew the pooled buffer. Preserve the
 		// zero-copy large-body behavior when the body moved to a new allocation.
-		*c.writeBuf = out
+		// Do not retain out: a custom JSONAppender may legally return caller-owned
+		// storage, which must never enter fh's response pool or connection buffer.
+		*c.writeBuf = base[:0]
 		return writeBuffers(c.conn, header, out)
 	}
 	// The direct JSON encoders write the body after reserved headroom. Backfill
@@ -1549,6 +1658,7 @@ func (c *DefaultCtx) writeResponse(body []byte) error {
 	c.responded = true
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
+		c.writeBufPooled = true
 	}
 	buf := (*c.writeBuf)[:0]
 
@@ -1642,8 +1752,17 @@ func (c *DefaultCtx) writeDirect200String(s string) error {
 	c.responded = true
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
+		c.writeBufPooled = true
 	}
 	buf := (*c.writeBuf)[:0]
+	if len(s) < directHeaderCacheSize && !c.server.cfg.SendDateHeader &&
+		!c.server.cfg.SendKeepAliveHeader && c.Header.KeepAlive && !c.forceClose &&
+		len(c.contentType) == len(plainTextCT) && len(c.contentType) > 0 && &c.contentType[0] == &plainTextCT[0] {
+		buf = append(buf, directPlain200Headers[len(s)]...)
+		buf = append(buf, s...)
+		*c.writeBuf = buf
+		return writeAll(c.conn, buf)
+	}
 	buf = append(buf, "HTTP/1.1 200 OK\r\n"...)
 	if c.server.cfg.SendDateHeader {
 		buf = append(buf, cachedDate()...)
@@ -1672,6 +1791,7 @@ func (c *DefaultCtx) writeDirect200Bytes(body []byte) error {
 	c.responded = true
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
+		c.writeBufPooled = true
 	}
 	buf := (*c.writeBuf)[:0]
 	buf = append(buf, "HTTP/1.1 200 OK\r\n"...)

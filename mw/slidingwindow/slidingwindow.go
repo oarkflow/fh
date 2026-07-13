@@ -17,7 +17,6 @@ package slidingwindow
 
 import (
 	"math"
-	"net"
 	"strconv"
 	"sync"
 	"time"
@@ -27,11 +26,11 @@ import (
 
 // Limiter is a sliding window rate limiter.
 type Limiter struct {
-	mu       sync.Mutex
-	windows  map[string]*window
+	mu         sync.Mutex
+	windows    map[string]*window
 	windowSize time.Duration
-	rate     int
-	burst    int
+	rate       int
+	burst      int
 }
 
 type window struct {
@@ -335,37 +334,7 @@ func ByComposite(fns ...func(fh.Ctx) string) func(fh.Ctx) string {
 }
 
 func extractIP(ctx fh.Ctx) string {
-	// Try X-Forwarded-For first.
-	xff := ctx.Get("X-Forwarded-For")
-	if xff != "" {
-		if i := indexOfByte(xff, ','); i >= 0 {
-			return xff[:i]
-		}
-		return xff
-	}
-
-	// Try X-Real-IP.
-	xri := ctx.Get("X-Real-IP")
-	if xri != "" {
-		return xri
-	}
-
-	// Fall back to RemoteAddr.
-	ip := ctx.IP()
-	if ip == "" {
-		host, _, _ := net.SplitHostPort(ctx.Get("Host"))
-		if host != "" {
-			ip = host
-		}
-	}
-	return ip
-}
-
-func indexOfByte(s string, c byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
+	// Forwarding headers are intentionally not read here. Place mw/realip,
+	// configured with trusted proxy CIDRs, before the limiter to override IP().
+	return ctx.IP()
 }

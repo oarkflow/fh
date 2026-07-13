@@ -3,13 +3,18 @@ package mtls
 import (
 	"context"
 	"crypto/x509"
-	"github.com/oarkflow/fh"
 	"strings"
+
+	"github.com/oarkflow/fh"
 )
 
 type ErrorHandler func(fh.Ctx, string) error
 type Config struct {
-	Required        bool
+	Required bool
+	// AllowUnverified permits PeerCertificates when the TLS stack did not build
+	// a verified chain. Leave false for secure deployments. It exists for
+	// private-PKI applications that perform all verification in Verify.
+	AllowUnverified bool
 	AllowedSubjects []string
 	AllowedIssuers  []string
 	Verify          func(fh.Ctx, []*x509.Certificate) bool
@@ -32,6 +37,16 @@ func New(cfg Config) fh.HandlerFunc {
 			return c.Next()
 		}
 		certs, _ := c.Context().Value(peerCertificatesKey{}).([]*x509.Certificate)
+		if state, ok := fh.RequestTLSState(c); ok {
+			switch {
+			case len(state.VerifiedChains) > 0:
+				certs = state.VerifiedChains[0]
+			case cfg.AllowUnverified:
+				certs = state.PeerCertificates
+			case len(state.PeerCertificates) > 0:
+				return cfg.Error(c, "client certificate is not verified")
+			}
+		}
 		if len(certs) == 0 {
 			if cfg.Required {
 				return cfg.Error(c, "client certificate required")

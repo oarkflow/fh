@@ -548,3 +548,70 @@ func TestQueryParserToStruct(t *testing.T) {
 		t.Fatalf("unexpected response: %q", resp)
 	}
 }
+
+func TestDecodeHeadersToStruct(t *testing.T) {
+	srv := New()
+	srv.Get("/info", func(c Ctx) error {
+		var s struct {
+			Host         string `header:"Host"`
+			ContentType  string `header:"Content-Type"`
+			XRequestID   string `header:"X-Request-Id"`
+			Authorization string `header:"Authorization"`
+		}
+		if err := c.HeaderParser(&s); err != nil {
+			return c.Status(400).SendString("error: " + err.Error())
+		}
+		return c.JSON(s)
+	})
+	client := runPipeApp(t, srv)
+	req := "GET /info HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nX-Request-Id: abc-123\r\nAuthorization: Bearer tok\r\nConnection: close\r\n\r\n"
+	go func() { _, _ = io.WriteString(client, req) }()
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(resp, []byte("example.com")) || !bytes.Contains(resp, []byte("abc-123")) || !bytes.Contains(resp, []byte("Bearer tok")) {
+		t.Fatalf("unexpected response: %q", resp)
+	}
+}
+
+func TestDecodeHeadersToMap(t *testing.T) {
+	srv := New()
+	srv.Get("/headers", func(c Ctx) error {
+		m := make(map[string]string)
+		if err := c.HeaderParser(&m); err != nil {
+			return c.Status(400).SendString("error: " + err.Error())
+		}
+		return c.JSON(m)
+	})
+	client := runPipeApp(t, srv)
+	req := "GET /headers HTTP/1.1\r\nHost: example.com\r\nX-Custom: value1\r\nConnection: close\r\n\r\n"
+	go func() { _, _ = io.WriteString(client, req) }()
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(resp, []byte("value1")) {
+		t.Fatalf("unexpected response: %q", resp)
+	}
+}
+
+func TestDecodeHeadersStandalone(t *testing.T) {
+	h := &RequestHeader{}
+	h.Init()
+	h.Add("X-Token", "my-token")
+	h.Add("X-Count", "42")
+	var s struct {
+		Token string `header:"X-Token"`
+		Count int    `header:"X-Count"`
+	}
+	if err := DecodeHeaders(h, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Token != "my-token" {
+		t.Fatalf("expected my-token, got %q", s.Token)
+	}
+	if s.Count != 42 {
+		t.Fatalf("expected 42, got %d", s.Count)
+	}
+}

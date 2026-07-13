@@ -59,11 +59,15 @@ type Config struct {
 	// Audit configures compliance-grade business/security audit records.
 	Audit AuditConfig
 	// Redaction controls sensitive field masking across audit, logs, journals and examples.
-	Redaction      RedactionConfig
-	ReadTimeout    time.Duration
-	WriteTimeout   time.Duration
-	IdleTimeout    time.Duration
-	MaxConnections int
+	Redaction   RedactionConfig
+	ReadTimeout time.Duration
+	// ReadHeaderTimeout bounds request-line and header reads independently from
+	// the body budget. It starts when the first request byte arrives, preventing
+	// slowloris clients from extending a deadline one byte at a time.
+	ReadHeaderTimeout time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+	MaxConnections    int
 	// DisablePanicRecovery removes the application-level panic recovery defer from
 	// every request. It is useful for trusted benchmark/edge deployments that use
 	// process supervision or explicit recover middleware. Leave false for robust
@@ -141,6 +145,9 @@ type Option func(*Config)
 
 func WithReadTimeout(d time.Duration) Option {
 	return func(c *Config) { c.ReadTimeout = d }
+}
+func WithReadHeaderTimeout(d time.Duration) Option {
+	return func(c *Config) { c.ReadHeaderTimeout = d }
 }
 func WithWriteTimeout(d time.Duration) Option {
 	return func(c *Config) { c.WriteTimeout = d }
@@ -237,7 +244,9 @@ func WithMode(mode Mode) Option {
 }
 
 // NewFast creates an app with benchmark-oriented defaults. Use this only behind
-// a trusted edge or for controlled latency/RPS benchmarks.
+// a trusted edge or for controlled latency/RPS benchmarks. To avoid request-hot
+// activity atomics, shutdown closes HTTP/1 connections immediately; use
+// NewProduction when graceful completion of in-flight requests is required.
 func NewFast(opts ...Option) *App {
 	all := append([]Option{WithMode(ModeFast)}, opts...)
 	return New(all...)
@@ -291,11 +300,17 @@ type App struct {
 	reliability   *Reliability
 	audit         AuditSink
 	drainingCh    chan struct{} // closed when draining starts, signals all connection contexts
+	fastHTTP1     bool          // trusted ModeFast: omit graceful activity bookkeeping
 }
 
 type connState struct {
 	active atomic.Bool
 	h2     *h2Conn
+	// HTTP/1 requests on one connection are serialized. Keep the response
+	// assembly buffer here instead of borrowing/returning a global pool item for
+	// every request.
+	writeBuf []byte
+	ctx      *DefaultCtx
 }
 
 // New creates a new App with functional options. Call with zero options to use
@@ -386,6 +401,7 @@ func buildApp(cfg Config) *App {
 		logger:     logger,
 		conns:      make(map[net.Conn]*connState),
 		drainingCh: make(chan struct{}),
+		fastHTTP1:  cfg.Mode == ModeFast,
 	}
 
 	if cfg.Audit.Enabled {
@@ -726,7 +742,7 @@ func (a *App) Serve(ln net.Listener) error {
 			continue
 		}
 		a.activeConn.Add(1)
-		a.conns[conn] = &connState{}
+		a.conns[conn] = &connState{writeBuf: make([]byte, 0, 4096)}
 		a.connMu.Unlock()
 		go a.serveConn(conn)
 	}
@@ -901,9 +917,11 @@ func (a *App) serveConn(conn net.Conn) {
 			return
 		}
 		_ = tc.SetDeadline(time.Time{})
-		if tc.ConnectionState().NegotiatedProtocol == "h2" {
+		tlsState := tc.ConnectionState()
+		connCtx = WithTLSState(connCtx, tlsState)
+		if tlsState.NegotiatedProtocol == "h2" {
 			// RFC 9113 §9.1: TLS 1.2 or higher required for HTTP/2
-			if tc.ConnectionState().Version < tls.VersionTLS12 {
+			if tlsState.Version < tls.VersionTLS12 {
 				a.emitError(errors.New("http2: TLS version 1.2 or higher required"))
 				return
 			}
@@ -912,6 +930,20 @@ func (a *App) serveConn(conn net.Conn) {
 			h2c.serve(nil, false)
 			return
 		}
+	} else if tc, ok := conn.(*tls.Conn); ok {
+		// HTTP/2 may be disabled, but TLS state (especially verified client
+		// certificates) must still be visible to HTTP/1 middleware.
+		if a.cfg.ReadTimeout > 0 {
+			_ = tc.SetDeadline(time.Now().Add(a.cfg.ReadTimeout))
+		}
+		if err := tc.Handshake(); err != nil {
+			if !isExpectedConnErr(err) {
+				a.emitError(err)
+			}
+			return
+		}
+		_ = tc.SetDeadline(time.Time{})
+		connCtx = WithTLSState(connCtx, tc.ConnectionState())
 	}
 
 	rawBuf := getBuf(a.cfg.ReadBufferSize)
@@ -919,12 +951,30 @@ func (a *App) serveConn(conn net.Conn) {
 	buf := *rawBuf
 
 	accumulated := buf[:0]
+	readDeadlineArmed := false
 
 	for {
-		if a.cfg.IdleTimeout > 0 {
+		var requestStart time.Time
+		headerBudget := a.cfg.ReadHeaderTimeout
+		if headerBudget <= 0 {
+			headerBudget = a.cfg.ReadTimeout
+		}
+		if len(accumulated) > 0 && headerBudget > 0 {
+			requestStart = time.Now()
+			if err := conn.SetReadDeadline(requestStart.Add(headerBudget)); err != nil {
+				return
+			}
+			readDeadlineArmed = true
+		} else if len(accumulated) == 0 && a.cfg.IdleTimeout > 0 {
 			if err := conn.SetReadDeadline(time.Now().Add(a.cfg.IdleTimeout)); err != nil {
 				return
 			}
+			readDeadlineArmed = true
+		} else if readDeadlineArmed {
+			if err := conn.SetReadDeadline(time.Time{}); err != nil {
+				return
+			}
+			readDeadlineArmed = false
 		}
 
 		headEnd := findHeaderEnd(accumulated)
@@ -934,15 +984,16 @@ func (a *App) serveConn(conn net.Conn) {
 				return
 			}
 
-			if a.cfg.ReadTimeout > 0 {
-				if err := conn.SetReadDeadline(time.Now().Add(a.cfg.ReadTimeout)); err != nil {
-					return
-				}
-			}
-
 			n, err := conn.Read(buf[len(accumulated):cap(buf)])
 			if n > 0 {
 				accumulated = buf[:len(accumulated)+n]
+				if requestStart.IsZero() && headerBudget > 0 {
+					requestStart = time.Now()
+					if deadlineErr := conn.SetReadDeadline(requestStart.Add(headerBudget)); deadlineErr != nil {
+						return
+					}
+					readDeadlineArmed = true
+				}
 			}
 			if err != nil {
 				if isTimeoutErr(err) && !a.closed.Load() {
@@ -972,12 +1023,12 @@ func (a *App) serveConn(conn net.Conn) {
 			}
 			headEnd = findHeaderEnd(accumulated)
 		}
-		if state != nil {
+		if state != nil && !a.fastHTTP1 {
 			state.active.Store(true)
 		}
 
 		// ── Parse request head ────────────────────────────────────────
-		ctx := acquireCtx(conn, a)
+		ctx := acquireHTTP1Ctx(conn, a, state)
 
 		consumed, err := parseRequestLine(accumulated, &ctx.Header, a.cfg.MaxRequestLineSize)
 		if err != nil {
@@ -1074,6 +1125,16 @@ func (a *App) serveConn(conn net.Conn) {
 		bodyLen := ctx.Header.ContentLength
 		var nextData []byte
 		chunkedBody := ctx.Header.Chunked
+		if (chunkedBody || bodyLen > 0) && a.cfg.ReadTimeout > 0 {
+			if requestStart.IsZero() {
+				requestStart = time.Now()
+			}
+			if err := conn.SetReadDeadline(requestStart.Add(a.cfg.ReadTimeout)); err != nil {
+				releaseCtx(ctx)
+				return
+			}
+			readDeadlineArmed = true
+		}
 
 		if chunkedBody {
 			body, leftover, trailers, readErr := readChunkedBody(conn, accumulated[bodyStart:], a.cfg.MaxRequestBodySize, a.cfg.ReadTimeout)
@@ -1091,12 +1152,6 @@ func (a *App) serveConn(conn net.Conn) {
 			messageEnd := bodyStart + bodyLen
 			if messageEnd <= cap(buf) {
 				for len(accumulated) < messageEnd {
-					if a.cfg.ReadTimeout > 0 {
-						if err := conn.SetReadDeadline(time.Now().Add(a.cfg.ReadTimeout)); err != nil {
-							releaseCtx(ctx)
-							return
-						}
-					}
 					n, err := conn.Read(buf[len(accumulated):cap(buf)])
 					if n > 0 {
 						accumulated = buf[:len(accumulated)+n]
@@ -1135,7 +1190,7 @@ func (a *App) serveConn(conn net.Conn) {
 				ctx.upgradeBuffered = accumulated[nextStart:]
 			}
 		}
-		if a.draining.Load() {
+		if !a.fastHTTP1 && a.draining.Load() {
 			ctx.Header.KeepAlive = false
 		}
 
@@ -1166,7 +1221,10 @@ func (a *App) serveConn(conn net.Conn) {
 			a.dispatch(ctx)
 			reqCancel()
 		}
-		keepAlive := ctx.Header.KeepAlive && !ctx.forceClose && !ctx.upgraded && !a.cfg.DisableKeepAlive && !a.draining.Load()
+		keepAlive := ctx.Header.KeepAlive && !ctx.forceClose && !ctx.upgraded && !a.cfg.DisableKeepAlive
+		if keepAlive && !a.fastHTTP1 {
+			keepAlive = !a.draining.Load()
+		}
 		upgraded := ctx.upgraded
 
 		releaseCtx(ctx)
@@ -1190,7 +1248,7 @@ func (a *App) serveConn(conn net.Conn) {
 				accumulated = buf[:0]
 			}
 		}
-		if state != nil {
+		if state != nil && !a.fastHTTP1 {
 			state.active.Store(false)
 		}
 	}

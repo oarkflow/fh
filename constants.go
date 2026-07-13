@@ -3,6 +3,7 @@ package fh
 // ── Request / response headers ────────────────────────────────────────────────
 const (
 	HeaderAccept                          = "Accept"
+	HeaderAcceptQuery                     = "Accept-Query"
 	HeaderAcceptCharset                   = "Accept-Charset"
 	HeaderAcceptEncoding                  = "Accept-Encoding"
 	HeaderAcceptLanguage                  = "Accept-Language"
@@ -17,6 +18,7 @@ const (
 	HeaderClearSiteData                   = "Clear-Site-Data"
 	HeaderConnection                      = "Connection"
 	HeaderContentDisposition              = "Content-Disposition"
+	HeaderContentDigest                   = "Content-Digest"
 	HeaderContentEncoding                 = "Content-Encoding"
 	HeaderContentLanguage                 = "Content-Language"
 	HeaderContentLength                   = "Content-Length"
@@ -53,6 +55,7 @@ const (
 	HeaderProxyAuthorization              = "Proxy-Authorization"
 	HeaderRange                           = "Range"
 	HeaderReferer                         = "Referer"
+	HeaderReprDigest                      = "Repr-Digest"
 	HeaderReferrerPolicy                  = "Referrer-Policy"
 	HeaderRefresh                         = "Refresh"
 	HeaderRetryAfter                      = "Retry-After"
@@ -72,6 +75,8 @@ const (
 	HeaderVary                            = "Vary"
 	HeaderVia                             = "Via"
 	HeaderWantDigest                      = "Want-Digest"
+	HeaderWantContentDigest               = "Want-Content-Digest"
+	HeaderWantReprDigest                  = "Want-Repr-Digest"
 	HeaderWarning                         = "Warning"
 	HeaderWWWAuthenticate                 = "WWW-Authenticate"
 )

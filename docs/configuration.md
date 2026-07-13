@@ -5,6 +5,7 @@
 ```go
 type Config struct {
     ReadTimeout          time.Duration            // Default: 10s
+	ReadHeaderTimeout    time.Duration            // Default: 5s (production)
     WriteTimeout         time.Duration            // Default: 10s
     IdleTimeout          time.Duration            // Default: 60s
     MaxConnections       int                      // Default: 0 (unlimited)
@@ -32,6 +33,7 @@ type Config struct {
 | Field | Default | Description |
 |-------|---------|-------------|
 | `ReadTimeout` | 10s | Maximum duration for reading the entire request |
+| `ReadHeaderTimeout` | 5s | Absolute request-line/header budget after the first byte |
 | `WriteTimeout` | 10s | Maximum duration for writing the response |
 | `IdleTimeout` | 60s | Maximum idle time for keep-alive connections |
 

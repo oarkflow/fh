@@ -7,9 +7,29 @@ import (
 
 var contentLengthSmall [1024]string
 
+const directHeaderCacheSize = 256
+
+var (
+	directPlain200Headers [directHeaderCacheSize][]byte
+	directJSON200Headers  [directHeaderCacheSize][]byte
+)
+
 func init() {
 	for i := range contentLengthSmall {
 		contentLengthSmall[i] = "Content-Length: " + strconv.Itoa(i) + "\r\n"
+	}
+	for i := 0; i < directHeaderCacheSize; i++ {
+		plain := make([]byte, 0, 96)
+		plain = append(plain, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"...)
+		plain = append(plain, contentLengthSmall[i]...)
+		plain = append(plain, '\r', '\n')
+		directPlain200Headers[i] = plain
+
+		json := make([]byte, 0, 80)
+		json = append(json, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"...)
+		json = append(json, contentLengthSmall[i]...)
+		json = append(json, '\r', '\n')
+		directJSON200Headers[i] = json
 	}
 }
 

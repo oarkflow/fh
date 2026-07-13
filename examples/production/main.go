@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"time"
 
 	"github.com/oarkflow/fh"
@@ -43,9 +44,10 @@ func main() {
 
 	maint := maintenance.NewSwitch()
 	m := metrics.New()
+	_, loopbackProxy, _ := net.ParseCIDR("127.0.0.0/8")
 
 	app.Use(
-		realip.New(realip.Config{}),
+		realip.New(realip.Config{TrustedProxies: []*net.IPNet{loopbackProxy}}),
 		hostguard.New(hostguard.Config{Allowed: []string{"localhost", "127.0.0.1"}, AllowEmpty: true}),
 		tracing.New(tracing.Config{TrustIncoming: true}),
 		requesthash.New(requesthash.Config{SkipEmpty: true}),

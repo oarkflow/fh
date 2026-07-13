@@ -3,7 +3,9 @@ package fh
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/textproto"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -123,6 +125,15 @@ func (h *RequestHeader) reset() {
 	if h.hcount > 0 {
 		clear(h.headers[:h.hcount])
 	}
+	h.resetRetained()
+}
+
+// resetRetained resets the logical request state without clearing the bounded
+// header slots. ModeFast HTTP/1 contexts live for exactly one connection, so
+// retaining references into that connection's read buffer is safe and avoids
+// a memclr on every keep-alive request. Pooled and production contexts continue
+// to use reset so they never retain another request's buffer.
+func (h *RequestHeader) resetRetained() {
 	h.Method = nil
 	h.URI = nil
 	h.RequestTarget = nil
@@ -319,30 +330,25 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 	if maxLineSize > 0 && limit > maxLineSize+2 {
 		limit = maxLineSize + 2
 	}
-	lineEnd := -1
-	for i := 0; i+1 < limit; i++ {
-		if buf[i] == '\r' && buf[i+1] == '\n' {
-			lineEnd = i
-			break
-		}
-	}
-	if lineEnd < 0 {
+	// bytes.IndexByte uses vectorized runtime routines; a bare LF (not preceded
+	// by CR) is rejected as malformed rather than skipped, which every later
+	// component validation would reject anyway.
+	nl := bytes.IndexByte(buf[:limit], '\n')
+	if nl < 0 {
 		if maxLineSize > 0 && len(buf) > maxLineSize {
 			return 0, ErrRequestLineTooLarge
 		}
 		return 0, ErrMalformedRequest
 	}
+	if nl == 0 || buf[nl-1] != '\r' {
+		return 0, ErrMalformedRequest
+	}
+	lineEnd := nl - 1
 	if maxLineSize > 0 && lineEnd > maxLineSize {
 		return 0, ErrRequestLineTooLarge
 	}
 	line := buf[:lineEnd]
-	sp1 := -1
-	for i, c := range line {
-		if c == ' ' {
-			sp1 = i
-			break
-		}
-	}
+	sp1 := bytes.IndexByte(line, ' ')
 	if sp1 <= 0 {
 		return 0, ErrMalformedRequest
 	}
@@ -351,11 +357,8 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 		return 0, ErrMalformedRequest
 	}
 	sp2 := -1
-	for i := sp1 + 1; i < len(line); i++ {
-		if line[i] == ' ' {
-			sp2 = i
-			break
-		}
+	if rel := bytes.IndexByte(line[sp1+1:], ' '); rel >= 0 {
+		sp2 = sp1 + 1 + rel
 	}
 	if sp2 <= sp1+1 || sp2 == len(line)-1 {
 		return 0, ErrMalformedRequest
@@ -366,6 +369,7 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 		return 0, NewHTTPError(505, "HTTP_VERSION_NOT_SUPPORTED", "HTTP version not supported")
 	}
 	routeTarget := target
+	sameRouteTarget := true
 	validTarget := target[0] == '/'
 	if !validTarget {
 		if methodIs(method, 'O', 'P', 'T', 'I', 'O', 'N', 'S') && len(target) == 1 && target[0] == '*' {
@@ -383,6 +387,7 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 				}
 			}
 			if validTarget {
+				sameRouteTarget = false
 				authStart := absIdx + 3
 				pathStart := authStart
 				for pathStart < len(target) && target[pathStart] != '/' && target[pathStart] != '?' {
@@ -414,9 +419,16 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 		}
 	}
 	routeQueryAt := -1
-	for i, c := range routeTarget {
-		if c == '?' && routeQueryAt < 0 {
-			routeQueryAt = i
+	if sameRouteTarget {
+		// Origin-form (the common case): routeTarget is target, so the query
+		// position is already known from the validation scan above.
+		routeQueryAt = queryAt
+	} else {
+		for i, c := range routeTarget {
+			if c == '?' {
+				routeQueryAt = i
+				break
+			}
 		}
 	}
 	h.Method, h.URI, h.RequestTarget, h.Proto = method, routeTarget, target, proto
@@ -495,47 +507,42 @@ func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, str
 			return 0, ErrMalformedRequest
 		}
 
-		lineStart := pos
-		colon := -1
-		lineEnd := -1
-		for pos < len(src) {
-			c := src[pos]
-			if c == ':' && colon < 0 {
-				colon = pos
-			}
-			if c == '\r' {
-				if pos+1 >= len(src) || src[pos+1] != '\n' {
-					return 0, ErrMalformedRequest
-				}
-				lineEnd = pos
-				pos += 2
-				break
-			}
-			if c == '\n' {
-				lineEnd = pos
-				pos++
-				break
-			}
-			pos++
-		}
-		if lineEnd < 0 || colon <= lineStart {
+		// Vectorized line split: find the LF, strip one optional preceding CR.
+		// Any stray CR left inside the line is rejected below — by validToken
+		// for keys and by the value scan for values — preserving the strictness
+		// of the previous byte-at-a-time loop.
+		nl := bytes.IndexByte(src[pos:], '\n')
+		if nl < 0 {
 			return 0, ErrMalformedRequest
 		}
-		key := src[lineStart:colon]
+		lineStart := pos
+		lineEnd := pos + nl
+		pos = lineEnd + 1
+		if src[lineEnd-1] == '\r' {
+			lineEnd--
+		}
+		line := src[lineStart:lineEnd]
+		colon := bytes.IndexByte(line, ':')
+		if colon <= 0 {
+			return 0, ErrMalformedRequest
+		}
+		key := line[:colon]
 		if !validToken(key) {
 			return 0, ErrMalformedRequest
 		}
 		valueStart := colon + 1
-		for valueStart < lineEnd && (src[valueStart] == ' ' || src[valueStart] == '\t') {
+		for valueStart < len(line) && (line[valueStart] == ' ' || line[valueStart] == '\t') {
 			valueStart++
 		}
-		val := trimRight(src[valueStart:lineEnd])
+		val := trimOWSRight(line[valueStart:])
 		if strictValueValidation {
 			for _, c := range val {
 				if (c < 0x20 && c != '\t') || c == 0x7f {
 					return 0, ErrMalformedRequest
 				}
 			}
+		} else if bytes.IndexByte(val, '\r') >= 0 {
+			return 0, ErrMalformedRequest
 		}
 
 		switch knownHeader(key) {
@@ -716,6 +723,147 @@ func forbiddenTokenByte(c byte) bool {
 	return false
 }
 
+// DecodeHeaders populates v from the parsed request headers.
+//
+// Supported target types:
+//   - *map[string]string  — first value per header, canonical key
+//   - *map[string][]string — all values per header, canonical key
+//   - struct pointer      — each exported field is matched by the header name
+//     specified in its `header:"name"` tag (case-insensitive). When the tag
+//     is absent the lower-cased field name is used.  Supported field kinds:
+//     string, []string, int, int64, uint64, float64, bool, *string.
+func DecodeHeaders(h *RequestHeader, v any) error {
+	dst, ok := v.(*map[string]string)
+	if ok {
+		if *dst == nil {
+			*dst = make(map[string]string, h.hcount)
+		}
+		for i := 0; i < h.hcount; i++ {
+			key := textproto.CanonicalMIMEHeaderKey(string(h.headers[i].Key))
+			(*dst)[key] = string(h.headers[i].Value)
+		}
+		if len(h.Host) != 0 && (*dst)[HeaderHostStr] == "" {
+			(*dst)[HeaderHostStr] = string(h.Host)
+		}
+		if len(h.ContentType) != 0 && (*dst)[HeaderContentTypeStr] == "" {
+			(*dst)[HeaderContentTypeStr] = string(h.ContentType)
+		}
+		return nil
+	}
+
+	dstSlice, ok := v.(*map[string][]string)
+	if ok {
+		if *dstSlice == nil {
+			*dstSlice = make(map[string][]string, h.hcount)
+		}
+		for i := 0; i < h.hcount; i++ {
+			key := textproto.CanonicalMIMEHeaderKey(string(h.headers[i].Key))
+			(*dstSlice)[key] = append((*dstSlice)[key], string(h.headers[i].Value))
+		}
+		if len(h.Host) != 0 && len((*dstSlice)[HeaderHostStr]) == 0 {
+			(*dstSlice)[HeaderHostStr] = []string{string(h.Host)}
+		}
+		if len(h.ContentType) != 0 && len((*dstSlice)[HeaderContentTypeStr]) == 0 {
+			(*dstSlice)[HeaderContentTypeStr] = []string{string(h.ContentType)}
+		}
+		return nil
+	}
+
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+		return fmt.Errorf("header: unsupported target %T; use *map[string]string, *map[string][]string, or *struct", v)
+	}
+	rv = rv.Elem()
+	if rv.Kind() != reflect.Struct {
+		return fmt.Errorf("header: unsupported target %T; use *map[string]string, *map[string][]string, or *struct", v)
+	}
+
+	// Build lookup of available headers (lower-cased key → first value).
+	lookup := make(map[string]string, h.hcount)
+	for i := 0; i < h.hcount; i++ {
+		lk := strings.ToLower(string(h.headers[i].Key))
+		if _, exists := lookup[lk]; !exists {
+			lookup[lk] = string(h.headers[i].Value)
+		}
+	}
+	if len(h.Host) != 0 {
+		lk := strings.ToLower(HeaderHostStr)
+		if _, exists := lookup[lk]; !exists {
+			lookup[lk] = string(h.Host)
+		}
+	}
+	if len(h.ContentType) != 0 {
+		lk := strings.ToLower(HeaderContentTypeStr)
+		if _, exists := lookup[lk]; !exists {
+			lookup[lk] = string(h.ContentType)
+		}
+	}
+
+	rt := rv.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		field := rt.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		fv := rv.Field(i)
+		if !fv.CanSet() {
+			continue
+		}
+		tag := field.Tag.Get("header")
+		if tag == "" {
+			tag = strings.ToLower(field.Name)
+		}
+		raw, exists := lookup[strings.ToLower(tag)]
+		if !exists {
+			continue
+		}
+		if err := setHeaderField(fv, raw); err != nil {
+			return fmt.Errorf("header: field %q: %w", field.Name, err)
+		}
+	}
+	return nil
+}
+
+func setHeaderField(fv reflect.Value, raw string) error {
+	switch fv.Kind() {
+	case reflect.String:
+		fv.SetString(raw)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return err
+		}
+		fv.SetInt(n)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		n, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return err
+		}
+		fv.SetUint(n)
+	case reflect.Float32, reflect.Float64:
+		n, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return err
+		}
+		fv.SetFloat(n)
+	case reflect.Bool:
+		b, err := strconv.ParseBool(raw)
+		if err != nil {
+			return err
+		}
+		fv.SetBool(b)
+	case reflect.Slice:
+		if fv.Type().Elem().Kind() == reflect.String {
+			fv.Set(reflect.ValueOf([]string{raw}))
+		}
+	case reflect.Ptr:
+		if fv.Type().Elem().Kind() == reflect.String {
+			fv.Set(reflect.ValueOf(&raw))
+		}
+	}
+	return nil
+}
+
 func HasHeaderToken(value []byte, token string) bool {
 	return hasHeaderToken(value, token)
 }
@@ -783,6 +931,16 @@ func parseContentLength(b []byte) (int, bool) {
 }
 
 // trimRight removes trailing whitespace/CR.
+// trimOWSRight trims trailing optional whitespace (SP / HTAB per RFC 9110).
+// Unlike trimRight it does not trim CR: the header line splitter strips exactly
+// one CR before the LF, so any other CR must stay visible to the validators.
+func trimOWSRight(b []byte) []byte {
+	for len(b) > 0 && (b[len(b)-1] == ' ' || b[len(b)-1] == '\t') {
+		b = b[:len(b)-1]
+	}
+	return b
+}
+
 func trimRight(b []byte) []byte {
 	for len(b) > 0 && (b[len(b)-1] == ' ' || b[len(b)-1] == '\r' || b[len(b)-1] == '\t') {
 		b = b[:len(b)-1]

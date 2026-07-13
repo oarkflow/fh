@@ -15,6 +15,9 @@
 - **Static file serving** — directory listings, compression, cache control, range requests
 - **Graceful shutdown** — `app.Shutdown(ctx)` with context deadline
 - **Pool-based zero-allocation** — sync.Pool for contexts, byte buffers, HPACK decoders
+- **Hardened TLS/mTLS** — TLS 1.3 config builder, verified peer state in request contexts, atomic certificate reload
+- **Modern HTTP integrity/query** — RFC 9530 Content-Digest and RFC 10008 Accept-Query middleware
+- **Trusted proxy identity** — RFC 7239 `Forwarded` plus right-to-left trusted-hop validation
 
 ## Installation
 
@@ -123,21 +126,26 @@ admin.Get("/", adminHandler)
 |---|---|
 | `mw/basicauth` | HTTP Basic Authentication with single-user, multi-user, storage-backed and dynamic provider modes |
 | `mw/bodylimit` | Request body size limit |
+| `mw/acceptquery` | RFC 10008 Accept-Query advertisement and QUERY content-type enforcement |
 | `mw/cache` | Response caching with TTL |
 | `mw/compress` | Gzip response compression |
+| `mw/contentdigest` | RFC 9530 request integrity verification and response digests |
 | `mw/cors` | Cross-Origin Resource Sharing |
 | `mw/csrf` | CSRF protection |
 | `mw/earlydata` | TLS 1.3 Early Data (0-RTT) protection |
+| `mw/decompress` | Bounded gzip request decompression with expansion-ratio protection |
 | `mw/ipwhitelist` | IP allowlisting |
 | `mw/logger` | Request logging (common, combined, tiny, json, custom) |
 | `mw/ratelimiter` | Rate limiting |
 | `mw/recover` | Panic recovery |
 | `mw/requestid` | Request ID injection |
+| `mw/realip` | Trusted proxy-chain parsing and effective client-IP normalization |
 | `mw/rewrite` | URL path rewriting |
 | `mw/security` | Security headers (CSP, HSTS, XFO, etc.) |
 | `mw/session` | Cookie-based sessions with HMAC signing |
 | `mw/skip` | Conditional middleware skipping by path |
 | `mw/timeout` | Request timeout |
+| `mw/mtls` | Verified client-certificate authorization |
 
 ## Body Parsing & Codecs
 

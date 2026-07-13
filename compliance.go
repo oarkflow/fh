@@ -86,6 +86,7 @@ type ComplianceReport struct {
 // SafeConfig is a redacted summary of runtime configuration.
 type SafeConfig struct {
 	ReadTimeout           string            `json:"read_timeout,omitempty"`
+	ReadHeaderTimeout     string            `json:"read_header_timeout,omitempty"`
 	WriteTimeout          string            `json:"write_timeout,omitempty"`
 	IdleTimeout           string            `json:"idle_timeout,omitempty"`
 	MaxRequestBodySize    int               `json:"max_request_body_size"`
@@ -120,6 +121,9 @@ func applyComplianceDefaults(cfg *Config) {
 		cfg.Redaction = DefaultRedactionConfig()
 	}
 	if cfg.Mode == ModeProduction || cfg.Mode == ModeEnterprise || cfg.Mode == ModeStrict {
+		if cfg.ReadHeaderTimeout == 0 {
+			cfg.ReadHeaderTimeout = 5 * time.Second
+		}
 		if cfg.ReadTimeout == 0 {
 			cfg.ReadTimeout = 10 * time.Second
 		}
@@ -143,6 +147,9 @@ func applyComplianceDefaults(cfg *Config) {
 		cfg.Compliance.ExposeEndpoints = true
 	}
 	if cfg.Compliance.Enabled {
+		if cfg.ReadHeaderTimeout == 0 {
+			cfg.ReadHeaderTimeout = 5 * time.Second
+		}
 		if cfg.ReadTimeout == 0 {
 			cfg.ReadTimeout = 10 * time.Second
 		}
@@ -195,6 +202,7 @@ func (a *App) SafeConfig() SafeConfig {
 	}
 	return SafeConfig{
 		ReadTimeout:           a.cfg.ReadTimeout.String(),
+		ReadHeaderTimeout:     a.cfg.ReadHeaderTimeout.String(),
 		WriteTimeout:          a.cfg.WriteTimeout.String(),
 		IdleTimeout:           a.cfg.IdleTimeout.String(),
 		MaxRequestBodySize:    a.cfg.MaxRequestBodySize,
@@ -242,6 +250,9 @@ func (a *App) ValidateSecurity() []SecurityFinding {
 	}
 	if prod && a.cfg.ReadTimeout == 0 {
 		f = append(f, SecurityFinding{"high", "READ_TIMEOUT_MISSING", "ReadTimeout is disabled", "set Config.ReadTimeout", ""})
+	}
+	if prod && a.cfg.ReadHeaderTimeout == 0 {
+		f = append(f, SecurityFinding{"high", "READ_HEADER_TIMEOUT_MISSING", "ReadHeaderTimeout is disabled", "set Config.ReadHeaderTimeout", ""})
 	}
 	if prod && a.cfg.WriteTimeout == 0 {
 		f = append(f, SecurityFinding{"high", "WRITE_TIMEOUT_MISSING", "WriteTimeout is disabled", "set Config.WriteTimeout", ""})
