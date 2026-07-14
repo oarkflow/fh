@@ -22,6 +22,15 @@ wasm: wasm-check
 wasm-go:
 	@mkdir -p $(WASM_DIST)
 	GOOS=js GOARCH=wasm CGO_ENABLED=0 $(GO) build -trimpath -buildvcs=false -ldflags="-s -w" -o $(WASM_BINARY) ./wasm/cmd/securefetch
+	@if command -v wasm-opt >/dev/null 2>&1; then \
+		before=$$(wc -c < $(WASM_BINARY)); \
+		wasm-opt -Oz --enable-bulk-memory --enable-sign-ext --enable-nontrapping-float-to-int \
+			--strip-debug --strip-producers -o $(WASM_BINARY).opt $(WASM_BINARY) && mv $(WASM_BINARY).opt $(WASM_BINARY); \
+		after=$$(wc -c < $(WASM_BINARY)); \
+		echo "wasm-opt: $${before} -> $${after} bytes ($$(( (before - after) / 1024 ))KB saved)"; \
+	else \
+		echo "wasm-opt not found (install binaryen) - skipping extra binary size optimization"; \
+	fi
 
 wasm-runtime:
 	@test -n "$(WASM_EXEC_SRC)" || (echo "wasm_exec.js was not found under $(GOROOT)" >&2; exit 1)

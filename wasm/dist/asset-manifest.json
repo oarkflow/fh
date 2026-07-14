@@ -12,9 +12,9 @@
       "size": 8749
     },
     "securefetch.wasm": {
-      "sha256": "a7c6e39b0802d763027506904a5cf5a2f6cf42113b3ee108679c20977d430a89",
-      "integrity": "sha256-p8bjmwgC12MCdQaQSlz1ovbPQhE7PuEIZ5wgl31DCok=",
-      "size": 3664847
+      "sha256": "b7e0b5653885f4837fd06af20742f5c5a68b8ada6432c5753f208857513ffe4f",
+      "integrity": "sha256-t+C1ZTiF9IN/0GryB0L1xaaLitpkMsV1PyCIV1E//k8=",
+      "size": 3431759
     },
     "storage.js": {
       "sha256": "4035cb1646a5cf19cad6fa165f95777dea72912a1680b0a7202632089bafe9bf",
