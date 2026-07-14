@@ -24,9 +24,16 @@ import (
 	"github.com/oarkflow/fh/mw/slowlog"
 	"github.com/oarkflow/fh/mw/tenantlimit"
 	"github.com/oarkflow/fh/mw/tracing"
+	"github.com/oarkflow/fh/mw/validate"
 	"github.com/oarkflow/fh/mw/webhook"
 	"github.com/oarkflow/fh/pkg/storage/memory"
 )
+
+type EmailJobRequest struct {
+	To      string `json:"to" validate:"required,email"`
+	Subject string `json:"subject" validate:"required,min=1,max=200"`
+	Body    string `json:"body" validate:"required,min=1"`
+}
 
 func main() {
 	store := memory.New()
@@ -83,13 +90,16 @@ func main() {
 	}
 
 	app.Get("/", func(c fh.Ctx) error { return c.JSON(fh.Map{"ok": true}) })
-	app.Post("/jobs/email", func(c fh.Ctx) error {
-		id, err := app.Queue().Enqueue("email", c.BodyCopy())
-		if err != nil {
-			return err
-		}
-		return c.Status(fh.StatusAccepted).JSON(fh.Map{"job_id": id})
-	})
+	app.Post("/jobs/email",
+		validate.Body(func() any { return &EmailJobRequest{} }),
+		func(c fh.Ctx) error {
+			id, err := app.Queue().Enqueue("email", c.BodyCopy())
+			if err != nil {
+				return err
+			}
+			return c.Status(fh.StatusAccepted).JSON(fh.Map{"job_id": id})
+		},
+	)
 	app.Get("/admin-only", jwt.New(jwt.Config{Secret: []byte("dev-secret")}), fh.RequireRole("admin"), func(c fh.Ctx) error { return c.JSON(fh.Map{"ok": true, "scope": "admin"}) })
 	app.Post("/webhook", webhook.New(webhook.Config{Secret: []byte("webhook-secret"), Prefix: "sha256"}), func(c fh.Ctx) error { return c.JSON(fh.Map{"accepted": true}) })
 
