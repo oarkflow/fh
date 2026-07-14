@@ -465,7 +465,7 @@ func (c *DefaultCtx) Path() string { return string(c.path()) }
 // It is intended for rewrite middleware and is bounded by the application to
 // prevent rewrite loops.
 func (c *DefaultCtx) Rewrite(target string) error {
-	if target == "" || target[0] != '/' || strings.ContainsAny(target, "\x00\r\n") {
+	if target == "" || target[0] != '/' || strings.ContainsAny(target, "\x00\r\n") || len(target) > 1 && target[1] == '/' {
 		return BadRequest("Invalid rewrite target")
 	}
 	c.Header.URI = []byte(target)
@@ -645,8 +645,12 @@ func (c *DefaultCtx) QueryParser(v any) error {
 	if qi < 0 {
 		return nil
 	}
+	query := uri[qi+1:]
+	if len(query) > 32<<10 {
+		return PayloadTooLarge("Query string too large")
+	}
 	var fc formCodec
-	return fc.Unmarshal(uri[qi+1:], v)
+	return fc.Unmarshal(query, v)
 }
 
 // HeaderParser decodes request headers into v using `header` struct tags.
@@ -690,6 +694,9 @@ func (c *DefaultCtx) SetTrailer(key, value string) {
 }
 
 func (c *DefaultCtx) BodyParser(v any) error {
+	if c.server != nil && c.server.cfg.MaxRequestBodySize > 0 && len(c.body) > c.server.cfg.MaxRequestBodySize {
+		return PayloadTooLarge("Request body too large")
+	}
 	ct := b2s(c.Header.ContentType)
 	var err error
 	if codec := matchCodec(ct); codec != nil {
@@ -867,7 +874,10 @@ func (c *DefaultCtx) Set(key, value string) {
 	if !validToken(k) || strings.ContainsAny(value, "\x00\r\n") {
 		return
 	}
-	if bytesEqualFold(k, HeaderContentLengthBytes) || bytesEqualFold(k, HeaderTransferEncodingBytes) || bytesEqualFold(k, HeaderConnectionBytes) {
+	if len(v) > 16<<10 {
+		return
+	}
+	if bytesEqualFold(k, HeaderContentLengthBytes) || bytesEqualFold(k, HeaderTransferEncodingBytes) || bytesEqualFold(k, HeaderConnectionBytes) || bytesEqualFold(k, HeaderKeepAliveBytes) || bytesEqualFold(k, HeaderProxyAuthorizationBytes) || bytesEqualFold(k, HeaderTEBytes) || bytesEqualFold(k, HeaderTrailerBytes) || bytesEqualFold(k, HeaderUpgradeBytes) || bytesEqualFold(k, []byte("Proxy-Connection")) {
 		return
 	}
 	if bytesEqualFold(k, HeaderContentTypeBytes) {
@@ -928,6 +938,11 @@ func (c *DefaultCtx) Responded() bool { return c.responded }
 func (c *DefaultCtx) Type(mime string) Ctx {
 	if strings.ContainsAny(mime, "\x00\r\n") {
 		return c
+	}
+	if c.server != nil && (c.server.cfg.Mode == ModeStrict || c.server.cfg.Mode == ModeEnterprise || c.server.cfg.Compliance.Strict) {
+		if !strings.Contains(mime, "/") {
+			return c
+		}
 	}
 	c.contentType = []byte(mime)
 	return c
@@ -1112,6 +1127,18 @@ func (c *DefaultCtx) Redirect(location string, code ...int) error {
 	if len(code) > 0 {
 		sc = code[0]
 	}
+	if len(location) > 8192 {
+		return BadRequest("Redirect location too long")
+	}
+	// Block dangerous schemes
+	lower := strings.ToLower(location)
+	if strings.HasPrefix(lower, "javascript:") || strings.HasPrefix(lower, "data:") || strings.HasPrefix(lower, "vbscript:") {
+		return BadRequest("Invalid redirect location")
+	}
+	// Block protocol-relative URLs
+	if len(location) > 1 && location[0] == '/' && location[1] == '/' {
+		return BadRequest("Invalid redirect location")
+	}
 	c.status = sc
 	c.flags |= ctxFlagNon200
 	c.Set("Location", location)
@@ -1232,6 +1259,8 @@ func (c *DefaultCtx) writeResponseString(s string) error {
 		buf = append(buf, '\r', '\n')
 	}
 	buf = appendExtraHeaders(buf, c.extraHeaders)
+
+	buf = c.appendSecurityHeaders(buf)
 
 	// Cookies
 	for i := range c.responseCookies {
@@ -1610,6 +1639,7 @@ func (c *DefaultCtx) writeDirectJSONBytes200(base, out []byte) error {
 		header = append(header, c.contentType...)
 		header = append(header, '\r', '\n')
 	}
+	header = c.appendSecurityHeaders(header)
 	header = appendContentLengthLine(header, len(out))
 	if c.Header.KeepAlive && !c.forceClose {
 		if c.server.cfg.SendKeepAliveHeader {
@@ -1690,6 +1720,8 @@ func (c *DefaultCtx) writeResponse(body []byte) error {
 		buf = append(buf, '\r', '\n')
 	}
 	buf = appendExtraHeaders(buf, c.extraHeaders)
+
+	buf = c.appendSecurityHeaders(buf)
 
 	// Cookies
 	for i := range c.responseCookies {
@@ -1780,6 +1812,7 @@ func (c *DefaultCtx) writeDirect200String(s string) error {
 		buf = append(buf, c.contentType...)
 		buf = append(buf, '\r', '\n')
 	}
+	buf = c.appendSecurityHeaders(buf)
 	buf = appendContentLengthLine(buf, len(s))
 	if c.Header.KeepAlive && !c.forceClose {
 		if c.server.cfg.SendKeepAliveHeader {
@@ -1811,6 +1844,7 @@ func (c *DefaultCtx) writeDirect200Bytes(body []byte) error {
 		buf = append(buf, c.contentType...)
 		buf = append(buf, '\r', '\n')
 	}
+	buf = c.appendSecurityHeaders(buf)
 	buf = appendContentLengthLine(buf, len(body))
 	if c.Header.KeepAlive && !c.forceClose {
 		if c.server.cfg.SendKeepAliveHeader {
@@ -1832,6 +1866,21 @@ func (c *DefaultCtx) writeDirect200Bytes(body []byte) error {
 
 func responseBodyAllowed(status int) bool {
 	return status >= 200 && status != 204 && status != 205 && status != 304
+}
+
+// appendSecurityHeaders appends the Server response header when configured.
+// Security headers (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
+// are handled by defaultHardeningMiddleware in production modes.
+func (c *DefaultCtx) appendSecurityHeaders(buf []byte) []byte {
+	if c.server == nil {
+		return buf
+	}
+	if c.server.cfg.ServerHeader != "" {
+		buf = append(buf, "Server: "...)
+		buf = append(buf, c.server.cfg.ServerHeader...)
+		buf = append(buf, '\r', '\n')
+	}
+	return buf
 }
 
 const writevBodyThreshold = 512

@@ -48,6 +48,9 @@ func New(config ...Config) fh.HandlerFunc {
 				}
 
 				err = cfg.Handler(ctx, r, stack)
+			if err == nil {
+				err = fmt.Errorf("panic: %v", r)
+			}
 			}
 		}()
 

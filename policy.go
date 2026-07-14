@@ -37,6 +37,9 @@ func (c *DefaultCtx) SSE(fn func(*SSE) error) error {
 func (s *SSE) Event(event string, data any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strings.ContainsAny(event, "\r\n") {
+		return nil
+	}
 	if event != "" {
 		fmt.Fprintf(&s.buf, "event: %s\n", event)
 	}
@@ -51,7 +54,13 @@ func (s *SSE) Event(event string, data any) error {
 	s.buf.WriteByte('\n')
 	return scanner.Err()
 }
-func (s *SSE) Comment(v string) { s.mu.Lock(); defer s.mu.Unlock(); fmt.Fprintf(&s.buf, ": %s\n\n", v) }
+func (s *SSE) Comment(v string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v = strings.ReplaceAll(v, "\n", "\\n")
+	v = strings.ReplaceAll(v, "\r", "\\r")
+	fmt.Fprintf(&s.buf, ": %s\n\n", v)
+}
 
 type Redactor struct {
 	Keys        []string
@@ -228,6 +237,9 @@ type SecureEnvelope struct {
 }
 
 func SealEnvelope(policy DataPolicy, b []byte) (SecureEnvelope, error) {
+	if len(policy.Key) < 16 {
+		return SecureEnvelope{}, errors.New("fh: envelope key must be at least 16 bytes")
+	}
 	env := SecureEnvelope{Version: 2, KeyID: policy.KeyID, BodyHash: hashBody(b), CreatedAt: time.Now().UTC()}
 	if policy.EncryptAtRest {
 		block, err := aes.NewCipher(policy.Key)
@@ -260,6 +272,9 @@ var ErrEnvelopeHashMismatch = errors.New("fh: envelope body hash mismatch")
 var ErrEnvelopeAADMismatch = errors.New("fh: envelope AAD verification failed")
 
 func OpenEnvelope(policy DataPolicy, env SecureEnvelope) ([]byte, error) {
+	if len(policy.Key) < 16 {
+		return nil, errors.New("fh: envelope key must be at least 16 bytes")
+	}
 	if len(env.Ciphertext) == 0 {
 		plaintext := append([]byte(nil), env.Plaintext...)
 		if env.BodyHash != "" && hashBody(plaintext) != env.BodyHash {

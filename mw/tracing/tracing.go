@@ -56,10 +56,19 @@ func New(cfg Config) fh.HandlerFunc {
 }
 func parse(v string) (string, string) {
 	parts := strings.Split(v, "-")
-	if len(parts) >= 4 && len(parts[1]) == 32 && len(parts[2]) == 16 {
+	if len(parts) >= 4 && parts[0] == "00" && len(parts[1]) == 32 && isHexString(parts[1]) && len(parts[2]) == 16 && isHexString(parts[2]) {
 		return parts[1], parts[2]
 	}
 	return "", ""
+}
+
+func isHexString(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 func randHex(n int) string {
 	b := make([]byte, n)

@@ -39,6 +39,9 @@ func (c *Cookie) Valid() error {
 	if c == nil || !validToken([]byte(c.Name)) || c.Name == "" || !validCookieValue(c.Value) {
 		return ErrInvalidCookie
 	}
+	if len(c.Name) > 256 || len(c.Value) > 4096 {
+		return ErrInvalidCookie
+	}
 	if strings.ContainsAny(c.Path, ";\x00\r\n") || strings.ContainsAny(c.Domain, ";\x00\r\n") {
 		return ErrInvalidCookie
 	}
@@ -153,13 +156,17 @@ func validCookieDomain(domain string) bool {
 // signature — letting an attacker copy a signed value they legitimately
 // received under one cookie name into a different cookie name and have it
 // verify as authentic there too.
-func (c *Cookie) Sign(secret []byte) {
+func (c *Cookie) Sign(secret []byte) error {
+	if len(secret) < 16 {
+		return errors.New("fh: cookie signing secret must be at least 16 bytes")
+	}
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(c.Name))
 	mac.Write([]byte{0})
 	mac.Write([]byte(c.Value))
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	c.Value = c.Value + "." + sig
+	return nil
 }
 
 // Verify checks the HMAC signature on a signed cookie value, requiring it

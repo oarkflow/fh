@@ -777,6 +777,10 @@ func zero(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
+	// Prevent dead-store elimination by the compiler.
+	if len(b) > 0 {
+		_ = b[0]
+	}
 }
 
 type writer struct {

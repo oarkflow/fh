@@ -102,10 +102,11 @@ func MaskCard(v string) string {
 	return strings.Repeat("*", len(v)-4) + v[len(v)-4:]
 }
 
+var cachedDefaultRedactor = NewRedactor(DefaultRedactionConfig())
+
 func RedactValue(key string, value any) any {
-	r := DefaultRedactor()
-	if r.isSensitive(key) {
-		return r.Replacement
+	if cachedDefaultRedactor.isSensitive(key) {
+		return cachedDefaultRedactor.Replacement
 	}
 	return fmt.Sprint(value)
 }

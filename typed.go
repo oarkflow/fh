@@ -320,18 +320,24 @@ func parseFloat(s string) float64 {
 		return 0
 	}
 	var v float64
+	seenDot := false
+	divisor := 1.0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c == '.' {
+			seenDot = true
 			continue
 		}
 		if c >= '0' && c <= '9' {
 			v = v*10 + float64(c-'0')
+			if seenDot {
+				divisor *= 10
+			}
 		} else {
 			break
 		}
 	}
-	return v
+	return v / divisor
 }
 
 // parseQueryBytes is a reference to the internal query parser.

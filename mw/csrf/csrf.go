@@ -97,7 +97,7 @@ func merge(dst *Config, src Config) {
 }
 
 func safeMethod(method string) bool {
-	return method == "GET" || method == "HEAD" || method == "OPTIONS" || method == "TRACE" || method == "QUERY"
+	return method == "GET" || method == "HEAD" || method == "OPTIONS" || method == "QUERY"
 }
 func newToken() (string, error) {
 	var b [32]byte

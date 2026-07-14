@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,6 +65,7 @@ type ReliabilityConfig struct {
 	QueuePollInterval          time.Duration
 	QueueBackoff               time.Duration
 	QueueConcurrencyLimitByKey bool
+	QueueLogError              func(msg string, args ...any)
 }
 
 // RequestJournalStore is the durable append-only request lifecycle store.
@@ -192,13 +194,13 @@ func NewReliability(cfg ReliabilityConfig) (*Reliability, error) {
 			if qdir == "" {
 				qdir = filepath.Join(cfg.DataDir, "queue")
 			}
-			storage, err = OpenFileQueueStorage(FileQueueStorageConfig{Dir: qdir})
+			storage, err = OpenFileQueueStorage(FileQueueStorageConfig{Dir: qdir, LogError: cfg.QueueLogError})
 			if err != nil {
 				r.Close()
 				return nil, err
 			}
 		}
-		r.queue = NewDurableQueue(DurableQueueConfig{Workers: cfg.QueueWorkers, MaxAttempts: cfg.QueueMaxAttempts, PollInterval: cfg.QueuePollInterval, Backoff: cfg.QueueBackoff, ConcurrencyLimitByKey: cfg.QueueConcurrencyLimitByKey}, storage)
+		r.queue = NewDurableQueue(DurableQueueConfig{Workers: cfg.QueueWorkers, MaxAttempts: cfg.QueueMaxAttempts, PollInterval: cfg.QueuePollInterval, Backoff: cfg.QueueBackoff, ConcurrencyLimitByKey: cfg.QueueConcurrencyLimitByKey, LogError: cfg.QueueLogError}, storage)
 		if err := r.queue.Recover(); err != nil {
 			r.Close()
 			return nil, err
@@ -407,10 +409,12 @@ func validExternalID(s string) bool {
 	}
 	return true
 }
+var fallbackRand = mrand.New(mrand.NewSource(time.Now().UnixNano()))
+
 func newRequestID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("req_%d", time.Now().UnixNano())
+		fallbackRand.Read(b)
 	}
 	return fmt.Sprintf("req_%x", b)
 }
@@ -531,7 +535,10 @@ func OpenIdempotencyStore(path string, ttl time.Duration) (*IdempotencyStore, er
 func (s *IdempotencyStore) load() error {
 	f, err := os.Open(s.path)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 	defer f.Close()
 	now := time.Now()
@@ -663,6 +670,7 @@ type DurableQueueConfig struct {
 	PollInterval          time.Duration
 	Backoff               time.Duration
 	ConcurrencyLimitByKey bool
+	LogError              func(msg string, args ...any)
 }
 type QueueJob struct {
 	ID             string            `json:"id"`
@@ -866,7 +874,11 @@ func (q *DurableQueue) worker() {
 	defer q.wg.Done()
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "fh: queue worker panic: %v\n%s\n", r, debug.Stack())
+			if q.cfg.LogError != nil {
+				q.cfg.LogError("queue worker panic", "error", r, "stack", string(debug.Stack()))
+			} else {
+				fmt.Fprintf(os.Stderr, "fh: queue worker panic: %v\n%s\n", r, debug.Stack())
+			}
 		}
 	}()
 	ticker := time.NewTicker(q.cfg.PollInterval)
@@ -912,7 +924,11 @@ func (q *DurableQueue) processOne() bool {
 		_ = q.store.Retry(q.ctx, job, err, q.cfg.Backoff)
 		return true
 	}
-	_ = q.store.Complete(q.ctx, job)
+	if err := q.store.Complete(q.ctx, job); err != nil {
+		if q.cfg.LogError != nil {
+			q.cfg.LogError("queue job complete failed", "job_id", job.ID, "type", job.Type, "error", err)
+		}
+	}
 	return true
 }
 func (q *DurableQueue) Stats() (QueueStats, error) {
@@ -936,11 +952,15 @@ func (q *DurableQueue) ListJobs(ctx context.Context, state string, limit int) ([
 }
 
 // FileQueueStorage is the default file/directory based QueueStorage.
-type FileQueueStorageConfig struct{ Dir string }
+type FileQueueStorageConfig struct {
+	Dir      string
+	LogError func(msg string, args ...any)
+}
 type FileQueueStorage struct {
-	dir     string
-	eventMu sync.Mutex
-	events  *os.File
+	dir      string
+	logError func(msg string, args ...any)
+	eventMu  sync.Mutex
+	events   *os.File
 }
 
 func claimFile(path string) (*os.File, error) {
@@ -968,7 +988,7 @@ func OpenFileQueueStorage(cfg FileQueueStorageConfig) (*FileQueueStorage, error)
 	if err != nil {
 		return nil, err
 	}
-	return &FileQueueStorage{dir: cfg.Dir, events: events}, nil
+	return &FileQueueStorage{dir: cfg.Dir, logError: cfg.LogError, events: events}, nil
 }
 func (s *FileQueueStorage) Dir() string {
 	if s == nil {
@@ -1006,6 +1026,9 @@ func (s *FileQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJob,
 		pending := filepath.Join(s.dir, "pending", ent.Name())
 		job, err := readJob(pending)
 		if err != nil {
+			if s.logError != nil {
+				s.logError("queue job file corrupt, removing", "file", pending, "error", err)
+			}
 			_ = os.Remove(pending)
 			continue
 		}

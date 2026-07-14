@@ -5,7 +5,9 @@ import "testing"
 func TestSignedCookieRoundTrip(t *testing.T) {
 	secret := []byte("s3cr3t-signing-key")
 	c := &Cookie{Name: "role", Value: "user"}
-	c.Sign(secret)
+	if err := c.Sign(secret); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !c.Verify(secret) {
 		t.Fatal("expected freshly signed cookie to verify")
 	}
@@ -14,7 +16,9 @@ func TestSignedCookieRoundTrip(t *testing.T) {
 func TestSignedCookieRejectsTamperedValue(t *testing.T) {
 	secret := []byte("s3cr3t-signing-key")
 	c := &Cookie{Name: "role", Value: "user"}
-	c.Sign(secret)
+	if err := c.Sign(secret); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	// Attacker swaps the value but keeps the original signature.
 	i := lastDot(c.Value)
@@ -26,8 +30,10 @@ func TestSignedCookieRejectsTamperedValue(t *testing.T) {
 
 func TestSignedCookieRejectsWrongSecret(t *testing.T) {
 	c := &Cookie{Name: "role", Value: "user"}
-	c.Sign([]byte("secret-a"))
-	if c.Verify([]byte("secret-b")) {
+	if err := c.Sign([]byte("short-secret-aaa")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.Verify([]byte("short-secret-bbb")) {
 		t.Fatal("expected verification with a different secret to fail")
 	}
 }
@@ -44,7 +50,9 @@ func TestSignedCookieRejectsCrossNameForgery(t *testing.T) {
 	secret := []byte("s3cr3t-signing-key")
 
 	legit := &Cookie{Name: "session_flag", Value: "verified"}
-	legit.Sign(secret)
+	if err := legit.Sign(secret); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	forged := &Cookie{Name: "role", Value: legit.Value}
 	if forged.Verify(secret) {

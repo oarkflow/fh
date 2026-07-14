@@ -201,7 +201,10 @@ func (c *DefaultCtx) Ledger(action, resource, resourceID string, before, after [
 
 func safeCtxIP(c *DefaultCtx) (ip string) {
 	defer func() {
-		if recover() != nil {
+		if r := recover(); r != nil {
+			if c != nil && c.server != nil {
+				c.server.Logger().Error("safeCtxIP panic", "error", r)
+			}
 			ip = ""
 		}
 	}()

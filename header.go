@@ -162,7 +162,8 @@ func (h *RequestHeader) SetCookie(c *DefaultCtx, name, value string) {
 	cookieVal := name + "=" + value
 	for i := 0; i < h.hcount; i++ {
 		if bytesEqualFold(h.headers[i].Key, HeaderCookieBytes) {
-			h.headers[i].Value = []byte(cookieVal)
+			h.headers[i].Value = append(append([]byte(nil), h.headers[i].Value...), ';', ' ')
+			h.headers[i].Value = append(h.headers[i].Value, []byte(cookieVal)...)
 			return
 		}
 	}
@@ -244,6 +245,9 @@ func (h *RequestHeader) Set(name, value string) {
 func (h *RequestHeader) Add(name, value string) {
 	key := []byte(name)
 	if !validToken(key) || stringsContainsCTL(value) {
+		return
+	}
+	if h.hcount >= maxHeaders {
 		return
 	}
 	if h.hcount == len(h.headers) {

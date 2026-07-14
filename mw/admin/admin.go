@@ -41,11 +41,11 @@ func Enable(app *fh.App, cfg Config) *fh.App {
 		panic(fmt.Errorf("admin: AllowInsecure requires Auth or AllowedIPs"))
 	}
 	mw := func(c fh.Ctx) error {
-		allowed := cfg.AllowInsecure || cfg.Auth != nil
-		if allowed && len(cfg.AllowedIPs) > 0 {
+		allowed := cfg.AllowInsecure && cfg.Auth == nil && len(cfg.AllowedIPs) == 0
+		if !allowed && len(cfg.AllowedIPs) > 0 {
 			allowed = ipAllowed(c.IP(), cfg.AllowedIPs)
 		}
-		if allowed && cfg.Auth != nil {
+		if !allowed && cfg.Auth != nil {
 			allowed = cfg.Auth(c)
 		}
 		if cfg.Audit != nil {

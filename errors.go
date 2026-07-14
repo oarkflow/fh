@@ -394,7 +394,9 @@ func classifyError(err error, opts ErrorOptions) (*HTTPError, Problem, []byte) {
 	}
 	he = WrapHTTPError(err, StatusInternalServerError, "INTERNAL_ERROR", detail)
 	if opts.LogInternal {
-		stack = debug.Stack()
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) && !errors.Is(err, ErrBodyTooLarge) && !errors.Is(err, ErrMalformedRequest) && !errors.Is(err, ErrRequestLineTooLarge) {
+			stack = debug.Stack()
+		}
 	}
 	return he, Problem{Status: he.Status, Code: he.Code, Detail: detail}, stack
 }
@@ -577,7 +579,7 @@ func RedactSecrets(s string) string {
 		idx := strings.Index(lower, key)
 		for idx >= 0 {
 			end := idx + len(key)
-			for end < len(out) && (out[end] == ' ' || out[end] == ':' || out[end] == '=' || out[end] == '\t' || out[end] == '"' || out[end] == '\'') {
+			for end < len(out) && (out[end] == ' ' || out[end] == ':' || out[end] == '=' || out[end] == '\t' || out[end] == '"' || out[end] == '\'' || out[end] == '%') {
 				end++
 			}
 			valEnd := end

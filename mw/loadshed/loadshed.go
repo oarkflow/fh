@@ -35,7 +35,7 @@ func New(cfg Config) fh.HandlerFunc {
 	if cfg.Reject == nil {
 		cfg.Reject = func(c fh.Ctx, s Snapshot) error {
 			c.Set("Retry-After", strconv.Itoa(int(cfg.RetryAfter.Seconds())))
-			return c.Status(fh.StatusServiceUnavailable).JSON(fh.Map{"error": "load_shed", "in_flight": s.InFlight, "goroutines": s.Goroutines, "heap_alloc": s.HeapAlloc})
+			return c.Status(fh.StatusServiceUnavailable).JSON(fh.Map{"error": "load_shed", "retry_after": int(cfg.RetryAfter.Seconds())})
 		}
 	}
 	var in atomic.Int64

@@ -268,6 +268,14 @@ func (r *Router) Add(method, path string, h HandlerFunc) {
 
 	path = normalizeRoutePath(method, path)
 
+	if len(path) > 0 {
+		for i := 0; i < len(path); i++ {
+			if path[i] < 0x20 || path[i] == 0x7f {
+				panic("fh: route path contains control character")
+			}
+		}
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -372,10 +380,6 @@ func (r *Router) findBytesCanonical(method, path []byte, params *[]Param) Handle
 func (r *Router) findNoLock(method string, path []byte, params *[]Param) HandlerFunc {
 	method = strings.ToUpper(method)
 	return r.findNoLockCanonical(method, path, params)
-}
-
-func (r *Router) findNoLockBytes(static map[string]HandlerFunc, root *node, path []byte, params *[]Param) HandlerFunc {
-	return r.findNoLockBytesCore(nil, static, nil, root, path, params)
 }
 
 func (r *Router) findNoLockBytesCore(shortcuts []staticShortcut, static map[string]HandlerFunc, paramsShortcuts []paramShortcut, root *node, path []byte, params *[]Param) HandlerFunc {
@@ -1168,16 +1172,6 @@ func validTokenString(s string) bool {
 	}
 
 	return true
-}
-
-func hasParams(path string) bool {
-	for i := 0; i < len(path); i++ {
-		if path[i] == ':' || path[i] == '*' {
-			return true
-		}
-	}
-
-	return false
 }
 
 func paramValue(b []byte, unsafeMode bool) string {

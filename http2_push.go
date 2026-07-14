@@ -3,6 +3,7 @@ package fh
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -96,6 +97,12 @@ func (r *h2Response) pushPromise(path string, method string, headers map[string]
 
 	for k, v := range headers {
 		fields = append(fields, hpackHeaderField{Name: k, Value: v})
+	}
+
+	for _, field := range fields {
+		if strings.ContainsAny(field.Value, "\r\n") {
+			return false
+		}
 	}
 
 	for _, field := range fields {

@@ -141,6 +141,7 @@ type h2Stream struct {
 	scheme           string
 	headers          []hpack.HeaderField
 	trailers         []Header
+	trailerMu        sync.Mutex
 	body             []byte
 	sendWindow       int64
 	recvWindow       int64
@@ -156,10 +157,11 @@ type h2Stream struct {
 }
 
 type h2Response struct {
-	conn     *h2Conn
-	stream   *h2Stream
-	ended    atomic.Bool
-	trailers []Header
+	conn      *h2Conn
+	stream    *h2Stream
+	ended     atomic.Bool
+	trailers  []Header
+	trailerMu sync.Mutex
 }
 
 func newH2Conn(app *App, conn net.Conn) *h2Conn {
@@ -259,6 +261,9 @@ func (h *h2Conn) serve(initial []byte, prefaceConsumed bool) {
 	// already sent its preface in the read buffer; for upgrade and TLS
 	// the client preface follows after the server's SETTINGS.
 	if err := h.sendSettings(); err != nil {
+		if h.app != nil {
+			h.app.Logger().Error("h2 settings send failed", "error", err)
+		}
 		return
 	}
 	// Start SETTINGS ACK timeout (RFC 9113 §6.5.3)
@@ -637,7 +642,9 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			h.sendRST(f.streamID, h2ProtocolError)
 			return nil
 		}
+		s.trailerMu.Lock()
 		s.trailers = append(s.trailers, trailers...)
+		s.trailerMu.Unlock()
 	}
 	end := f.flags&h2FlagEndStream != 0
 	if end {
@@ -891,7 +898,9 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 			}
 		}
 		ctx.Header.HasContentLength, ctx.Header.ContentLength = s.hasContentLength, s.contentLength
+		s.trailerMu.Lock()
 		ctx.body, ctx.trailers = s.body, s.trailers
+		s.trailerMu.Unlock()
 		ctx.SetContext(s.ctx)
 		h.app.dispatch(ctx)
 		if !ctx.responded && !s.reset.Load() {

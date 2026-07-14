@@ -24,4 +24,10 @@ func SetClientIP(c Ctx, value string) bool {
 
 // SetClientIP updates the effective request address. Applications should use
 // the package-level SetClientIP helper or mw/realip so input is validated.
-func (c *DefaultCtx) SetClientIP(value string) { c.cachedIP = value }
+func (c *DefaultCtx) SetClientIP(value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	c.cachedIP = value
+}

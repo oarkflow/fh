@@ -356,7 +356,7 @@ func TestSecurityHeaders(t *testing.T) {
 }
 
 func TestSecurityHeadersCustom(t *testing.T) {
-	app := fh.New()
+	app := fh.NewWithConfig(fh.Config{Mode: fh.ModeDevelopment})
 	app.Use(security.New(security.Config{
 		FrameDeny:          false,
 		ContentTypeNosniff: false,

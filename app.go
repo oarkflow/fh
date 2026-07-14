@@ -88,6 +88,9 @@ type Config struct {
 	// HTTP/1.1 keep-alive responses. It is disabled by default because keep-alive
 	// is implicit in HTTP/1.1; Connection: close is still emitted when needed.
 	SendKeepAliveHeader bool
+	// ServerHeader, when non-empty, is sent as the Server response header.
+	// Empty by default (no Server header sent) for security.
+	ServerHeader string
 	// StrictHeaderValueValidation rejects control bytes inside every request header
 	// value. It is disabled by default for the hot path; structural validation,
 	// duplicate Host, Content-Length conflicts, TE conflicts, and obs-fold
@@ -250,6 +253,10 @@ func WithComplianceEndpointAuth(middleware ...HandlerFunc) Option {
 // defaults; ModeProduction and ModeStrict enable safer network defaults.
 func WithMode(mode Mode) Option {
 	return func(c *Config) { c.Mode = mode }
+}
+
+func WithServerHeader(header string) Option {
+	return func(c *Config) { c.ServerHeader = header }
 }
 
 // NewFast creates an app with benchmark-oriented defaults. Use this only behind
@@ -452,6 +459,10 @@ func buildApp(cfg Config) *App {
 		}
 		app.reliability = reliability
 		app.middleware = append(app.middleware, reliability.Middleware())
+	}
+
+	if hm := defaultHardeningMiddleware(cfg); hm != nil {
+		app.middleware = append([]HandlerFunc{hm}, app.middleware...)
 	}
 
 	if !cfg.DisablePanicRecovery {
