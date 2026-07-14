@@ -1,0 +1,8 @@
+:root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+body { margin: 0; }
+main { width: min(42rem, calc(100% - 2rem)); margin: 4rem auto; }
+form { display: grid; gap: 1rem; margin: 2rem 0; }
+label { display: grid; gap: .35rem; }
+input, button { box-sizing: border-box; width: 100%; padding: .7rem; font: inherit; }
+button { cursor: pointer; font-weight: 650; }
+pre { min-height: 8rem; overflow: auto; padding: 1rem; border: 1px solid #8888; border-radius: .4rem; }

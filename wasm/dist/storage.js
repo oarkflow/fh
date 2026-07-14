@@ -67,9 +67,15 @@ function equalBytes(left, right) {
     return difference === 0;
 }
 function validClientHello(data) {
-    // FHC1 + version + fixed fields + build length. The Go protocol parser and
-    // server still perform full validation; this prevents a generic signing oracle.
-    return (data.byteLength >= 4 + 1 + 16 + 32 + 8 + 8 + 16 + 2 &&
+    // FHC1 + version + fixed fields + uint16 build length. Requiring the exact
+    // versioned transcript length prevents this API from becoming a generic
+    // attacker-controlled signing oracle with an accepted prefix.
+    const fixedLength = 4 + 1 + 16 + 32 + 8 + 8 + 16;
+    if (data.byteLength < fixedLength + 2)
+        return false;
+    const buildLength = (data[fixedLength] << 8) | data[fixedLength + 1];
+    return (buildLength <= 128 &&
+        data.byteLength === fixedLength + 2 + buildLength &&
         data[0] === 0x46 &&
         data[1] === 0x48 &&
         data[2] === 0x43 &&

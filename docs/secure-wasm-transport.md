@@ -124,6 +124,7 @@ import { createSecureFetch } from "/wasm/index.js";
 const secure = await createSecureFetch({
   baseURL: "https://api.example.com",
   pinnedServerKey: "<base64url-x25519-public-key>",
+  pinnedServerKeyID: "api-transport-2026-01",
   wasmURL: "/wasm/securefetch.wasm",
   wasmExecURL: "/wasm/wasm_exec.js",
   wasmIntegrity: "sha256-<from-asset-manifest>",
@@ -146,7 +147,7 @@ const response = await secure.fetch("/api/orders", {
 console.log(response.status, await response.json());
 ```
 
-`pinnedServerKey` is required by default. `allowUnpinnedServerKey: true` exists only for isolated loopback development and removes application-layer server authentication.
+`pinnedServerKey` is required by default. `allowUnpinnedServerKey: true` is enforced as a loopback-only development option and removes application-layer server authentication. `pinnedServerKeyID` additionally prevents an unexpected key/version from being selected during deployment or rotation.
 
 Set `requireAssetIntegrity: true` in production and provide the SHA-256 SRI values generated in `wasm/dist/asset-manifest.json`. The loader verifies the WASM bytes before instantiation and lets the browser enforce SRI on `wasm_exec.js`.
 

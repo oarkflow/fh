@@ -10,6 +10,8 @@ export interface SecureFetchConfig {
     /** Fail closed unless both WASM assets have explicit integrity pins. */
     requireAssetIntegrity?: boolean;
     pinnedServerKey?: string;
+    /** Optional key identifier expected in the authenticated server handshake. */
+    pinnedServerKeyID?: string;
     /** Development-only escape hatch. Production clients should always pin. */
     allowUnpinnedServerKey?: boolean;
     clientBuild?: string;
@@ -19,6 +21,8 @@ export interface SecureFetchConfig {
     registrationToken?: string;
     handshakeTTL?: number;
     requestTTL?: number;
+    /** Maximum accepted lifetime of a server-created secure session. */
+    maxSessionTTL?: number;
     clockSkew?: number;
     maxBody?: number;
     maxHeaders?: number;

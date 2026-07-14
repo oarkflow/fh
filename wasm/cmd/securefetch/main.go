@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall/js"
@@ -40,11 +41,15 @@ type clientConfig struct {
 	RegistrationToken string
 	PinnedServer      [32]byte
 	HasPinnedKey      bool
+	PinnedServerKeyID string
 	HandshakeTTL      time.Duration
 	ClockSkew         time.Duration
 	RequestTTL        time.Duration
+	MaxSessionTTL     time.Duration
 	Limits            protocol.Limits
 }
+
+const maxControlResponseBody = 4096
 
 type secureClient struct {
 	mu          sync.Mutex
@@ -144,8 +149,8 @@ func (c *secureClient) configure(v js.Value) error {
 		baseURL = location.Get("origin").String()
 	}
 	parsed, err := url.Parse(baseURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return errors.New("fh secure fetch: baseURL must be an absolute URL")
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.EscapedPath() != "" && parsed.EscapedPath() != "/") {
+		return errors.New("fh secure fetch: baseURL must be an origin without credentials, path, query, or fragment")
 	}
 	if parsed.Scheme != "https" && !isLoopbackHost(parsed.Hostname()) {
 		return errors.New("fh secure fetch: HTTPS is required outside loopback development")
@@ -155,9 +160,20 @@ func (c *secureClient) configure(v js.Value) error {
 		prefix = "/__fh/secure/v1"
 	}
 	prefix = "/" + strings.Trim(prefix, "/")
+	if prefix == "/" || strings.ContainsAny(prefix, "?#\\") || strings.Contains(prefix, "//") {
+		return errors.New("fh secure fetch: prefix must be a canonical absolute path")
+	}
+	for _, segment := range strings.Split(prefix, "/") {
+		if segment == "." || segment == ".." {
+			return errors.New("fh secure fetch: prefix must not contain dot segments")
+		}
+	}
 	credentials := stringValue(v.Get("credentials"))
 	if credentials == "" {
 		credentials = "same-origin"
+	}
+	if credentials != "same-origin" && credentials != "include" && credentials != "omit" {
+		return errors.New("fh secure fetch: credentials must be same-origin, include, or omit")
 	}
 	cfg := clientConfig{
 		BaseURL:           strings.TrimRight(baseURL, "/"),
@@ -169,12 +185,26 @@ func (c *secureClient) configure(v js.Value) error {
 		HandshakeTTL:      durationMillis(v.Get("handshakeTTL"), 2*time.Minute),
 		ClockSkew:         durationMillis(v.Get("clockSkew"), 30*time.Second),
 		RequestTTL:        durationMillis(v.Get("requestTTL"), 90*time.Second),
+		MaxSessionTTL:     durationMillis(v.Get("maxSessionTTL"), 15*time.Minute),
 		Limits: protocol.Limits{
 			MaxBody:        intValue(v.Get("maxBody"), protocol.DefaultMaxBody),
 			MaxHeaders:     intValue(v.Get("maxHeaders"), protocol.DefaultMaxHeaders),
 			MaxHeaderName:  protocol.DefaultMaxHeaderName,
 			MaxHeaderValue: protocol.DefaultMaxHeaderValue,
 		},
+	}
+	cfg.PinnedServerKeyID = stringValue(v.Get("pinnedServerKeyID"))
+	if len(cfg.PinnedServerKeyID) > 128 {
+		return errors.New("fh secure fetch: pinnedServerKeyID exceeds 128 bytes")
+	}
+	if len(cfg.ClientBuild) > 128 || len(cfg.DeviceName) > 256 || len(cfg.RegistrationToken) > 4096 {
+		return errors.New("fh secure fetch: clientBuild, deviceName, or registrationToken exceeds its protocol limit")
+	}
+	if cfg.HandshakeTTL > 10*time.Minute || cfg.RequestTTL > 10*time.Minute || cfg.MaxSessionTTL > 24*time.Hour || cfg.ClockSkew > 5*time.Minute {
+		return errors.New("fh secure fetch: configured security lifetime exceeds the client safety limit")
+	}
+	if cfg.Limits.MaxBody > 64<<20 || cfg.Limits.MaxHeaders > 256 {
+		return errors.New("fh secure fetch: configured response limits exceed the client safety limit")
 	}
 	if pin := stringValue(v.Get("pinnedServerKey")); pin != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(pin)
@@ -185,8 +215,13 @@ func (c *secureClient) configure(v js.Value) error {
 		wipe(decoded)
 		cfg.HasPinnedKey = true
 	}
-	if !cfg.HasPinnedKey && !boolValue(v.Get("allowUnpinnedServerKey")) {
-		return errors.New("fh secure fetch: pinnedServerKey is required; allowUnpinnedServerKey is development-only")
+	if !cfg.HasPinnedKey {
+		if !boolValue(v.Get("allowUnpinnedServerKey")) {
+			return errors.New("fh secure fetch: pinnedServerKey is required; allowUnpinnedServerKey is development-only")
+		}
+		if !isLoopbackHost(parsed.Hostname()) {
+			return errors.New("fh secure fetch: unpinned server keys are permitted only on loopback")
+		}
 	}
 	nativeFetch := js.Global().Get("__fhNativeFetch")
 	if nativeFetch.Type() != js.TypeFunction {
@@ -359,6 +394,9 @@ func (c *secureClient) establishSession() error {
 	if cfg.HasPinnedKey && subtle.ConstantTimeCompare(cfg.PinnedServer[:], serverHello.ServerPublic[:]) != 1 {
 		return errors.New("fh secure fetch: server public key pin mismatch")
 	}
+	if cfg.PinnedServerKeyID != "" && serverHello.KeyID != cfg.PinnedServerKeyID {
+		return errors.New("fh secure fetch: server key identifier mismatch")
+	}
 	serverPublic, err := ecdh.X25519().NewPublicKey(serverHello.ServerPublic[:])
 	if err != nil {
 		return errors.New("fh secure fetch: invalid server public key")
@@ -389,8 +427,9 @@ func (c *secureClient) establishSession() error {
 		return errors.New("fh secure fetch: server proof verification failed")
 	}
 	expires := time.UnixMilli(serverHello.ExpiresAt)
-	if !expires.After(time.Now()) {
-		return errors.New("fh secure fetch: server returned an expired session")
+	clientNow := time.Now()
+	if !expires.After(clientNow) || expires.After(clientNow.Add(cfg.MaxSessionTTL+cfg.ClockSkew)) {
+		return errors.New("fh secure fetch: server returned an invalid session lifetime")
 	}
 	c.mu.Lock()
 	if c.session != nil {
@@ -500,13 +539,27 @@ func (c *secureClient) secureRequest(v js.Value) (js.Value, error) {
 	if responseHeaders.Call("get", protocol.HeaderSecure).String() != "1" {
 		return js.Undefined(), errors.New("fh secure fetch: server returned an unprotected response")
 	}
+	outerContentType := strings.ToLower(strings.TrimSpace(strings.Split(responseHeaders.Call("get", "Content-Type").String(), ";")[0]))
+	if outerContentType != protocol.MediaTypeRequest {
+		return js.Undefined(), errors.New("fh secure fetch: secure response has an unexpected content type")
+	}
+	noBodyResponse := method == "HEAD" || status == 204 || status == 205 || status == 304 || (status >= 100 && status < 200)
 	var encryptedResponse []byte
 	if value := responseHeaders.Call("get", protocol.HeaderResponse); !value.IsNull() && value.String() != "" {
+		if !noBodyResponse || len(value.String()) > encodedEnvelopeLimit(cfg.Limits.MaxBody) {
+			return js.Undefined(), errors.New("fh secure fetch: unexpected or oversized response envelope header")
+		}
 		encryptedResponse, err = base64.RawURLEncoding.DecodeString(value.String())
 		if err != nil {
 			return js.Undefined(), errors.New("fh secure fetch: malformed response envelope header")
 		}
 	} else {
+		if noBodyResponse {
+			return js.Undefined(), errors.New("fh secure fetch: protected no-body response is missing its envelope")
+		}
+		if err := validateContentLength(responseHeaders, cfg.Limits.MaxBody+64<<10); err != nil {
+			return js.Undefined(), err
+		}
 		buffer, awaitErr := await(responseValue.Call("arrayBuffer"))
 		if awaitErr != nil {
 			return js.Undefined(), awaitErr
@@ -514,6 +567,10 @@ func (c *secureClient) secureRequest(v js.Value) (js.Value, error) {
 		encryptedResponse, err = bytesFromJS(js.Global().Get("Uint8Array").New(buffer))
 		if err != nil {
 			return js.Undefined(), err
+		}
+		if len(encryptedResponse) > cfg.Limits.MaxBody+64<<10 {
+			wipe(encryptedResponse)
+			return js.Undefined(), errors.New("fh secure fetch: protected response exceeds the configured limit")
 		}
 	}
 	responseEnv, payload, err := protocol.DecryptResponse(keys.ServerToClient, status, encryptedResponse, cfg.Limits)
@@ -526,6 +583,9 @@ func (c *secureClient) secureRequest(v js.Value) (js.Value, error) {
 	}
 	if err := protocol.ValidateTime(responseEnv.IssuedAt, responseEnv.ExpiresAt, time.Now(), cfg.ClockSkew); err != nil {
 		return js.Undefined(), errors.New("fh secure fetch: response is expired")
+	}
+	if time.UnixMilli(responseEnv.ExpiresAt).Sub(time.UnixMilli(responseEnv.IssuedAt)) > cfg.RequestTTL+cfg.ClockSkew || responseEnv.ExpiresAt > sessionExpiry.Add(cfg.ClockSkew).UnixMilli() || responseEnv.IssuedAt < now.Add(-cfg.ClockSkew).UnixMilli() {
+		return js.Undefined(), errors.New("fh secure fetch: response lifetime or request timing binding is invalid")
 	}
 	resultHeaders := js.Global().Get("Array").New()
 	for _, header := range payload.Headers {
@@ -558,6 +618,23 @@ type binaryResponse struct {
 type controlEndpointError struct {
 	endpoint string
 	status   int
+}
+
+func encodedEnvelopeLimit(maxBody int) int {
+	raw := maxBody + (64 << 10)
+	return ((raw + 2) / 3) * 4
+}
+
+func validateContentLength(headers js.Value, max int) error {
+	value := strings.TrimSpace(headers.Call("get", "Content-Length").String())
+	if value == "" {
+		return nil
+	}
+	size, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || size < 0 || size > int64(max) {
+		return errors.New("fh secure fetch: response Content-Length is invalid or exceeds the configured limit")
+	}
+	return nil
 }
 
 func (e controlEndpointError) Error() string {
@@ -594,6 +671,10 @@ func (c *secureClient) fetchBinary(endpoint, method string, body []byte, content
 		return binaryResponse{}, err
 	}
 	status := response.Get("status").Int()
+	responseHeaders := response.Get("headers")
+	if err := validateContentLength(responseHeaders, maxControlResponseBody); err != nil {
+		return binaryResponse{}, err
+	}
 	buffer, err := await(response.Call("arrayBuffer"))
 	if err != nil {
 		return binaryResponse{}, err
@@ -602,9 +683,18 @@ func (c *secureClient) fetchBinary(endpoint, method string, body []byte, content
 	if err != nil {
 		return binaryResponse{}, err
 	}
+	if len(responseBody) > maxControlResponseBody {
+		wipe(responseBody)
+		return binaryResponse{}, errors.New("fh secure fetch: control response exceeds the configured limit")
+	}
 	if status < 200 || status >= 300 {
 		wipe(responseBody)
 		return binaryResponse{}, controlEndpointError{endpoint: endpoint, status: status}
+	}
+	responseType := strings.ToLower(strings.TrimSpace(strings.Split(responseHeaders.Call("get", "Content-Type").String(), ";")[0]))
+	if responseType != contentType {
+		wipe(responseBody)
+		return binaryResponse{}, errors.New("fh secure fetch: control endpoint returned an unexpected content type")
 	}
 	return binaryResponse{status: status, body: responseBody}, nil
 }
@@ -613,8 +703,8 @@ func (c *secureClient) endpoint(suffix string) string { return c.cfg.BaseURL + c
 
 func (c *secureClient) validateDestination(raw string) error {
 	destination, err := url.Parse(raw)
-	if err != nil || destination.Scheme == "" || destination.Host == "" {
-		return errors.New("fh secure fetch: request URL must be absolute")
+	if err != nil || destination.Scheme == "" || destination.Host == "" || destination.User != nil || destination.Fragment != "" {
+		return errors.New("fh secure fetch: request URL must be absolute and contain no credentials or fragment")
 	}
 	base, _ := url.Parse(c.cfg.BaseURL)
 	if !strings.EqualFold(destination.Scheme, base.Scheme) || !strings.EqualFold(destination.Host, base.Host) {

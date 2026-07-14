@@ -146,6 +146,9 @@ func TestEncryptedFHRequestResponseAndReplay(t *testing.T) {
 	if registered.status != fh.StatusOK {
 		t.Fatalf("register status=%d body=%q", registered.status, registered.body)
 	}
+	if registered.headers["cache-control"] != "no-store" || !strings.Contains(registered.headers["content-security-policy"], "default-src 'none'") {
+		t.Fatalf("control response security headers missing: %#v", registered.headers)
+	}
 	deviceResponse, err := protocol.DecodeDeviceRegistrationResponse(registered.body)
 	if err != nil {
 		t.Fatal(err)

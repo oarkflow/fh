@@ -2,6 +2,20 @@ import { clearDevice, installSecureStorageBridge } from "./storage.js";
 const DEFAULT_WASM = "/wasm/securefetch.wasm";
 const DEFAULT_WASM_EXEC = "/wasm/wasm_exec.js";
 let runtimePromise;
+let runtimeAssetConfig;
+function validateAssetURL(raw, integrity, label) {
+    const asset = new URL(raw, location.href);
+    if (asset.protocol !== "https:" && asset.origin !== location.origin) {
+        throw new Error(`${label} must use HTTPS outside same-origin loopback development`);
+    }
+    if (asset.origin !== location.origin && !integrity) {
+        throw new Error(`${label} requires an integrity pin when loaded cross-origin`);
+    }
+    if (asset.username || asset.password || asset.hash) {
+        throw new Error(`${label} URL must not contain credentials or a fragment`);
+    }
+    return asset;
+}
 function decodeBase64(value) {
     let raw;
     try {
@@ -42,8 +56,8 @@ async function verifySHA256Integrity(bytes, integrity) {
 }
 async function loadScript(url, integrity) {
     if (globalThis.Go) {
-        if (integrity && globalThis.__fhGoRuntimeIntegrity !== integrity) {
-            throw new Error("A Go WASM runtime was already loaded without the configured integrity pin");
+        if (globalThis.__fhGoRuntimeIntegrity === undefined || globalThis.__fhGoRuntimeIntegrity !== (integrity ?? "")) {
+            throw new Error("A Go WASM runtime was already loaded outside the configured secure loader");
         }
         return;
     }
@@ -64,7 +78,12 @@ async function loadScript(url, integrity) {
     });
     if (!globalThis.Go)
         throw new Error("Go WASM runtime did not initialize");
-    globalThis.__fhGoRuntimeIntegrity = integrity ?? "";
+    Object.defineProperty(globalThis, "__fhGoRuntimeIntegrity", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: integrity ?? "",
+    });
 }
 async function instantiate(url, imports, integrity) {
     const response = await globalThis.__fhNativeFetch(url, {
@@ -75,6 +94,10 @@ async function instantiate(url, imports, integrity) {
     });
     if (!response.ok)
         throw new Error(`Unable to load secure fetch WASM: HTTP ${response.status}`);
+    const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+    if (contentType !== "application/wasm") {
+        throw new Error("FH secure fetch WASM must be served as application/wasm");
+    }
     if (integrity) {
         const bytes = await response.arrayBuffer();
         await verifySHA256Integrity(bytes, integrity);
@@ -106,23 +129,46 @@ async function startRuntime(config) {
     if (!globalThis.crypto?.subtle || !globalThis.indexedDB || !globalThis.WebAssembly) {
         throw new Error("FH secure fetch requires WebCrypto, IndexedDB, and WebAssembly");
     }
+    if (typeof globalThis.fetch !== "function")
+        throw new Error("FH secure fetch requires native Fetch");
     if (!globalThis.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
         throw new Error("FH secure fetch requires a secure browser context");
     }
     if (config.requireAssetIntegrity && (!config.wasmIntegrity || !config.wasmExecIntegrity)) {
         throw new Error("FH secure fetch requires integrity pins for securefetch.wasm and wasm_exec.js");
     }
-    globalThis.__fhNativeFetch ??= globalThis.fetch.bind(globalThis);
+    const wasmURL = validateAssetURL(config.wasmURL ?? DEFAULT_WASM, config.wasmIntegrity, "FH secure WASM");
+    const wasmExecURL = validateAssetURL(config.wasmExecURL ?? DEFAULT_WASM_EXEC, config.wasmExecIntegrity, "FH secure WASM runtime");
+    if (globalThis.__fhNativeFetch !== undefined) {
+        throw new Error("FH secure native Fetch reference was unexpectedly initialized before the secure loader");
+    }
+    Object.defineProperty(globalThis, "__fhNativeFetch", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: globalThis.fetch.bind(globalThis),
+    });
     installSecureStorageBridge();
-    await loadScript(config.wasmExecURL ?? DEFAULT_WASM_EXEC, config.wasmExecIntegrity);
+    await loadScript(wasmExecURL.toString(), config.wasmExecIntegrity);
     const go = new globalThis.Go();
-    const instance = await instantiate(config.wasmURL ?? DEFAULT_WASM, go.importObject, config.wasmIntegrity);
+    const instance = await instantiate(wasmURL.toString(), go.importObject, config.wasmIntegrity);
     void go.run(instance).catch((error) => {
         console.error("FH secure WASM runtime terminated", error);
     });
     return waitForAPI();
 }
 async function runtime(config) {
+    const assetConfig = JSON.stringify([
+        new URL(config.wasmURL ?? DEFAULT_WASM, location.href).toString(),
+        new URL(config.wasmExecURL ?? DEFAULT_WASM_EXEC, location.href).toString(),
+        config.wasmIntegrity ?? "",
+        config.wasmExecIntegrity ?? "",
+        config.requireAssetIntegrity === true,
+    ]);
+    if (runtimeAssetConfig !== undefined && runtimeAssetConfig !== assetConfig) {
+        throw new Error("FH secure WASM runtime is already initialized with different asset security settings");
+    }
+    runtimeAssetConfig = assetConfig;
     runtimePromise ??= startRuntime(config);
     return runtimePromise;
 }

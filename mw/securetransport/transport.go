@@ -333,7 +333,10 @@ func (t *Transport) installResponseProtection(c fh.Ctx, session Session, request
 		defer zeroSession(&session)
 		status := c.StatusCode()
 		contentType := c.GetRespHeader(fh.HeaderContentTypeStr)
-		headers := t.collectResponseHeaders(c)
+		headers, err := t.collectResponseHeaders(c)
+		if err != nil {
+			return nil, err
+		}
 		responseBody := body
 		if c.Method() == fh.MethodHEADStr || status == fh.StatusNoContent || status == fh.StatusResetContent || status == fh.StatusNotModified || (status >= 100 && status < 200) {
 			responseBody = nil
@@ -347,6 +350,9 @@ func (t *Transport) installResponseProtection(c fh.Ctx, session Session, request
 		expires := now.Add(t.cfg.RequestTTL)
 		if expires.After(session.ExpiresAt) {
 			expires = session.ExpiresAt
+		}
+		if !expires.After(now) {
+			return nil, errors.New("secure transport: session expired before response could be protected")
 		}
 		nonce, err := protocol.NewAEADNonce()
 		if err != nil {
@@ -407,7 +413,7 @@ func (t *Transport) preserveOuterRequestHeader(name string) bool {
 	}
 }
 
-func (t *Transport) collectResponseHeaders(c fh.Ctx) []protocol.Header {
+func (t *Transport) collectResponseHeaders(c fh.Ctx) ([]protocol.Header, error) {
 	all := c.GetRespHeaders()
 	out := make([]protocol.Header, 0, len(all))
 	for name, values := range all {
@@ -416,13 +422,16 @@ func (t *Transport) collectResponseHeaders(c fh.Ctx) []protocol.Header {
 			continue
 		}
 		for _, value := range values {
-			if len(out) >= protocol.DefaultMaxHeaders || strings.ContainsAny(value, "\x00\r\n") {
-				break
+			if len(out) >= t.cfg.Limits.MaxHeaders {
+				return nil, protocol.ErrTooLarge
+			}
+			if len(lower) > t.cfg.Limits.MaxHeaderName || len(value) > t.cfg.Limits.MaxHeaderValue || strings.ContainsAny(value, "\x00\r\n") {
+				return nil, protocol.ErrMalformed
 			}
 			out = append(out, protocol.Header{Name: lower, Value: value})
 		}
 	}
-	return out
+	return out, nil
 }
 
 func (t *Transport) hideResponseHeaders(c fh.Ctx) {
@@ -688,6 +697,8 @@ func (t *Transport) secureControlResponse(c fh.Ctx) {
 	c.Set("Cache-Control", "no-store")
 	c.Set("Pragma", "no-cache")
 	c.Set("X-Content-Type-Options", "nosniff")
+	c.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; sandbox")
+	c.Append("Vary", "Origin")
 	c.Set(protocol.HeaderServerKey, t.PublicKeyBase64())
 }
 
