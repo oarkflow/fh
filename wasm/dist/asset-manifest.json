@@ -1,0 +1,30 @@
+{
+  "protocol": "fh-secure-transport-v1",
+  "assets": {
+    "index.js": {
+      "sha256": "76a69339f188ea8b11136d0fd13a67345cb8e599a212df8f3959ae97cb0e32c2",
+      "integrity": "sha256-dqaTOfGI6osRE20P0TpnNFy45ZmiEt+POVmul8sOMsI=",
+      "size": 79
+    },
+    "secure-fetch.js": {
+      "sha256": "9e74b313579624bf7e48e4e6c2b49e6cd906d3f89d9fa66b98a50f5c996997c9",
+      "integrity": "sha256-nnSzE1eWJL9+SOTmwrSebNkG0/idn6ZrmKUPXJlpl8k=",
+      "size": 8749
+    },
+    "securefetch.wasm": {
+      "sha256": "a7c6e39b0802d763027506904a5cf5a2f6cf42113b3ee108679c20977d430a89",
+      "integrity": "sha256-p8bjmwgC12MCdQaQSlz1ovbPQhE7PuEIZ5wgl31DCok=",
+      "size": 3664847
+    },
+    "storage.js": {
+      "sha256": "4035cb1646a5cf19cad6fa165f95777dea72912a1680b0a7202632089bafe9bf",
+      "integrity": "sha256-QDXLFkalzxnK1voWX5V3fepykSoWgLCnICYyCJuv6b8=",
+      "size": 7499
+    },
+    "wasm_exec.js": {
+      "sha256": "0c949f4996f9a89698e4b5c586de32249c3b69b7baadb64d220073cc04acba14",
+      "integrity": "sha256-DJSfSZb5qJaY5LXFht4yJJw7abe6rbZNIgBzzASsuhQ=",
+      "size": 16992
+    }
+  }
+}

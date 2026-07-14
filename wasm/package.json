@@ -1,0 +1,30 @@
+{
+  "name": "@oarkflow/fh-secure-fetch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/index.js",
+    "dist/index.d.ts",
+    "dist/secure-fetch.js",
+    "dist/secure-fetch.d.ts",
+    "dist/storage.js",
+    "dist/storage.d.ts",
+    "dist/securefetch.wasm",
+    "dist/wasm_exec.js",
+    "dist/asset-manifest.json",
+    "dist/SHA256SUMS"
+  ],
+  "scripts": {
+    "build:ts": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

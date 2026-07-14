@@ -21,6 +21,7 @@
 | [HTTP/2](http2.md) | HTTP/2 ALPN, h2c, flow control, HPACK |
 | [WebSocket](websocket.md) | RFC 6455 WebSocket, EventHub pub/sub |
 | [Native Features](native-features.md) | Typed endpoints, OpenAPI 3.1, SSE, security helpers |
+| [Secure WASM Transport](secure-wasm-transport.md) | Device-bound encrypted Fetch transport for FH |
 
 ---
 
