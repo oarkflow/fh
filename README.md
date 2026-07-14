@@ -393,6 +393,11 @@ Full working examples in [`examples/`](examples/):
 | `slo` | Route-level SLO monitoring with burn-rate alerts |
 | `secure_wasm` | Session + secure WASM client demo for encrypted API calls |
 | `production` | Combined production middleware stack |
+| `workflow` | Checkout workflow: sequential/parallel/branch steps, retry, timeout, compensation, async job handoff |
+| `webhook-receiver` | Secure, idempotent webhook ingestion: signature verification, replay protection, business-level dedup |
+| `api-gateway` | Public API edge: security headers, CORS, rate limiting, API key auth, circuit breaker, reverse proxy, metrics |
+| `multi-tenant-api` | Multi-tenant SaaS API: JWT auth, tenant resolution, per-tenant concurrency isolation, audit trail |
+| `resilient-upstream` | Fault-isolated upstream calls: load shedding, bulkhead, timeout, circuit breaker, reverse proxy |
 
 ## Testing & Benchmarks
 

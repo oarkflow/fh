@@ -626,19 +626,22 @@ app.Use(timeout.New(timeout.Config{
 
 ### workflow
 
-Sequential handler/job workflow composition.
+Composes steps into a sequential, conditional, branched, parallel, or job-oriented request workflow, with retry, per-step timeout, compensation, and observability hooks.
 
 ```go
 import "github.com/oarkflow/fh/mw/workflow"
 
-handler := workflow.New(
-    step1,
-    step2,
-    step3,
-)
+wf := workflow.New("checkout").
+    UseWithOptions("charge-payment", chargePayment,
+        workflow.WithRetry(2, 50*time.Millisecond),
+        workflow.WithTimeout(3*time.Second)).
+    Parallel("fan-out", reserveInventory, sendConfirmation).
+    Job("schedule-shipment", "shipment.schedule")
 
-app.Post("/process", handler)
+app.Post("/orders", wf.Handler())
 ```
+
+See [`mw/workflow/README.md`](../mw/workflow/README.md) and [`examples/workflow`](../examples/workflow) for the full API and a runnable example.
 
 ---
 
