@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -853,6 +854,11 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 	go func() {
 		defer func() { <-h.streamSem }()
 		ctx := acquireCtx(h.conn, h.app)
+		defer func() {
+			if r := recover(); r != nil {
+				releaseCtx(ctx)
+			}
+		}()
 		ctx.h2 = &h2Response{conn: h, stream: s}
 		ctx.flags |= ctxFlagH2
 		ctx.Header.Method = s2b(s.method)
@@ -908,7 +914,7 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 	cookies := ""
 	for _, f := range fields {
 		if f.Name == "" || strings.ToLower(f.Name) != f.Name || strings.ContainsAny(f.Value, "\x00\r\n") {
-			return errors.New("uppercase header")
+			return fmt.Errorf("h2: uppercase header name %q", f.Name)
 		}
 		if strings.HasPrefix(f.Name, ":") {
 			var bit uint8
@@ -922,10 +928,10 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 			case ":scheme":
 				bit = 1 << 3
 			default:
-				return errors.New("unknown pseudo header")
+				return fmt.Errorf("h2: unknown pseudo header %q", f.Name)
 			}
 			if pseudoDone || seenPseudo&bit != 0 {
-				return errors.New("invalid pseudo header")
+				return fmt.Errorf("h2: invalid pseudo header %q", f.Name)
 			}
 			seenPseudo |= bit
 			switch f.Name {
@@ -942,24 +948,24 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 		}
 		pseudoDone = true
 		if !validToken([]byte(f.Name)) {
-			return errors.New("invalid header name")
+			return fmt.Errorf("h2: invalid header name %q", f.Name)
 		}
 		switch f.Name {
 		case "connection", "proxy-connection", "keep-alive", "upgrade", "transfer-encoding":
-			return errors.New("connection header")
+			return fmt.Errorf("h2: connection-related header %q not allowed", f.Name)
 		case "te":
 			if !strEqFold([]byte(trimSpace(f.Value)), "trailers") {
-				return errors.New("invalid te")
+				return fmt.Errorf("h2: invalid te header value %q", f.Value)
 			}
 		case "content-length":
 			n, ok := parseContentLength([]byte(f.Value))
 			if !ok || (s.hasContentLength && n != s.contentLength) {
-				return errors.New("invalid content-length")
+				return fmt.Errorf("h2: invalid content-length %q", f.Value)
 			}
 			s.hasContentLength, s.contentLength = true, n
 		case "host":
 			if seenHost {
-				return errors.New("duplicate host")
+				return fmt.Errorf("h2: duplicate host header %q", f.Value)
 			}
 			seenHost = true
 			if s.authority == "" {
@@ -976,33 +982,33 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 		}
 		regularCount++
 		if regularCount > maxHeaderCount {
-			return errors.New("too many headers")
+			return fmt.Errorf("h2: too many headers (max %d)", maxHeaderCount)
 		}
 		s.headers = append(s.headers, f)
 	}
 	if cookies != "" {
 		regularCount++
 		if regularCount > maxHeaderCount {
-			return errors.New("too many headers")
+			return fmt.Errorf("h2: too many headers (max %d)", maxHeaderCount)
 		}
 		s.headers = append(s.headers, hpack.HeaderField{Name: "cookie", Value: cookies})
 	}
 	if s.method == "" || !validToken([]byte(s.method)) || s.authority == "" {
-		return errors.New("missing pseudo header")
+		return fmt.Errorf("h2: missing pseudo header (method=%q, authority=%q)", s.method, s.authority)
 	}
 	if s.method == "CONNECT" {
 		if s.scheme != "" || s.path != "" {
-			return errors.New("invalid connect pseudo header")
+			return fmt.Errorf("h2: invalid CONNECT pseudo headers (scheme=%q, path=%q)", s.scheme, s.path)
 		}
 		s.path = s.authority
 	} else if s.path == "" || s.scheme == "" {
-		return errors.New("missing pseudo header")
+		return fmt.Errorf("h2: missing pseudo header (path=%q, scheme=%q)", s.path, s.scheme)
 	}
 	if s.method != "CONNECT" && s.path != "*" && s.path[0] != '/' {
-		return errors.New("invalid path")
+		return fmt.Errorf("h2: invalid path %q", s.path)
 	}
 	if s.path == "*" && s.method != "OPTIONS" {
-		return errors.New("invalid asterisk path")
+		return fmt.Errorf("h2: asterisk path %q requires OPTIONS method", s.path)
 	}
 	return nil
 }

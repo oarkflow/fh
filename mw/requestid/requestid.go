@@ -84,7 +84,7 @@ func defaultConfig() Config {
 		Generator:         NewAtomicGenerator(),
 		Validator:         DefaultValidator,
 		ErrorHandler: func(ctx fh.Ctx, err error) error {
-			return ctx.Status(400).SendString("Invalid Request ID")
+			return ctx.Status(400).JSON(fh.Map{"error": "invalid_request_id", "message": err.Error()})
 		},
 	}
 }

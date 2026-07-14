@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -321,7 +322,7 @@ func (s *QueueStorage) ListJobs(ctx context.Context, state string, limit int) ([
 		return nil, err
 	}
 	if state != "" && state != "pending" && state != "processing" && state != "done" && state != "failed" {
-		return nil, errors.New("memory queue: invalid state")
+		return nil, fmt.Errorf("memory queue: invalid state %q", state)
 	}
 	if limit <= 0 {
 		limit = 100
@@ -356,7 +357,7 @@ func (s *QueueStorage) RequeueFailed(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state[id] != "failed" || s.jobs[id] == nil {
-		return errors.New("memory queue: failed job not found")
+		return fmt.Errorf("memory queue: failed job %q not found", id)
 	}
 	j := cloneJob(s.jobs[id])
 	j.UpdatedAt = time.Now().UTC()
@@ -374,7 +375,7 @@ func (s *QueueStorage) DiscardFailed(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state[id] != "failed" {
-		return errors.New("memory queue: failed job not found")
+		return fmt.Errorf("memory queue: failed job %q not found", id)
 	}
 	delete(s.jobs, id)
 	delete(s.state, id)
@@ -389,7 +390,7 @@ func (s *QueueStorage) PurgeJobs(ctx context.Context, state string, before time.
 		state = "done"
 	}
 	if state != "done" && state != "failed" {
-		return 0, errors.New("memory queue: only done or failed jobs can be purged")
+		return 0, fmt.Errorf("memory queue: only done or failed jobs can be purged, got %q", state)
 	}
 	if before.IsZero() {
 		before = time.Now().UTC()

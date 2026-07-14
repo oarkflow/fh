@@ -137,14 +137,20 @@ func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (fh.Idempote
 	}
 	if rec != nil {
 		if rec.RequestHash != reqHash {
-			_ = tx.Commit()
+			if err := tx.Commit(); err != nil {
+				return 0, nil, err
+			}
 			return fh.IdempotencyConflict, rec, nil
 		}
 		if rec.State == "completed" {
-			_ = tx.Commit()
+			if err := tx.Commit(); err != nil {
+				return 0, nil, err
+			}
 			return fh.IdempotencyReplay, rec, nil
 		}
-		_ = tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return 0, nil, err
+		}
 		return fh.IdempotencyProcessing, rec, nil
 	}
 	rec = &fh.IdempotencyRecord{Key: key, RequestHash: reqHash, Method: method, Path: path, State: "processing", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(c.ttl)}
@@ -156,9 +162,12 @@ func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (fh.Idempote
 }
 func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType string, headers map[string][]string, response []byte) error {
 	c := s.c
-	h, _ := json.Marshal(headers)
+	h, err := json.Marshal(headers)
+	if err != nil {
+		return fmt.Errorf("fh sqlstore: marshal headers: %w", err)
+	}
 	q := fmt.Sprintf(`UPDATE %sidempotency SET state=%s,status_code=%s,content_type=%s,headers=%s,response=%s,updated_at=%s WHERE idem_key=%s AND request_hash=%s`, c.prefix, c.p(1), c.p(2), c.p(3), c.p(4), c.p(5), c.p(6), c.p(7), c.p(8))
-	_, err := c.db.Exec(q, "completed", status, contentType, string(h), response, time.Now().UTC(), key, reqHash)
+	_, err = c.db.Exec(q, "completed", status, contentType, string(h), response, time.Now().UTC(), key, reqHash)
 	return err
 }
 func (s *IdempotencyStore) Close() error { return nil }
@@ -173,7 +182,10 @@ func (s *IdempotencyStore) PurgeExpired(ctx context.Context, now time.Time) (int
 	if err != nil {
 		return 0, err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("fh sqlstore: rows affected: %w", err)
+	}
 	return int(n), nil
 }
 func (s *IdempotencyStore) get(tx *sql.Tx, key string) (*fh.IdempotencyRecord, error) {
@@ -187,7 +199,9 @@ func (s *IdempotencyStore) get(tx *sql.Tx, key string) (*fh.IdempotencyRecord, e
 		return nil, err
 	}
 	if headers.Valid && headers.String != "" {
-		_ = json.Unmarshal([]byte(headers.String), &rec.Headers)
+		if err := json.Unmarshal([]byte(headers.String), &rec.Headers); err != nil {
+			return nil, fmt.Errorf("fh sqlstore: unmarshal headers: %w", err)
+		}
 	}
 	rec.Response = append([]byte(nil), resp...)
 	return &rec, nil
@@ -212,9 +226,12 @@ func (s *QueueStorage) Enqueue(ctx context.Context, job *fh.QueueJob) error {
 	if job.MaxAttempts <= 0 {
 		job.MaxAttempts = 5
 	}
-	h, _ := json.Marshal(job.Headers)
+	h, err := json.Marshal(job.Headers)
+	if err != nil {
+		return fmt.Errorf("fh sqlstore: marshal job headers: %w", err)
+	}
 	q := fmt.Sprintf(`INSERT INTO %squeue_jobs (id,type,state,payload,headers,attempts,max_attempts,visible_at,run_at,priority,concurrency_key,last_error,created_at,updated_at) VALUES (%s)`, c.prefix, c.ph(14))
-	_, err := c.db.ExecContext(ctx, q, job.ID, job.Type, "pending", []byte(job.Payload), string(h), job.Attempts, job.MaxAttempts, job.VisibleAt, nullableTime(job.RunAt), job.Priority, job.ConcurrencyKey, job.LastError, job.CreatedAt, job.UpdatedAt)
+	_, err = c.db.ExecContext(ctx, q, job.ID, job.Type, "pending", []byte(job.Payload), string(h), job.Attempts, job.MaxAttempts, job.VisibleAt, nullableTime(job.RunAt), job.Priority, job.ConcurrencyKey, job.LastError, job.CreatedAt, job.UpdatedAt)
 	return err
 }
 func (s *QueueStorage) Claim(ctx context.Context, now time.Time) (*fh.QueueJob, error) {
@@ -237,7 +254,9 @@ func (s *QueueStorage) Claim(ctx context.Context, now time.Time) (*fh.QueueJob, 
 	if err != nil {
 		return nil, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("fh sqlstore: rows affected: %w", err)
+	} else if n == 0 {
 		return nil, fh.ErrQueueEmpty
 	}
 	return j, tx.Commit()
@@ -310,9 +329,12 @@ func (s *QueueStorage) set(ctx context.Context, job *fh.QueueJob, state string, 
 	if delay > 0 {
 		job.VisibleAt = now.Add(delay)
 	}
-	h, _ := json.Marshal(job.Headers)
+	h, err := json.Marshal(job.Headers)
+	if err != nil {
+		return fmt.Errorf("fh sqlstore: marshal job headers: %w", err)
+	}
 	q := fmt.Sprintf(`UPDATE %squeue_jobs SET state=%s,headers=%s,attempts=%s,max_attempts=%s,visible_at=%s,run_at=%s,priority=%s,concurrency_key=%s,last_error=%s,updated_at=%s WHERE id=%s`, c.prefix, c.p(1), c.p(2), c.p(3), c.p(4), c.p(5), c.p(6), c.p(7), c.p(8), c.p(9), c.p(10), c.p(11))
-	_, err := c.db.ExecContext(ctx, q, state, string(h), job.Attempts, job.MaxAttempts, job.VisibleAt, nullableTime(job.RunAt), job.Priority, job.ConcurrencyKey, job.LastError, job.UpdatedAt, job.ID)
+	_, err = c.db.ExecContext(ctx, q, state, string(h), job.Attempts, job.MaxAttempts, job.VisibleAt, nullableTime(job.RunAt), job.Priority, job.ConcurrencyKey, job.LastError, job.UpdatedAt, job.ID)
 	return err
 }
 
@@ -345,7 +367,7 @@ func nullableTime(t time.Time) any {
 
 func (s *QueueStorage) ListJobs(ctx context.Context, state string, limit int) ([]fh.QueueJobSnapshot, error) {
 	if state != "" && state != "pending" && state != "processing" && state != "done" && state != "failed" {
-		return nil, errors.New("fh sqlstore: invalid queue state")
+		return nil, fmt.Errorf("fh sqlstore: invalid queue state %q", state)
 	}
 	if limit <= 0 {
 		limit = 100
@@ -390,8 +412,10 @@ func (s *QueueStorage) RequeueFailed(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return errors.New("fh sqlstore: failed job not found")
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("fh sqlstore: rows affected: %w", err)
+	} else if n == 0 {
+		return fmt.Errorf("fh sqlstore: failed job %q not found", id)
 	}
 	return nil
 }
@@ -406,8 +430,10 @@ func (s *QueueStorage) DiscardFailed(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return errors.New("fh sqlstore: failed job not found")
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("fh sqlstore: rows affected: %w", err)
+	} else if n == 0 {
+		return fmt.Errorf("fh sqlstore: failed job %q not found", id)
 	}
 	return nil
 }
@@ -417,7 +443,7 @@ func (s *QueueStorage) PurgeJobs(ctx context.Context, state string, before time.
 		state = "done"
 	}
 	if state != "done" && state != "failed" {
-		return 0, errors.New("fh sqlstore: only done or failed jobs can be purged")
+		return 0, fmt.Errorf("fh sqlstore: only done or failed jobs can be purged, got %q", state)
 	}
 	if before.IsZero() {
 		before = time.Now().UTC()
@@ -439,7 +465,10 @@ func (s *QueueStorage) PurgeJobs(ctx context.Context, state string, before time.
 	if err != nil {
 		return 0, err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("fh sqlstore: rows affected: %w", err)
+	}
 	return int(n), nil
 }
 
@@ -458,7 +487,9 @@ func scanJobWithState(row scanner) (*fh.QueueJob, string, error) {
 		j.RunAt = runAt.Time
 	}
 	if headers.Valid && headers.String != "" {
-		_ = json.Unmarshal([]byte(headers.String), &j.Headers)
+		if err := json.Unmarshal([]byte(headers.String), &j.Headers); err != nil {
+			return nil, "", fmt.Errorf("fh sqlstore: unmarshal headers: %w", err)
+		}
 	}
 	return &j, state, nil
 }

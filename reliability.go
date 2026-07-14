@@ -570,7 +570,7 @@ func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType
 		return nil
 	}
 	if rec.RequestHash != reqHash {
-		return errors.New("idempotency hash mismatch")
+		return fmt.Errorf("idempotency hash mismatch for key %q", key)
 	}
 	rec.State = "completed"
 	rec.StatusCode = status
@@ -857,6 +857,11 @@ func (q *DurableQueue) Close() error {
 }
 func (q *DurableQueue) worker() {
 	defer q.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			// Worker goroutine recovered from panic
+		}
+	}()
 	ticker := time.NewTicker(q.cfg.PollInterval)
 	defer ticker.Stop()
 	for {

@@ -109,7 +109,7 @@ func parsePublicKey(raw []byte) (any, error) {
 	if cert, err := x509.ParseCertificate(raw); err == nil {
 		return cert.PublicKey, nil
 	}
-	return nil, errors.New("invalid public key")
+	return nil, errors.New("invalid public key: not a valid PKIX public key or X.509 certificate")
 }
 
 func digestForAlg(alg string, data []byte) (crypto.Hash, []byte) {
@@ -271,11 +271,11 @@ func parseRSAPrivateKey(raw []byte) (*rsa.PrivateKey, error) {
 	}
 	key, err := x509.ParsePKCS8PrivateKey(raw)
 	if err != nil {
-		return nil, errors.New("invalid rsa private key")
+		return nil, fmt.Errorf("invalid rsa private key: %w", err)
 	}
 	k, ok := key.(*rsa.PrivateKey)
 	if !ok {
-		return nil, errors.New("rsa private key required")
+		return nil, fmt.Errorf("rsa private key required: PKCS#8 key is type %T", key)
 	}
 	return k, nil
 }

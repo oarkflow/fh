@@ -1302,7 +1302,15 @@ func (f *FutureResponse) Await(ctx context.Context) (*Response, error) {
 }
 func (c *Client) Async(fn func(*Request) (*Response, error)) *FutureResponse {
 	f := &FutureResponse{done: make(chan struct{})}
-	go func() { defer close(f.done); f.res, f.err = fn(c.R()) }()
+	go func() {
+		defer close(f.done)
+		defer func() {
+			if r := recover(); r != nil {
+				f.err = fmt.Errorf("httpclient: async panic: %v", r)
+			}
+		}()
+		f.res, f.err = fn(c.R())
+	}()
 	return f
 }
 
@@ -1324,6 +1332,11 @@ func (c *Client) Batch(ctx context.Context, maxConcurrency int, fns ...func(*Req
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					out[i] = BatchResult{Index: i, Error: fmt.Errorf("httpclient: batch panic: %v", r)}
+				}
+			}()
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()

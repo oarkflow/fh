@@ -1044,7 +1044,10 @@ func (h *EventHub) cleanupLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			h.cleanupIdle()
+			func() {
+				defer func() { recover() }()
+				h.cleanupIdle()
+			}()
 		case <-h.stopCleanup:
 			return
 		}
@@ -1361,7 +1364,7 @@ func RecoverMiddleware(onPanic func(any)) Middleware {
 					if onPanic != nil {
 						onPanic(r)
 					}
-					err = errors.New("panic in websocket event handler")
+					err = fmt.Errorf("panic in websocket event handler: %v", r)
 				}
 			}()
 			return next(ctx)
@@ -1516,7 +1519,13 @@ func marshalEventPayload(v any) (json.RawMessage, error) {
 	}
 }
 
-func mustRaw(v any) json.RawMessage { b, _ := marshalEventPayload(v); return b }
+func mustRaw(v any) json.RawMessage {
+	b, err := marshalEventPayload(v)
+	if err != nil {
+		panic(fmt.Sprintf("websocket: marshal event payload: %v", err))
+	}
+	return b
+}
 
 func copyStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))

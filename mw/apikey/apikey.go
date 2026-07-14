@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -93,13 +94,13 @@ func New(config Config) fh.HandlerFunc {
 		var rec KeyRecord
 		var recordOK bool
 		ok := false
-		if config.Store != nil {
-			id, _ := SplitKey(key)
-			if id != "" {
-				r, exists, err := config.Store.Lookup(c, id)
-				if err != nil {
-					return config.Error(c)
-				}
+	if config.Store != nil {
+		id, _ := SplitKey(key)
+		if id != "" {
+			r, exists, err := config.Store.Lookup(c, id)
+			if err != nil {
+				return fh.InternalError(fmt.Errorf("api key store lookup: %w", err))
+			}
 				if exists && VerifyRecord(c, key, r) {
 					rec, recordOK, ok = r, true, true
 				}

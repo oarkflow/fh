@@ -230,7 +230,7 @@ func NewWithConfig(config Config) fh.HandlerFunc {
 
 		user, found, err := cfg.Storage.GetUser(username)
 		if err != nil {
-			return cfg.UnauthorizedHandler(ctx, cfg.Realm)
+			return fh.InternalError(fmt.Errorf("basicauth storage error for user %q: %w", username, err))
 		}
 
 		if !found {

@@ -231,8 +231,9 @@ func (d *Decoder) Write(p []byte) (n int, err error) {
 // After Close, the Decoder is ready to decode the next header block.
 func (d *Decoder) Close() error {
 	if len(d.saveBuf) > 0 {
+		remaining := len(d.saveBuf)
 		d.saveBuf = d.saveBuf[:0]
-		return DecodingError{errors.New("truncated headers")}
+		return DecodingError{fmt.Errorf("truncated headers: %d bytes remaining", remaining)}
 	}
 	d.firstField = true
 	d.headerBytes = 0
@@ -289,7 +290,7 @@ func (d *Decoder) parseHeaderFieldRepr() error {
 	case b&0xE0 == 0x20:
 		return d.parseDynamicTableSizeUpdate()
 	}
-	return DecodingError{errors.New("invalid encoding")}
+	return DecodingError{fmt.Errorf("invalid encoding: first byte 0x%02x, %d bytes remaining", d.buf[0], len(d.buf))}
 }
 
 func (d *Decoder) parseFieldIndexed() error {
@@ -376,7 +377,7 @@ func (d *Decoder) parseDynamicTableSizeUpdate() error {
 	// RFC 7541 §4.2: must appear at the beginning of the first header block
 	// following the change. We enforce it only on fields after the first.
 	if !d.firstField && d.dynTab.size > 0 {
-		return DecodingError{errors.New("dynamic table size update MUST occur at the beginning of a header block")}
+		return DecodingError{fmt.Errorf("dynamic table size update MUST occur at the beginning of a header block (current size: %d)", d.dynTab.size)}
 	}
 	size, buf, err := readVarInt(5, d.buf)
 	if err != nil {

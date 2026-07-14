@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"crypto/rand"
+	"errors"
 	"testing"
 	"time"
 )
@@ -49,12 +50,12 @@ func TestRequestRoundTripAndTamperDetection(t *testing.T) {
 	if !bytes.Equal(decodedPayload.Body, payload.Body) || decodedPayload.ContentType != payload.ContentType {
 		t.Fatalf("payload mismatch: %#v", decodedPayload)
 	}
-	if _, _, err := DecryptRequest(key, "POST", "/v1/items?a=2&a=1", encoded, Limits{}); err != ErrAuthentication {
+	if _, _, err := DecryptRequest(key, "POST", "/v1/items?a=2&a=1", encoded, Limits{}); !errors.Is(err, ErrAuthentication) {
 		t.Fatalf("target tampering must fail authentication, got %v", err)
 	}
 	tampered := append([]byte(nil), encoded...)
 	tampered[len(tampered)-1] ^= 0x80
-	if _, _, err := DecryptRequest(key, "POST", "/v1/items?a=1&a=2", tampered, Limits{}); err != ErrAuthentication {
+	if _, _, err := DecryptRequest(key, "POST", "/v1/items?a=1&a=2", tampered, Limits{}); !errors.Is(err, ErrAuthentication) {
 		t.Fatalf("ciphertext tampering must fail authentication, got %v", err)
 	}
 }
@@ -85,7 +86,7 @@ func TestResponseRoundTripAndRequestBinding(t *testing.T) {
 	if !EqualID(decodedEnv.RequestID, requestID) || decodedPayload.Status != 201 || !bytes.Equal(decodedPayload.Body, payload.Body) {
 		t.Fatalf("response mismatch: %#v %#v", decodedEnv, decodedPayload)
 	}
-	if _, _, err := DecryptResponse(key, 200, encoded, Limits{}); err != ErrAuthentication {
+	if _, _, err := DecryptResponse(key, 200, encoded, Limits{}); !errors.Is(err, ErrAuthentication) {
 		t.Fatalf("status tampering must fail authentication, got %v", err)
 	}
 }

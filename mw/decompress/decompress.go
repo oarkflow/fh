@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -75,7 +76,7 @@ func DecodeGzip(src []byte, maxSize, maxRatio int) ([]byte, error) {
 	}
 	r, err := gzip.NewReader(bytes.NewReader(src))
 	if err != nil {
-		return nil, ErrMalformedContent
+		return nil, fmt.Errorf("%w: %v", ErrMalformedContent, err)
 	}
 	defer r.Close()
 	limit := maxSize
@@ -87,7 +88,7 @@ func DecodeGzip(src []byte, maxSize, maxRatio int) ([]byte, error) {
 	}
 	out, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	if err != nil {
-		return nil, ErrMalformedContent
+		return nil, fmt.Errorf("%w: %v", ErrMalformedContent, err)
 	}
 	if len(out) > maxSize {
 		return nil, ErrTooLarge

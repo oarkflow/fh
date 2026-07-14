@@ -338,6 +338,7 @@ type ErrorReport struct {
 }
 
 func classifyError(err error, opts ErrorOptions) (*HTTPError, Problem, []byte) {
+	var stack []byte
 	var ve *ValidationError
 	if errors.As(err, &ve) {
 		he := NewHTTPError(StatusUnprocessableEntity, "VALIDATION_FAILED", "Validation failed")
@@ -392,7 +393,10 @@ func classifyError(err error, opts ErrorOptions) (*HTTPError, Problem, []byte) {
 		detail = opts.Redact(err.Error())
 	}
 	he = WrapHTTPError(err, StatusInternalServerError, "INTERNAL_ERROR", detail)
-	return he, Problem{Status: he.Status, Code: he.Code, Detail: detail}, nil
+	if opts.LogInternal {
+		stack = debug.Stack()
+	}
+	return he, Problem{Status: he.Status, Code: he.Code, Detail: detail}, stack
 }
 
 func (c *DefaultCtx) ErrorReport(err error) ErrorReport {

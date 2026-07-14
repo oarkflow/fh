@@ -117,7 +117,10 @@ func EncodeID(id ID16) string { return base64.RawURLEncoding.EncodeToString(id[:
 func DecodeID(value string) (ID16, error) {
 	var id ID16
 	b, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil || len(b) != len(id) {
+	if err != nil {
+		return id, fmt.Errorf("fh secure transport: decode id: %w", err)
+	}
+	if len(b) != len(id) {
 		return id, ErrMalformed
 	}
 	copy(id[:], b)
@@ -518,7 +521,10 @@ func EncryptRequest(key [32]byte, method, target string, env RequestEnvelope, pa
 	if err != nil {
 		return nil, err
 	}
-	aad := requestAAD(method, target, env)
+	aad, err := requestAAD(method, target, env)
+	if err != nil {
+		return nil, fmt.Errorf("fh secure transport: build request aad: %w", err)
+	}
 	env.Ciphertext = aead.Seal(nil, env.Nonce[:], plain, aad)
 	return env.Encode()
 }
@@ -533,9 +539,13 @@ func DecryptRequest(key [32]byte, method, target string, data []byte, limits Lim
 	if err != nil {
 		return env, payload, err
 	}
-	plain, err := aead.Open(nil, env.Nonce[:], env.Ciphertext, requestAAD(method, target, env))
+	aad, err := requestAAD(method, target, env)
 	if err != nil {
-		return env, payload, ErrAuthentication
+		return env, payload, fmt.Errorf("fh secure transport: build request aad: %w", err)
+	}
+	plain, err := aead.Open(nil, env.Nonce[:], env.Ciphertext, aad)
+	if err != nil {
+		return env, payload, fmt.Errorf("fh secure transport: decrypt: %w (underlying: %w)", ErrAuthentication, err)
 	}
 	defer zero(plain)
 	payload, err = decodeRequestPayload(plain, limits)
@@ -552,7 +562,11 @@ func EncryptResponse(key [32]byte, outerStatus int, env ResponseEnvelope, payloa
 	if err != nil {
 		return nil, err
 	}
-	env.Ciphertext = aead.Seal(nil, env.Nonce[:], plain, responseAAD(outerStatus, env))
+	aad, err := responseAAD(outerStatus, env)
+	if err != nil {
+		return nil, fmt.Errorf("fh secure transport: build response aad: %w", err)
+	}
+	env.Ciphertext = aead.Seal(nil, env.Nonce[:], plain, aad)
 	return env.Encode()
 }
 
@@ -566,9 +580,13 @@ func DecryptResponse(key [32]byte, outerStatus int, data []byte, limits Limits) 
 	if err != nil {
 		return env, payload, err
 	}
-	plain, err := aead.Open(nil, env.Nonce[:], env.Ciphertext, responseAAD(outerStatus, env))
+	aad, err := responseAAD(outerStatus, env)
 	if err != nil {
-		return env, payload, ErrAuthentication
+		return env, payload, fmt.Errorf("fh secure transport: build response aad: %w", err)
+	}
+	plain, err := aead.Open(nil, env.Nonce[:], env.Ciphertext, aad)
+	if err != nil {
+		return env, payload, fmt.Errorf("fh secure transport: decrypt: %w (underlying: %w)", ErrAuthentication, err)
 	}
 	defer zero(plain)
 	payload, err = decodeResponsePayload(plain, limits)
@@ -647,7 +665,7 @@ func DecodeResponseEnvelope(data []byte, maxCiphertext int) (ResponseEnvelope, e
 	return out, nil
 }
 
-func requestAAD(method, target string, m RequestEnvelope) []byte {
+func requestAAD(method, target string, m RequestEnvelope) ([]byte, error) {
 	w := newWriter(128 + len(method) + len(target))
 	w.bytes([]byte("FHREQ-AAD-1"))
 	w.str16(strings.ToUpper(method))
@@ -658,11 +676,10 @@ func requestAAD(method, target string, m RequestEnvelope) []byte {
 	w.i64(m.IssuedAt)
 	w.i64(m.ExpiresAt)
 	w.bytes(m.Nonce[:])
-	out, _ := w.done()
-	return out
+	return w.done()
 }
 
-func responseAAD(status int, m ResponseEnvelope) []byte {
+func responseAAD(status int, m ResponseEnvelope) ([]byte, error) {
 	w := newWriter(96)
 	w.bytes([]byte("FHRES-AAD-1"))
 	w.u16(uint16(status))
@@ -672,8 +689,7 @@ func responseAAD(status int, m ResponseEnvelope) []byte {
 	w.i64(m.IssuedAt)
 	w.i64(m.ExpiresAt)
 	w.bytes(m.Nonce[:])
-	out, _ := w.done()
-	return out
+	return w.done()
 }
 
 func ValidateTime(issuedAt, expiresAt int64, now time.Time, maxClockSkew time.Duration) error {

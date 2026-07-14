@@ -113,19 +113,19 @@ func Verify(c fh.Ctx, token string, cfg Config, allowed map[string]bool) (map[st
 	}
 	hb, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return nil, nil, errors.New("bad header encoding")
+		return nil, nil, fmt.Errorf("bad header encoding: %w", err)
 	}
 	cb, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return nil, nil, errors.New("bad claims encoding")
+		return nil, nil, fmt.Errorf("bad claims encoding: %w", err)
 	}
 	var header map[string]any
 	if err := json.Unmarshal(hb, &header); err != nil {
-		return nil, nil, errors.New("bad header json")
+		return nil, nil, fmt.Errorf("bad header json: %w", err)
 	}
 	var claims map[string]any
 	if err := json.Unmarshal(cb, &claims); err != nil {
-		return nil, nil, errors.New("bad claims json")
+		return nil, nil, fmt.Errorf("bad claims json: %w", err)
 	}
 	alg, _ := header["alg"].(string)
 	alg = strings.ToUpper(alg)
@@ -161,7 +161,7 @@ func Verify(c fh.Ctx, token string, cfg Config, allowed map[string]bool) (map[st
 	}
 	got, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return nil, nil, errors.New("bad signature encoding")
+		return nil, nil, fmt.Errorf("bad signature encoding: %w", err)
 	}
 	if err := verifySignature(alg, key, []byte(parts[0]+"."+parts[1]), got); err != nil {
 		return nil, nil, err

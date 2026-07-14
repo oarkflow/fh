@@ -813,8 +813,9 @@ func (a *App) ShutdownWithContext(ctx context.Context) error {
 	}
 	done := make(chan struct{})
 	go func() {
+		defer close(done)
+		defer func() { recover() }()
 		a.activeConn.Wait()
-		close(done)
 	}()
 	select {
 	case <-done:

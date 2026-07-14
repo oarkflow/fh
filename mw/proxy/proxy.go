@@ -91,10 +91,13 @@ func New(cfg Config) fh.HandlerFunc {
 		if writer.err != nil && cfg.ErrorHandler != nil {
 			return cfg.ErrorHandler(c, writer.err)
 		}
-		if writer.err == nil && writer.wroteHeader && !c.Responded() {
+		if writer.err != nil {
+			return fh.DependencyFailure(fmt.Sprintf("upstream error: %v", writer.err)).WithCause(writer.err)
+		}
+		if writer.wroteHeader && !c.Responded() {
 			return c.SendStatus(writer.status)
 		}
-		return writer.err
+		return nil
 	}
 }
 

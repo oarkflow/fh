@@ -1150,22 +1150,29 @@ func (c *Conn) StartHeartbeat(interval, pongTimeout time.Duration, payload []byt
 		for {
 			select {
 			case <-ticker.C:
-				if c.closed.Load() {
-					return
-				}
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							_ = c.Close()
+						}
+					}()
+					if c.closed.Load() {
+						return
+					}
 
-				last := time.Unix(0, c.lastPong.Load())
+					last := time.Unix(0, c.lastPong.Load())
 
-				if !last.IsZero() && time.Since(last) > pongTimeout {
-					_ = c.CloseWithStatus(CloseGoingAway, "pong timeout")
-					_ = c.Close()
-					return
-				}
+					if !last.IsZero() && time.Since(last) > pongTimeout {
+						_ = c.CloseWithStatus(CloseGoingAway, "pong timeout")
+						_ = c.Close()
+						return
+					}
 
-				if err := c.Ping(payload); err != nil {
-					_ = c.Close()
-					return
-				}
+					if err := c.Ping(payload); err != nil {
+						_ = c.Close()
+						return
+					}
+				}()
 
 			case <-done:
 				return
@@ -1340,6 +1347,11 @@ func (w *Writer) CloseWithStatus(code uint16, reason string) error {
 }
 
 func (w *Writer) loop() {
+	defer func() {
+		if r := recover(); r != nil {
+			_ = w.Conn.Close()
+		}
+	}()
 	for {
 		select {
 		case msg := <-w.Queue:
@@ -1440,6 +1452,7 @@ func (m *Manager) Broadcast(opcode byte, payload []byte) int {
 		wg.Add(1)
 
 		go func(conn *Conn) {
+			defer func() { recover() }()
 			defer wg.Done()
 
 			if err := conn.WriteMessage(opcode, payload); err == nil {
@@ -1462,6 +1475,7 @@ func (m *Manager) CloseAll(code uint16, reason string, timeout time.Duration) {
 		wg.Add(1)
 
 		go func(conn *Conn) {
+			defer func() { recover() }()
 			defer wg.Done()
 			_ = conn.CloseWithStatus(code, reason)
 			_ = conn.Close()

@@ -6,6 +6,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -72,7 +73,8 @@ func LoadJSONFile(path string) (Config, error) {
 
 // ApplyEnv overlays values from environment variables using the supplied prefix.
 // Example with prefix FH: FH_ADDR, FH_READ_TIMEOUT, FH_RELIABILITY_ENABLED.
-func ApplyEnv(c Config, prefix string) Config {
+func ApplyEnv(c Config, prefix string) (Config, error) {
+	var errs []error
 	p := strings.TrimRight(strings.ToUpper(strings.TrimSpace(prefix)), "_")
 	key := func(k string) string {
 		if p == "" {
@@ -96,16 +98,36 @@ func ApplyEnv(c Config, prefix string) Config {
 		c.Server.Environment = v
 	}
 	if v := os.Getenv(key("DEBUG")); v != "" {
-		c.Server.Debug = parseBool(v)
+		b, err := parseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("FH_DEBUG: %w", err))
+		} else {
+			c.Server.Debug = b
+		}
 	}
 	if v := os.Getenv(key("MAX_CONNECTIONS")); v != "" {
-		c.Server.MaxConnections = parseInt(v)
+		n, err := parseInt(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("FH_MAX_CONNECTIONS: %w", err))
+		} else {
+			c.Server.MaxConnections = n
+		}
 	}
 	if v := os.Getenv(key("MAX_REQUEST_BODY_SIZE")); v != "" {
-		c.Server.MaxRequestBodySize = parseInt(v)
+		n, err := parseInt(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("FH_MAX_REQUEST_BODY_SIZE: %w", err))
+		} else {
+			c.Server.MaxRequestBodySize = n
+		}
 	}
 	if v := os.Getenv(key("STARTUP_BANNER_DISABLED")); v != "" {
-		c.StartupBanner.Disabled = parseBool(v)
+		b, err := parseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("FH_STARTUP_BANNER_DISABLED: %w", err))
+		} else {
+			c.StartupBanner.Disabled = b
+		}
 	}
 	if v := os.Getenv(key("STARTUP_BANNER_NAME")); v != "" {
 		c.StartupBanner.Name = v
@@ -117,10 +139,20 @@ func ApplyEnv(c Config, prefix string) Config {
 		c.StartupBanner.Subtitle = v
 	}
 	if v := os.Getenv(key("STARTUP_BANNER_COLOR")); v != "" {
-		c.StartupBanner.Color = parseBool(v)
+		b, err := parseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("FH_STARTUP_BANNER_COLOR: %w", err))
+		} else {
+			c.StartupBanner.Color = b
+		}
 	}
 	if v := os.Getenv(key("RELIABILITY_ENABLED")); v != "" {
-		c.Reliability.Enabled = parseBool(v)
+		b, err := parseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("FH_RELIABILITY_ENABLED: %w", err))
+		} else {
+			c.Reliability.Enabled = b
+		}
 	}
 	if v := os.Getenv(key("RELIABILITY_DATA_DIR")); v != "" {
 		c.Reliability.DataDir = v
@@ -129,9 +161,17 @@ func ApplyEnv(c Config, prefix string) Config {
 		c.Reliability.QueueDir = v
 	}
 	if v := os.Getenv(key("RELIABILITY_WORKERS")); v != "" {
-		c.Reliability.Workers = parseInt(v)
+		n, err := parseInt(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("FH_RELIABILITY_WORKERS: %w", err))
+		} else {
+			c.Reliability.Workers = n
+		}
 	}
-	return c
+	if len(errs) > 0 {
+		return c, errors.Join(errs...)
+	}
+	return c, nil
 }
 
 func (c Config) Validate() error {
@@ -143,7 +183,7 @@ func (c Config) Validate() error {
 		}
 	}
 	if c.Server.MaxHeaderCount < 0 || c.Server.MaxConnections < 0 || c.Server.MaxRequestBodySize < 0 {
-		return fmt.Errorf("numeric limits must be >= 0")
+		return fmt.Errorf("config: numeric limits must be >= 0 (MaxHeaderCount=%d, MaxConnections=%d, MaxRequestBodySize=%d)", c.Server.MaxHeaderCount, c.Server.MaxConnections, c.Server.MaxRequestBodySize)
 	}
 	return nil
 }
@@ -153,9 +193,19 @@ func (c Config) AppConfig() (fh.Config, error) {
 		return fh.Config{}, err
 	}
 	var out fh.Config
-	out.ReadTimeout = dur(c.Server.ReadTimeout)
-	out.WriteTimeout = dur(c.Server.WriteTimeout)
-	out.IdleTimeout = dur(c.Server.IdleTimeout)
+	var err error
+	out.ReadTimeout, err = dur(c.Server.ReadTimeout)
+	if err != nil {
+		return fh.Config{}, fmt.Errorf("read_timeout: %w", err)
+	}
+	out.WriteTimeout, err = dur(c.Server.WriteTimeout)
+	if err != nil {
+		return fh.Config{}, fmt.Errorf("write_timeout: %w", err)
+	}
+	out.IdleTimeout, err = dur(c.Server.IdleTimeout)
+	if err != nil {
+		return fh.Config{}, fmt.Errorf("idle_timeout: %w", err)
+	}
 	out.MaxConnections = c.Server.MaxConnections
 	out.MaxRequestBodySize = c.Server.MaxRequestBodySize
 	out.MaxHeaderListSize = c.Server.MaxHeaderListSize
@@ -196,12 +246,11 @@ func NewApp(c Config) (*fh.App, error) {
 	}
 	return fh.NewWithConfig(ac), nil
 }
-func dur(s string) time.Duration {
+func dur(s string) (time.Duration, error) {
 	if s == "" {
-		return 0
+		return 0, nil
 	}
-	d, _ := time.ParseDuration(s)
-	return d
+	return time.ParseDuration(s)
 }
-func parseInt(s string) int   { n, _ := strconv.Atoi(strings.TrimSpace(s)); return n }
-func parseBool(s string) bool { v, _ := strconv.ParseBool(strings.TrimSpace(s)); return v }
+func parseInt(s string) (int, error)   { return strconv.Atoi(strings.TrimSpace(s)) }
+func parseBool(s string) (bool, error) { return strconv.ParseBool(strings.TrimSpace(s)) }
