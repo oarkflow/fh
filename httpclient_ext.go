@@ -366,6 +366,10 @@ func (r *Response) DownloadTo(w io.Writer) (int64, error) {
 
 // SaveAtomic writes a response to path through a temporary file and atomic rename.
 func (r *Response) SaveAtomic(path string, perm os.FileMode) error {
+	cleaned := filepath.Clean(path)
+	if strings.Contains(cleaned, "..") {
+		return fmt.Errorf("fh client: invalid destination path: %s", path)
+	}
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".fh-download-*")
 	if err != nil {
@@ -405,6 +409,8 @@ func (r *Response) Close() error {
 }
 
 // ClientSecurityDialContext returns a DialContext wrapper enforcing the security policy after DNS resolution and before connect.
+// It resolves DNS once, validates the resolved IPs, and connects directly to the
+// resolved IP to prevent TOCTOU races where DNS could change between validation and connect.
 func ClientSecurityDialContext(sec ClientSecurity, base *net.Dialer) func(context.Context, string, string) (net.Conn, error) {
 	if base == nil {
 		base = &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
@@ -415,12 +421,23 @@ func ClientSecurityDialContext(sec ClientSecurity, base *net.Dialer) func(contex
 			host = address
 		}
 		if sec.Enabled() {
-			dialSec := sec
-			dialSec.RequireHTTPS = false
-			fake := &url.URL{Scheme: "tcp", Host: net.JoinHostPort(host, port)}
-			if err := dialSec.Validate(fake); err != nil {
+			ips, err := net.LookupIP(host)
+			if err != nil {
 				return nil, err
 			}
+			if len(ips) == 0 {
+				return nil, ErrClientHostBlocked
+			}
+			dialSec := sec
+			dialSec.RequireHTTPS = false
+			for _, ip := range ips {
+				fake := &url.URL{Scheme: "tcp", Host: net.JoinHostPort(ip.String(), port)}
+				if err := dialSec.Validate(fake); err != nil {
+					return nil, err
+				}
+			}
+			// Connect to resolved IP directly, bypassing hostname re-resolution (TOCTOU fix)
+			address = net.JoinHostPort(ips[0].String(), port)
 		}
 		return base.DialContext(ctx, network, address)
 	}

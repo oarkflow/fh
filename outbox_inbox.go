@@ -167,13 +167,26 @@ func cloneOutboxStringMap(in map[string]string) map[string]string {
 }
 
 type MemoryOutboxInboxStore struct {
-	mu     sync.Mutex
-	outbox map[string]*OutboxMessage
-	inbox  map[string]InboxMessage
+	mu          sync.Mutex
+	outbox      map[string]*OutboxMessage
+	inbox       map[string]InboxMessage
+	maxOutbox   int
+	maxInbox    int
+	outboxOrder []string
 }
 
 func NewMemoryOutboxInboxStore() *MemoryOutboxInboxStore {
-	return &MemoryOutboxInboxStore{outbox: map[string]*OutboxMessage{}, inbox: map[string]InboxMessage{}}
+	return NewMemoryOutboxInboxStoreWithLimit(0, 0)
+}
+
+func NewMemoryOutboxInboxStoreWithLimit(maxOutbox, maxInbox int) *MemoryOutboxInboxStore {
+	if maxOutbox <= 0 {
+		maxOutbox = 50000
+	}
+	if maxInbox <= 0 {
+		maxInbox = 50000
+	}
+	return &MemoryOutboxInboxStore{outbox: map[string]*OutboxMessage{}, inbox: map[string]InboxMessage{}, maxOutbox: maxOutbox, maxInbox: maxInbox}
 }
 func (s *MemoryOutboxInboxStore) SaveOutbox(ctx context.Context, m *OutboxMessage) error {
 	if err := ctx.Err(); err != nil {
@@ -184,8 +197,13 @@ func (s *MemoryOutboxInboxStore) SaveOutbox(ctx context.Context, m *OutboxMessag
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for len(s.outbox) >= s.maxOutbox && len(s.outboxOrder) > 0 {
+		delete(s.outbox, s.outboxOrder[0])
+		s.outboxOrder = s.outboxOrder[1:]
+	}
 	cp := cloneOutbox(m)
 	s.outbox[cp.ID] = cp
+	s.outboxOrder = append(s.outboxOrder, cp.ID)
 	return nil
 }
 func (s *MemoryOutboxInboxStore) ClaimOutbox(ctx context.Context, now time.Time, limit int) ([]*OutboxMessage, error) {
@@ -291,6 +309,21 @@ func (s *MemoryOutboxInboxStore) BeginInbox(ctx context.Context, m InboxMessage)
 	defer s.mu.Unlock()
 	if _, ok := s.inbox[m.ID]; ok {
 		return false, ErrDuplicateInboxMessage
+	}
+	for len(s.inbox) >= s.maxInbox {
+		// evict oldest entry (map iteration order is non-deterministic,
+		// so find the one with the earliest CreatedAt)
+		var oldest string
+		var oldestTime time.Time
+		for id, im := range s.inbox {
+			if oldest == "" || im.CreatedAt.Before(oldestTime) {
+				oldest = id
+				oldestTime = im.CreatedAt
+			}
+		}
+		if oldest != "" {
+			delete(s.inbox, oldest)
+		}
 	}
 	if m.CreatedAt.IsZero() {
 		m.CreatedAt = time.Now().UTC()

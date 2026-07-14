@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ func Enable(app *fh.App, cfg Config) *fh.App {
 	}
 	if cfg.AllowInsecure && cfg.Auth == nil && len(cfg.AllowedIPs) == 0 {
 		app.Logger().Warn("fh: admin.Enable called with AllowInsecure=true and no Auth or AllowedIPs — admin endpoints are fully open; restrict access in production")
+		panic(fmt.Errorf("admin: AllowInsecure requires Auth or AllowedIPs"))
 	}
 	mw := func(c fh.Ctx) error {
 		allowed := cfg.AllowInsecure || cfg.Auth != nil

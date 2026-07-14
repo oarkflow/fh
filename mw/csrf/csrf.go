@@ -34,6 +34,7 @@ type Config struct {
 var DefaultConfig = Config{
 	CookieName: "csrf_token", HeaderName: "X-CSRF-Token", CookiePath: "/",
 	CookieSameSite: fh.SameSiteLax, CookieMaxAge: 12 * time.Hour,
+	CookieSecure: true,
 }
 
 func New(config ...Config) fh.HandlerFunc {

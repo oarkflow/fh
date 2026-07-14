@@ -151,8 +151,10 @@ type memoryShard struct {
 }
 
 type bucket struct {
-	count   int
-	resetAt time.Time
+	count       int
+	prevCount   int
+	windowStart time.Time
+	resetAt     time.Time
 }
 
 func NewMemoryStore(shardCount int) *MemoryStore {
@@ -194,19 +196,39 @@ func (s *MemoryStore) Allow(key string, limit int, window time.Duration, now tim
 	b := sh.buckets[key]
 	if b == nil {
 		b = &bucket{
-			count:   0,
-			resetAt: now.Add(window),
+			count:       0,
+			prevCount:   0,
+			windowStart: now,
+			resetAt:     now.Add(window),
 		}
 		sh.buckets[key] = b
 	}
 
 	if !now.Before(b.resetAt) {
+		elapsed := now.Sub(b.windowStart)
+		if elapsed >= 2*window {
+			b.prevCount = 0
+		} else {
+			b.prevCount = b.count
+		}
 		b.count = 0
+		b.windowStart = now
 		b.resetAt = now.Add(window)
 	}
 
+	// Sliding window: weight previous window's count by elapsed fraction
+	elapsed := now.Sub(b.windowStart).Seconds()
+	windowSec := window.Seconds()
+	var weightedCount float64
+	if elapsed < windowSec && b.prevCount > 0 {
+		previousWeight := (windowSec - elapsed) / windowSec
+		weightedCount = float64(b.prevCount)*previousWeight + float64(b.count)
+	} else {
+		weightedCount = float64(b.count)
+	}
+
 	b.count++
-	used := b.count
+	used := int(weightedCount) + 1
 	resetAt := b.resetAt
 
 	sh.mu.Unlock()

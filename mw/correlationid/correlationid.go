@@ -6,15 +6,16 @@ import (
 )
 
 type Config struct {
-	Header        string
-	LocalKey      string
-	TrustIncoming bool
-	Generator     requestid.Generator
-	Validator     requestid.Validator
+	Header            string
+	LocalKey          string
+	TrustIncoming     bool
+	Generator         requestid.Generator
+	Validator         requestid.Validator
+	MaxIncomingLength int
 }
 
 func New(config ...Config) fh.HandlerFunc {
-	cfg := Config{Header: "X-Correlation-ID", LocalKey: "correlationID", TrustIncoming: true, Generator: requestid.NewAtomicGenerator(), Validator: requestid.DefaultValidator}
+	cfg := Config{Header: "X-Correlation-ID", LocalKey: "correlationID", TrustIncoming: true, Generator: requestid.NewAtomicGenerator(), Validator: requestid.DefaultValidator, MaxIncomingLength: 128}
 	if len(config) > 0 {
 		o := config[0]
 		if o.Header != "" {
@@ -30,11 +31,17 @@ func New(config ...Config) fh.HandlerFunc {
 		if o.Validator != nil {
 			cfg.Validator = o.Validator
 		}
+		if o.MaxIncomingLength > 0 {
+			cfg.MaxIncomingLength = o.MaxIncomingLength
+		}
 	}
 	return func(c fh.Ctx) error {
 		id := ""
 		if cfg.TrustIncoming {
 			id = c.Get(cfg.Header)
+			if id != "" && cfg.MaxIncomingLength > 0 && len(id) > cfg.MaxIncomingLength {
+				return fh.NewHTTPError(fh.StatusBadRequest, "CORRELATION_ID_TOO_LONG", "correlation id exceeds maximum length")
+			}
 			if id != "" && !cfg.Validator(id) {
 				return fh.NewHTTPError(fh.StatusBadRequest, "CORRELATION_ID_INVALID", "correlation id is invalid")
 			}

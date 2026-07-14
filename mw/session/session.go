@@ -148,16 +148,17 @@ type SessionStore interface {
 
 // SessionManager handles session lifecycle: create, load, save, destroy.
 type SessionManager struct {
-	store      SessionStore
-	cookieName string
-	secrets    [][]byte
-	maxAge     time.Duration
-	httpOnly   bool
-	secure     bool
-	sameSite   fh.SameSite
-	path       string
-	domain     string
-	locks      [64]sync.Mutex
+	store          SessionStore
+	cookieName     string
+	secrets        [][]byte
+	maxAge         time.Duration
+	httpOnly       bool
+	secure         bool
+	sameSite       fh.SameSite
+	path           string
+	domain         string
+	autoRegenerate bool
+	locks          [64]sync.Mutex
 	// LockTimeout is the maximum duration Begin() will wait to acquire the
 	// per-shard lock before returning an error. Zero means wait indefinitely.
 	// Set this when the session store is remote (database, Redis) to prevent
@@ -213,6 +214,12 @@ func SessionDomain(domain string) SessionOption { return func(m *SessionManager)
 // Prevents goroutine pile-up when the session store is remote and slow.
 func SessionLockTimeout(d time.Duration) SessionOption {
 	return func(m *SessionManager) { m.LockTimeout = d }
+}
+
+// SessionAutoRegenerate automatically regenerates the session ID on the first
+// write to prevent session fixation attacks.
+func SessionAutoRegenerate(v bool) SessionOption {
+	return func(m *SessionManager) { m.autoRegenerate = v }
 }
 
 func NewSessionManager(store SessionStore, opts ...SessionOption) *SessionManager {
@@ -302,6 +309,12 @@ func (m *SessionManager) Begin(ctx fh.Ctx) (*Session, func(fh.Ctx) error, error)
 	if err != nil {
 		lock.Unlock()
 		return nil, nil, err
+	}
+	if m.autoRegenerate {
+		if err := m.Regenerate(ctx, session); err != nil {
+			lock.Unlock()
+			return nil, nil, err
+		}
 	}
 	var once sync.Once
 	var completeErr error

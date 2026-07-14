@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -63,7 +64,11 @@ func LoadJSON(r io.Reader) (Config, error) {
 	return c, err
 }
 func LoadJSONFile(path string) (Config, error) {
-	f, err := os.Open(path)
+	cleaned := sanitizePath(path)
+	if cleaned == "" {
+		return Config{}, fmt.Errorf("config: invalid path %q", path)
+	}
+	f, err := os.Open(cleaned)
 	if err != nil {
 		return Config{}, err
 	}
@@ -206,6 +211,18 @@ func (c Config) AppConfig() (fh.Config, error) {
 	if err != nil {
 		return fh.Config{}, fmt.Errorf("idle_timeout: %w", err)
 	}
+	if out.ReadTimeout == 0 {
+		out.ReadTimeout = 30 * time.Second
+	}
+	if out.WriteTimeout == 0 {
+		out.WriteTimeout = 60 * time.Second
+	}
+	if out.IdleTimeout == 0 {
+		out.IdleTimeout = 120 * time.Second
+	}
+	if out.ReadHeaderTimeout == 0 {
+		out.ReadHeaderTimeout = 5 * time.Second
+	}
 	out.MaxConnections = c.Server.MaxConnections
 	out.MaxRequestBodySize = c.Server.MaxRequestBodySize
 	out.MaxHeaderListSize = c.Server.MaxHeaderListSize
@@ -251,6 +268,13 @@ func dur(s string) (time.Duration, error) {
 		return 0, nil
 	}
 	return time.ParseDuration(s)
+}
+func sanitizePath(p string) string {
+	cleaned := filepath.Clean(p)
+	if strings.Contains(cleaned, "..") {
+		return ""
+	}
+	return cleaned
 }
 func parseInt(s string) (int, error)   { return strconv.Atoi(strings.TrimSpace(s)) }
 func parseBool(s string) (bool, error) { return strconv.ParseBool(strings.TrimSpace(s)) }

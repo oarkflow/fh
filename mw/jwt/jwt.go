@@ -1,7 +1,10 @@
 package jwt
 
 import (
+	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/hmac"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
@@ -144,8 +147,17 @@ func Verify(c fh.Ctx, token string, cfg Config, allowed map[string]bool) (map[st
 	switch {
 	case cfg.KeyFunc != nil:
 		key, err = cfg.KeyFunc(c, header, claims)
-		if err != nil {
+		if err != nil || key == nil {
+			if err == nil {
+				err = ErrInvalidKey
+			}
 			return nil, nil, err
+		}
+		if isHMAC && isAsymmetricKey(key) {
+			return nil, nil, fmt.Errorf("jwt: algorithm %s requires symmetric key, but KeyFunc returned asymmetric key", header["alg"])
+		}
+		if !isHMAC && !isAsymmetricKey(key) {
+			return nil, nil, fmt.Errorf("jwt: algorithm %s requires asymmetric key, but KeyFunc returned symmetric key", header["alg"])
 		}
 	case isHMAC:
 		key = cfg.Secret
@@ -385,4 +397,17 @@ func clean(in []string) []string {
 		}
 	}
 	return out
+}
+
+var ErrInvalidKey = errors.New("jwt: invalid key")
+
+func isAsymmetricKey(key interface{}) bool {
+	switch key.(type) {
+	case *rsa.PublicKey, *ecdsa.PublicKey, ed25519.PublicKey:
+		return true
+	case []byte:
+		return false
+	default:
+		return false
+	}
 }

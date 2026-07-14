@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -23,6 +24,11 @@ const (
 	HeaderRequestID      = "X-Request-ID"
 	HeaderIdempotencyKey = "Idempotency-Key"
 	HeaderReplayed       = "X-Idempotency-Replayed"
+)
+
+const (
+	maxJobFileSize    = 1 << 20 // 1MB
+	maxScannerBufSize = 1 << 18 // 256KB
 )
 
 var ErrQueueEmpty = errors.New("fh: queue empty")
@@ -401,11 +407,11 @@ func validExternalID(s string) bool {
 	return true
 }
 func newRequestID() string {
-	var b [16]byte
-	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
-		return "req_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("req_%d", time.Now().UnixNano())
 	}
-	return "req_" + hex.EncodeToString(b[:])
+	return fmt.Sprintf("req_%x", b)
 }
 
 type RequestJournalEntry struct {
@@ -530,7 +536,7 @@ func (s *IdempotencyStore) load() error {
 	now := time.Now()
 	sc := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
-	sc.Buffer(buf, 16*1024*1024)
+	sc.Buffer(buf, maxScannerBufSize)
 	for sc.Scan() {
 		var rec IdempotencyRecord
 		if json.Unmarshal(sc.Bytes(), &rec) == nil && rec.Key != "" && (rec.ExpiresAt.IsZero() || rec.ExpiresAt.After(now)) {
@@ -936,6 +942,18 @@ type FileQueueStorage struct {
 	events  *os.File
 }
 
+func claimFile(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("fh: file already claimed: %w", err)
+	}
+	return f, nil
+}
+
 func OpenFileQueueStorage(cfg FileQueueStorageConfig) (*FileQueueStorage, error) {
 	if cfg.Dir == "" {
 		cfg.Dir = ".fh-reliability/queue"
@@ -1007,6 +1025,11 @@ func (s *FileQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJob,
 	for _, item := range candidates {
 		pending := filepath.Join(s.dir, "pending", item.name)
 		processing := filepath.Join(s.dir, "processing", item.name)
+		f, err := claimFile(pending)
+		if err != nil {
+			continue
+		}
+		f.Close()
 		if os.Rename(pending, processing) == nil {
 			_ = s.appendEvent("claimed", "processing", item.job, "")
 			return item.job, nil
@@ -1168,7 +1191,19 @@ func (s *FileQueueStorage) appendEvent(event, state string, job *QueueJob, errTe
 }
 
 func readJob(path string) (*QueueJob, error) {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxJobFileSize {
+		return nil, fmt.Errorf("fh: job file %s exceeds maximum size %d bytes", path, maxJobFileSize)
+	}
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return nil, err
 	}

@@ -1494,12 +1494,12 @@ func signRequestHMAC(r *http.Request, secret []byte, newHash func() hash.Hash) (
 	h.Write([]byte(r.URL.RequestURI()))
 	h.Write([]byte("\n"))
 	if r.Body != nil {
-		b, err := io.ReadAll(r.Body)
+		bodyReader := io.TeeReader(r.Body, h)
+		b, err := io.ReadAll(bodyReader)
 		if err != nil {
 			return "", err
 		}
 		r.Body = io.NopCloser(bytes.NewReader(b))
-		h.Write(b)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

@@ -179,7 +179,17 @@ func request(c fh.Ctx, target *url.URL) (*http.Request, error) {
 	if err != nil {
 		return nil, err
 	}
+	skipHeaders := map[string]bool{
+		"Authorization":   true,
+		"Cookie":          true,
+		"X-Forwarded-For": true,
+		"X-Real-IP":       true,
+		"X-Internal-Auth": true,
+	}
 	for key, values := range c.GetReqHeaders() {
+		if skipHeaders[key] {
+			continue
+		}
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}

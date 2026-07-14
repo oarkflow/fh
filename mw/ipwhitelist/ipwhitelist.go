@@ -117,12 +117,14 @@ func firstForwardedIP(v string) string {
 	if v == "" {
 		return ""
 	}
-
-	if i := strings.IndexByte(v, ','); i >= 0 {
-		return strings.TrimSpace(v[:i])
+	parts := strings.Split(v, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := strings.TrimSpace(parts[i])
+		if ip != "" {
+			return ip
+		}
 	}
-
-	return strings.TrimSpace(v)
+	return ""
 }
 
 // -----------------------------------------------------------------------------

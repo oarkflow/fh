@@ -43,8 +43,12 @@ func Enable(app *fh.App, cfg Config) *fh.App {
 		seconds := parseInt(c.Query("seconds"))
 		debug := parseInt(c.Query("debug"))
 		if name == "profile" {
+			const maxProfileSeconds = 30
 			if seconds <= 0 {
 				seconds = 30
+			}
+			if seconds > maxProfileSeconds {
+				seconds = maxProfileSeconds
 			}
 			var buf bytes.Buffer
 			if err := rpprof.StartCPUProfile(&buf); err != nil {

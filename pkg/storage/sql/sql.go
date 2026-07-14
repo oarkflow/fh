@@ -2,6 +2,7 @@ package sqlstore
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -56,9 +57,26 @@ func Open(cfg Config) (*Store, error) {
 	if cfg.IdempotencyTTL <= 0 {
 		cfg.IdempotencyTTL = 24 * time.Hour
 	}
-	c := &core{db: cfg.DB, dialect: cfg.Dialect, prefix: cfg.Prefix, ttl: cfg.IdempotencyTTL}
+	c := &core{db: cfg.DB, dialect: cfg.Dialect, prefix: sanitizePrefix(cfg.Prefix), ttl: cfg.IdempotencyTTL}
 	return &Store{Journal: &JournalStore{c}, Idempotency: &IdempotencyStore{c}, Queue: &QueueStorage{c}, c: c}, nil
 }
+
+func sanitizePrefix(p string) string {
+	var b strings.Builder
+	for _, r := range p {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func generateJobID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("sqljob_%d_%x", time.Now().UnixNano(), b)
+}
+
 func (s *Store) Migrate(ctx context.Context) error {
 	for _, q := range s.Schema() {
 		if _, err := s.c.db.ExecContext(ctx, q); err != nil {
@@ -214,7 +232,7 @@ func (s *QueueStorage) Enqueue(ctx context.Context, job *fh.QueueJob) error {
 	c := s.c
 	now := time.Now().UTC()
 	if job.ID == "" {
-		job.ID = fmt.Sprintf("sqljob_%d", now.UnixNano())
+		job.ID = generateJobID()
 	}
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = now

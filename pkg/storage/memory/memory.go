@@ -24,6 +24,15 @@ func New() *Store {
 	return &Store{Journal: &JournalStore{}, Idempotency: NewIdempotencyStore(24 * time.Hour), Queue: NewQueueStorage()}
 }
 
+type StoreConfig struct {
+	MaxIdempotencyEntries int
+	MaxQueueEntries       int
+}
+
+func NewWithConfig(cfg StoreConfig) *Store {
+	return &Store{Journal: &JournalStore{}, Idempotency: NewIdempotencyStoreWithLimit(24*time.Hour, cfg.MaxIdempotencyEntries), Queue: NewQueueStorageWithLimit(cfg.MaxQueueEntries)}
+}
+
 type JournalStore struct {
 	mu      sync.Mutex
 	entries []fh.RequestJournalEntry
@@ -48,16 +57,31 @@ func (s *JournalStore) Entries() []fh.RequestJournalEntry {
 func (s *JournalStore) Close() error { return nil }
 
 type IdempotencyStore struct {
-	mu      sync.Mutex
-	ttl     time.Duration
-	records map[string]*fh.IdempotencyRecord
+	mu         sync.Mutex
+	ttl        time.Duration
+	maxEntries int
+	records    map[string]*fh.IdempotencyRecord
+	insertOrder []string
 }
 
 func NewIdempotencyStore(ttl time.Duration) *IdempotencyStore {
+	return NewIdempotencyStoreWithLimit(ttl, 0)
+}
+
+func NewIdempotencyStoreWithLimit(ttl time.Duration, maxEntries int) *IdempotencyStore {
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
-	return &IdempotencyStore{ttl: ttl, records: map[string]*fh.IdempotencyRecord{}}
+	if maxEntries <= 0 {
+		maxEntries = 50000
+	}
+	return &IdempotencyStore{ttl: ttl, maxEntries: maxEntries, records: map[string]*fh.IdempotencyRecord{}}
+}
+func (s *IdempotencyStore) evictLocked() {
+	for len(s.records) > s.maxEntries && len(s.insertOrder) > 0 {
+		delete(s.records, s.insertOrder[0])
+		s.insertOrder = s.insertOrder[1:]
+	}
 }
 func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (fh.IdempotencyDecision, *fh.IdempotencyRecord, error) {
 	now := time.Now().UTC()
@@ -77,8 +101,10 @@ func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (fh.Idempote
 			return fh.IdempotencyProcessing, cp, nil
 		}
 	}
+	s.evictLocked()
 	rec := &fh.IdempotencyRecord{Key: key, RequestHash: reqHash, Method: method, Path: path, State: "processing", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(s.ttl)}
 	s.records[key] = rec
+	s.insertOrder = append(s.insertOrder, key)
 	return fh.IdempotencyNew, cloneIdem(rec), nil
 }
 func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType string, headers map[string][]string, response []byte) error {
@@ -121,13 +147,22 @@ func (s *IdempotencyStore) PurgeExpired(ctx context.Context, now time.Time) (int
 }
 
 type QueueStorage struct {
-	mu    sync.Mutex
-	jobs  map[string]*fh.QueueJob
-	state map[string]string
+	mu         sync.Mutex
+	jobs       map[string]*fh.QueueJob
+	state      map[string]string
+	maxEntries int
+	insertOrder []string
 }
 
 func NewQueueStorage() *QueueStorage {
-	return &QueueStorage{jobs: map[string]*fh.QueueJob{}, state: map[string]string{}}
+	return NewQueueStorageWithLimit(0)
+}
+
+func NewQueueStorageWithLimit(maxEntries int) *QueueStorage {
+	if maxEntries <= 0 {
+		maxEntries = 50000
+	}
+	return &QueueStorage{jobs: map[string]*fh.QueueJob{}, state: map[string]string{}, maxEntries: maxEntries}
 }
 func (s *QueueStorage) Enqueue(ctx context.Context, job *fh.QueueJob) error {
 	if err := ctx.Err(); err != nil {
@@ -150,8 +185,15 @@ func (s *QueueStorage) Enqueue(ctx context.Context, job *fh.QueueJob) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for len(s.jobs) >= s.maxEntries && len(s.insertOrder) > 0 {
+		oldest := s.insertOrder[0]
+		delete(s.jobs, oldest)
+		delete(s.state, oldest)
+		s.insertOrder = s.insertOrder[1:]
+	}
 	s.jobs[cp.ID] = cp
 	s.state[cp.ID] = "pending"
+	s.insertOrder = append(s.insertOrder, cp.ID)
 	job.ID = cp.ID
 	return nil
 }

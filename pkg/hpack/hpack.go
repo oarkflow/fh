@@ -96,6 +96,13 @@ const (
 func (v indexType) indexed() bool   { return v == indexedTrue }
 func (v indexType) sensitive() bool { return v == indexedNever }
 
+const (
+	maxDynamicTableSize = 65536  // 64KB max dynamic table
+	maxHeaderBlockSize = 1 << 20 // 1MB max decoded header block
+	maxHeaderFieldSize = 8192    // 8KB max single header field
+	maxSaveBufSize     = 1 << 20 // 1MB max saveBuf to prevent unbounded growth
+)
+
 // ── Decoder ──────────────────────────────────────────────────────────────────
 
 // Decoder is a stateful HPACK decoder. It maintains a dynamic table and emits
@@ -125,10 +132,15 @@ type Decoder struct {
 // NewDecoder returns a new Decoder with the given maximum dynamic table size.
 // emitFunc is called for each decoded HeaderField in the same goroutine as Write.
 func NewDecoder(maxDynTableSize uint32, emitFunc func(HeaderField)) *Decoder {
+	if maxDynTableSize == 0 {
+		maxDynTableSize = maxDynamicTableSize
+	}
 	d := &Decoder{
-		emit:        emitFunc,
-		emitEnabled: true,
-		firstField:  true,
+		emit:           emitFunc,
+		emitEnabled:    true,
+		firstField:     true,
+		maxStrLen:      maxHeaderFieldSize,
+		maxHeaderBytes: maxHeaderBlockSize,
 	}
 	d.dynTab.table.init()
 	d.dynTab.allowedMaxSize = maxDynTableSize
@@ -139,13 +151,16 @@ func NewDecoder(maxDynTableSize uint32, emitFunc func(HeaderField)) *Decoder {
 // Reset resets d to its initial state and reconfigures it with a new max dynamic
 // table size and emit function. Allows Decoder reuse without allocation.
 func (d *Decoder) Reset(maxDynTableSize uint32, emitFunc func(HeaderField)) {
+	if maxDynTableSize == 0 {
+		maxDynTableSize = maxDynamicTableSize
+	}
 	d.emit = emitFunc
 	d.emitEnabled = true
 	d.firstField = true
 	d.saveBuf = d.saveBuf[:0]
 	d.headerBytes = 0
-	d.maxStrLen = 0
-	d.maxHeaderBytes = 0
+	d.maxStrLen = maxHeaderFieldSize
+	d.maxHeaderBytes = maxHeaderBlockSize
 	d.dynTab.table.reset()
 	d.dynTab.allowedMaxSize = maxDynTableSize
 	d.dynTab.size = 0
@@ -190,6 +205,9 @@ func (d *Decoder) Write(p []byte) (n int, err error) {
 	if len(d.saveBuf) == 0 {
 		d.buf = p
 	} else {
+		if int64(len(d.saveBuf))+int64(len(p)) > maxSaveBufSize {
+			return 0, ErrHeaderListSize
+		}
 		d.saveBuf = append(d.saveBuf, p...)
 		d.buf = d.saveBuf
 		d.saveBuf = d.saveBuf[:0]
@@ -214,6 +232,9 @@ func (d *Decoder) Write(p []byte) (n int, err error) {
 			const varIntOverhead = 8
 			if d.maxStrLen != 0 && int64(len(d.buf)) > 2*(int64(d.maxStrLen)+varIntOverhead) {
 				return 0, ErrStringLength
+			}
+			if int64(len(d.buf)) > maxSaveBufSize {
+				return 0, ErrHeaderListSize
 			}
 			d.saveBuf = append(d.saveBuf[:0], d.buf...)
 			return len(p), nil

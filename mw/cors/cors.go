@@ -149,8 +149,13 @@ func New(config ...Config) fh.HandlerFunc {
 }
 
 func validateConfig(cfg Config) error {
-	if cfg.AllowCredentials && originListHasWildcard(cfg.AllowOrigins) && cfg.OriginStore == nil {
-		return fmt.Errorf("cors: AllowCredentials cannot be used with wildcard AllowOrigins without an explicit OriginStore; configure explicit origins in an OriginStore to prevent credential leakage to arbitrary origins")
+	if cfg.AllowCredentials {
+		if cfg.OriginStore == nil && originListHasWildcard(cfg.AllowOrigins) {
+			return fmt.Errorf("cors: AllowCredentials requires explicit allowed origins when using wildcard")
+		}
+		if cfg.OriginStore != nil && isWildcardStore(cfg.OriginStore) {
+			return fmt.Errorf("cors: AllowCredentials cannot be used with a wildcard OriginStore")
+		}
 	}
 	if cfg.PreflightStatus < 0 || cfg.PreflightStatus > 999 {
 		return fmt.Errorf("cors: invalid PreflightStatus %d", cfg.PreflightStatus)

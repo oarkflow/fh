@@ -31,6 +31,11 @@ type Config struct {
 	Encoder Encoder
 
 	Next func(ctx fh.Ctx) bool
+
+	// BreachProtection skips compression when the response carries
+	// security-sensitive headers (Set-Cookie, Content-Security-Policy,
+	// Authorization) to mitigate BREACH-style side-channel attacks.
+	BreachProtection bool
 }
 
 var DefaultConfig = Config{
@@ -45,6 +50,7 @@ var DefaultConfig = Config{
 		"application/x-javascript",
 		"image/svg+xml",
 	},
+	BreachProtection: true,
 }
 
 func New(config ...Config) fh.HandlerFunc {
@@ -77,6 +83,14 @@ func New(config ...Config) fh.HandlerFunc {
 			// Avoid double compression if a previous middleware/app already set encoding.
 			if ctx.ResponseHeader("Content-Encoding") != "" {
 				return body, nil
+			}
+
+			// Skip compression if response has security-sensitive headers
+			// to mitigate BREACH-style compression side-channel attacks.
+			if cfg.BreachProtection {
+				if ctx.ResponseHeader("Set-Cookie") != "" || ctx.ResponseHeader("Content-Security-Policy") != "" || ctx.ResponseHeader("Authorization") != "" {
+					return body, nil
+				}
 			}
 
 			contentType := ctx.ResponseHeader("Content-Type")
@@ -121,6 +135,9 @@ func mergeConfig(base Config, override Config) Config {
 	}
 	if override.Next != nil {
 		base.Next = override.Next
+	}
+	if override.BreachProtection {
+		base.BreachProtection = override.BreachProtection
 	}
 
 	return base

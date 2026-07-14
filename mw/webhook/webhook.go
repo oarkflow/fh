@@ -22,15 +22,16 @@ type ReplayStore interface {
 type ErrorHandler func(fh.Ctx, error) error
 
 type Config struct {
-	Secret          []byte
-	SecretFunc      SecretFunc
-	Header          string
-	TimestampHeader string
-	Tolerance       time.Duration
-	Prefix          string
-	Algorithm       string
-	Replay          ReplayStore
-	Error           ErrorHandler
+	Secret           []byte
+	SecretFunc       SecretFunc
+	Header           string
+	TimestampHeader  string
+	Tolerance        time.Duration
+	Prefix           string
+	Algorithm        string
+	Replay           ReplayStore
+	Error            ErrorHandler
+	RequireTimestamp bool
 }
 
 func New(cfg Config) fh.HandlerFunc {
@@ -93,6 +94,9 @@ func Verify(c fh.Ctx, cfg Config) error {
 	}
 	body := c.BodyRaw()
 	ts := c.Get(cfg.TimestampHeader)
+	if ts == "" && cfg.RequireTimestamp {
+		return fmt.Errorf("timestamp header %q is required for replay protection", cfg.TimestampHeader)
+	}
 	msg := body
 	if ts != "" {
 		t, err := parseTime(ts)

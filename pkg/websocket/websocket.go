@@ -217,6 +217,10 @@ func NewWithConfig(cfg Config, handler func(*Conn) error) fh.HandlerFunc {
 			ws := newConn(conn, cfg, selectedProtocol)
 
 			if cfg.Manager != nil {
+				if cfg.Manager.MaxConnections > 0 && int(cfg.Manager.activeConns.Load()) >= cfg.Manager.MaxConnections {
+					_ = ws.CloseWithStatus(CloseTryAgainLater, "connection limit exceeded")
+					return ErrWebSocketClosed
+				}
 				cfg.Manager.Add(ws)
 				defer cfg.Manager.Remove(ws)
 			}
@@ -1367,13 +1371,16 @@ func (w *Writer) loop() {
 }
 
 type Manager struct {
-	mu    sync.RWMutex
-	conns map[*Conn]struct{}
+	mu             sync.RWMutex
+	conns          map[*Conn]struct{}
+	MaxConnections int
+	activeConns    atomic.Int64
 }
 
 func NewManager() *Manager {
 	return &Manager{
-		conns: make(map[*Conn]struct{}),
+		conns:          make(map[*Conn]struct{}),
+		MaxConnections: 10000,
 	}
 }
 
@@ -1382,6 +1389,7 @@ func (m *Manager) Add(c *Conn) {
 		return
 	}
 
+	m.activeConns.Add(1)
 	m.mu.Lock()
 	m.conns[c] = struct{}{}
 	m.mu.Unlock()
@@ -1395,6 +1403,7 @@ func (m *Manager) Remove(c *Conn) {
 	m.mu.Lock()
 	delete(m.conns, c)
 	m.mu.Unlock()
+	m.activeConns.Add(-1)
 }
 
 func (m *Manager) Count() int {
@@ -1402,11 +1411,7 @@ func (m *Manager) Count() int {
 		return 0
 	}
 
-	m.mu.RLock()
-	n := len(m.conns)
-	m.mu.RUnlock()
-
-	return n
+	return int(m.activeConns.Load())
 }
 
 func (m *Manager) Snapshot() []*Conn {

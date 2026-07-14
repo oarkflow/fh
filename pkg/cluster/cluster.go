@@ -2,7 +2,10 @@ package cluster
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -152,7 +155,7 @@ func (s *MemoryStore) TryAcquire(ctx context.Context, name, owner string, ttl ti
 	if l, ok := s.leases[name]; ok && l.ExpiresAt.After(now) && l.Owner != "" && l.Owner != owner {
 		return l, false, nil
 	}
-	l := Lease{Name: name, Owner: owner, ExpiresAt: now.Add(ttl), Token: owner + ":" + name}
+	l := Lease{Name: name, Owner: owner, ExpiresAt: now.Add(ttl), Token: generateToken()}
 	s.leases[name] = l
 	return l, true, nil
 }
@@ -170,7 +173,7 @@ func (s *MemoryStore) Renew(ctx context.Context, name, owner string, ttl time.Du
 	if l.Owner != "" && l.Owner != owner && l.ExpiresAt.After(now) {
 		return l, false, nil
 	}
-	l = Lease{Name: name, Owner: owner, ExpiresAt: now.Add(ttl), Token: owner + ":" + name}
+	l = Lease{Name: name, Owner: owner, ExpiresAt: now.Add(ttl), Token: generateToken()}
 	s.leases[name] = l
 	return l, true, nil
 }
@@ -185,6 +188,14 @@ func (s *MemoryStore) Release(ctx context.Context, name, owner string) error {
 	}
 	return nil
 }
+func generateToken() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 func cloneNode(n Node) Node {
 	if len(n.Metadata) > 0 {
 		m := map[string]string{}
