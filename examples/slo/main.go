@@ -56,6 +56,10 @@ func main() {
 	app.Use(tracker.Handler())
 
 	app.Get("/api/users", func(c fh.Ctx) error {
+		// ?fail=true deterministically triggers an SLO burn-rate alert for demos.
+		if c.Query("fail") == "true" {
+			return c.Status(fh.StatusInternalServerError).JSON(fh.Map{"error": "simulated failure"})
+		}
 		// Simulate variable latency
 		time.Sleep(time.Duration(rand.Intn(150)) * time.Millisecond)
 		return c.JSON(fh.Map{"users": []string{"alice", "bob"}})
