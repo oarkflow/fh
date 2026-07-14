@@ -263,8 +263,15 @@ func WithServerHeader(header string) Option {
 // a trusted edge or for controlled latency/RPS benchmarks. To avoid request-hot
 // activity atomics, shutdown closes HTTP/1 connections immediately; use
 // NewProduction when graceful completion of in-flight requests is required.
+//
+// WriteTimeout defaults to 0 here (unlike New/NewProduction's 30s): a non-zero
+// WriteTimeout makes serveConn set a socket write deadline AND derive a fresh
+// per-request context.Context via context.WithTimeout on every request, which
+// costs real allocation, mutex, and GC overhead in the hot path. Pass
+// WithWriteTimeout after NewFast's options to restore write deadlines and
+// handler-visible cancellation if this app is exposed beyond a trusted edge.
 func NewFast(opts ...Option) *App {
-	all := append([]Option{WithMode(ModeFast)}, opts...)
+	all := append([]Option{WithMode(ModeFast), WithWriteTimeout(0)}, opts...)
 	return New(all...)
 }
 

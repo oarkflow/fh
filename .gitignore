@@ -5,3 +5,4 @@ dagflow/data/*
 .fh-data
 .fh-reliability
 .idea
+*.wasm

@@ -1001,3 +1001,6 @@ The outbound HTTP client lives directly in the root `fh` package. It now include
 The repository includes `mw/securetransport`, the shared `pkg/securetransport` protocol, and a TypeScript/JavaScript Go-WASM Fetch client under `wasm/`. It provides device-signed session establishment, pinned static plus ephemeral X25519 key agreement, independent AES-256-GCM directional keys, encrypted request/response bodies and application headers, exact target binding, replay prevention, origin/Fetch-Metadata validation, response metadata hiding, device/session revocation, and pluggable stores.
 
 Build with `make wasm`; see `docs/secure-wasm-transport.md` and `examples/secure_wasm`.
+
+
+## Benchmarks
