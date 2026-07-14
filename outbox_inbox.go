@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -109,13 +110,19 @@ func (o *StoredOutbox) DispatchOnce(ctx context.Context, limit int) (int, error)
 	for _, msg := range msgs {
 		if err := o.dispatch(ctx, msg); err != nil {
 			if msg.Attempts >= msg.MaxAttempts {
-				_ = o.store.FailOutbox(ctx, msg.ID, err)
+				if ferr := o.store.FailOutbox(ctx, msg.ID, err); ferr != nil {
+					return processed, fmt.Errorf("fh: outbox fail message %s: %w", msg.ID, ferr)
+				}
 			} else {
-				_ = o.store.RetryOutbox(ctx, msg.ID, err, o.backoff)
+				if rerr := o.store.RetryOutbox(ctx, msg.ID, err, o.backoff); rerr != nil {
+					return processed, fmt.Errorf("fh: outbox retry message %s: %w", msg.ID, rerr)
+				}
 			}
 			continue
 		}
-		_ = o.store.CompleteOutbox(ctx, msg.ID)
+		if cerr := o.store.CompleteOutbox(ctx, msg.ID); cerr != nil {
+			return processed, fmt.Errorf("fh: outbox complete message %s: %w", msg.ID, cerr)
+		}
 		processed++
 	}
 	return processed, nil
@@ -230,7 +237,7 @@ func (s *MemoryOutboxInboxStore) setOutbox(ctx context.Context, id, state string
 	defer s.mu.Unlock()
 	m := s.outbox[id]
 	if m == nil {
-		return errors.New("fh: outbox message not found")
+		return fmt.Errorf("fh: outbox message %s not found", id)
 	}
 	m.State = state
 	m.UpdatedAt = time.Now().UTC()

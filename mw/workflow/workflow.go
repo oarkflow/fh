@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/oarkflow/fh"
@@ -134,6 +135,11 @@ func executeParallel(c fh.Ctx, step Step) error {
 		wg.Add(1)
 		go func(b *Workflow) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					errCh <- fmt.Errorf("workflow %s: panic: %v", b.Name, r)
+				}
+			}()
 			if err := b.execute(c); err != nil {
 				errCh <- err
 			}

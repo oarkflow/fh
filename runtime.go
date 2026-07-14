@@ -20,7 +20,11 @@ type RuntimeInfo struct {
 func (a *App) RuntimeInfo() RuntimeInfo {
 	var q QueueStats
 	if a != nil && a.reliability != nil && a.reliability.queue != nil {
-		q, _ = a.reliability.queue.Stats()
+		var err error
+		q, err = a.reliability.queue.Stats()
+		if err != nil {
+			a.Logger().Warn("fh: failed to collect queue stats", "error", err)
+		}
 	}
 	_, checks := a.HealthStatus(context.Background())
 	return RuntimeInfo{Time: time.Now().UTC(), GoVersion: runtime.Version(), Goroutines: runtime.NumGoroutine(), Draining: a != nil && a.IsDraining(), Routes: len(a.Routes()), Queue: q, Config: a.SafeConfig(), Health: checks}

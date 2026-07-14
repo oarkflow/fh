@@ -89,7 +89,7 @@ func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType
 		return nil
 	}
 	if rec.RequestHash != reqHash {
-		return errors.New("memory idempotency: hash mismatch")
+		return fmt.Errorf("memory idempotency: hash mismatch for key %q", key)
 	}
 	rec.State = "completed"
 	rec.StatusCode = status

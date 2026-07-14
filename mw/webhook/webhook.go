@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"hash"
 	"strconv"
@@ -70,12 +69,12 @@ func New(cfg Config) fh.HandlerFunc {
 func Verify(c fh.Ctx, cfg Config) error {
 	sig := strings.TrimSpace(c.Get(cfg.Header))
 	if sig == "" {
-		return errors.New("missing signature")
+		return fmt.Errorf("missing signature in header %q", cfg.Header)
 	}
 	if cfg.Prefix != "" {
 		p := cfg.Prefix + "="
 		if !strings.HasPrefix(sig, p) {
-			return errors.New("signature prefix mismatch")
+			return fmt.Errorf("signature prefix mismatch: expected %q", p)
 		}
 		sig = strings.TrimPrefix(sig, p)
 	} else if i := strings.IndexByte(sig, '='); i > 0 {
@@ -90,7 +89,7 @@ func Verify(c fh.Ctx, cfg Config) error {
 		}
 	}
 	if len(key) == 0 {
-		return errors.New("missing secret")
+		return fmt.Errorf("missing secret: both Secret and SecretFunc are empty")
 	}
 	body := c.BodyRaw()
 	ts := c.Get(cfg.TimestampHeader)
@@ -98,10 +97,10 @@ func Verify(c fh.Ctx, cfg Config) error {
 	if ts != "" {
 		t, err := parseTime(ts)
 		if err != nil {
-			return err
+			return fmt.Errorf("invalid timestamp in %q: %w", cfg.TimestampHeader, err)
 		}
 		if cfg.Tolerance > 0 && time.Since(t) > cfg.Tolerance {
-			return errors.New("timestamp outside tolerance")
+			return fmt.Errorf("timestamp outside tolerance: %v ago exceeds %v", time.Since(t), cfg.Tolerance)
 		}
 		joined := make([]byte, 0, len(ts)+1+len(body))
 		joined = append(joined, ts...)
@@ -117,11 +116,11 @@ func Verify(c fh.Ctx, cfg Config) error {
 	mac.Write(msg)
 	expected := hex.EncodeToString(mac.Sum(nil))
 	if !hmac.Equal([]byte(strings.ToLower(sig)), []byte(expected)) {
-		return errors.New("signature mismatch")
+		return fmt.Errorf("signature mismatch for algorithm %s", cfg.Algorithm)
 	}
 	if cfg.Replay != nil && ts != "" {
 		if cfg.Replay.Seen(sig+":"+ts, cfg.Tolerance) {
-			return errors.New("signature replayed")
+			return fmt.Errorf("signature replayed: seen within %v tolerance", cfg.Tolerance)
 		}
 	}
 	return nil

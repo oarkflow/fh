@@ -1937,7 +1937,10 @@ func init() {
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
 		for range t.C {
-			refreshDateCache()
+			func() {
+				defer func() { recover() }()
+				refreshDateCache()
+			}()
 		}
 	}()
 

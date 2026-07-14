@@ -1503,12 +1503,28 @@ func isTimeoutErr(err error) bool {
 
 func defaultErrorHandler(ctx Ctx, err error) {
 	if dc, ok := ctx.(*DefaultCtx); ok && dc.server != nil && dc.server.logger != nil {
-		dc.server.logger.Error("request error",
-			"method", ctx.Method(),
-			"path", ctx.Path(),
-			"ip", ctx.IP(),
-			"error", err,
-		)
+		report := dc.ErrorReport(err)
+		args := []any{
+			"method", report.Method,
+			"path", report.Path,
+			"ip", report.RemoteIP,
+			"error_code", report.Error.Code,
+			"error_kind", report.Error.Kind,
+			"error_severity", report.Error.Severity,
+			"error_message", report.Error.Message,
+			"retryable", report.Error.Retryable,
+			"status", report.Error.Status,
+		}
+		if report.RequestID != "" {
+			args = append(args, "request_id", report.RequestID)
+		}
+		if report.Cause != "" {
+			args = append(args, "cause", report.Cause)
+		}
+		if len(report.Stack) > 0 {
+			args = append(args, "stack", string(report.Stack))
+		}
+		dc.server.logger.Error("request error", args...)
 	}
 	_ = ctx.SafeErrorResponse(err)
 }

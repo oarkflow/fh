@@ -1081,7 +1081,9 @@ func ClientGzipRequest(min int) ClientMiddleware {
 			var b bytes.Buffer
 			gz := gzip.NewWriter(&b)
 			_, err := io.Copy(gz, r.Body)
-			_ = gz.Close()
+			if closeErr := gz.Close(); closeErr != nil && err == nil {
+				err = closeErr
+			}
 			_ = r.Body.Close()
 			if err != nil {
 				return nil, err

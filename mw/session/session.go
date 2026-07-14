@@ -347,12 +347,12 @@ func (m *SessionManager) Load(ctx fh.Ctx) (*Session, error) {
 
 	session, err := m.store.Get(id)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fh: load session %s: %w", id[:8], err)
 	}
 	if session == nil || session.Expired() {
 		if session != nil {
 			if err := m.store.Delete(session.ID); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("fh: delete expired session %s: %w", session.ID[:8], err)
 			}
 		}
 		return m.NewSession(), nil

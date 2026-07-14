@@ -200,17 +200,20 @@ func (c *coalesceCache) evictLoop(ttl time.Duration) {
 	ticker := time.NewTicker(ttl)
 	defer ticker.Stop()
 	for range ticker.C {
-		c.mu.Lock()
-		for k, e := range c.entries {
-			select {
-			case <-e.done:
-				if e.refs.Load() <= 1 {
-					delete(c.entries, k)
+		func() {
+			defer func() { recover() }()
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			for k, e := range c.entries {
+				select {
+				case <-e.done:
+					if e.refs.Load() <= 1 {
+						delete(c.entries, k)
+					}
+				default:
 				}
-			default:
 			}
-		}
-		c.mu.Unlock()
+		}()
 	}
 }
 

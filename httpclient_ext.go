@@ -388,7 +388,10 @@ func (r *Response) SaveAtomic(path string, perm os.FileMode) error {
 		return closeErr
 	}
 	if n >= 0 {
-		_ = os.Chmod(tmpName, perm)
+		if err := os.Chmod(tmpName, perm); err != nil {
+			os.Remove(tmpName)
+			return fmt.Errorf("fh client: chmod %s: %w", tmpName, err)
+		}
 	}
 	return os.Rename(tmpName, path)
 }
