@@ -3,6 +3,7 @@ package fh
 import (
 	"crypto/tls"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -123,6 +124,9 @@ func applyComplianceDefaults(cfg *Config) {
 	}
 	if cfg.Compliance.EndpointPrefix == "" {
 		cfg.Compliance.EndpointPrefix = "/_fh"
+	}
+	if cfg.Compliance.ExposeEndpoints && len(cfg.Compliance.EndpointAuth) == 0 {
+		log.Printf("fh: Compliance.ExposeEndpoints is enabled with no Compliance.EndpointAuth — compliance endpoints will require auth middleware to be mounted")
 	}
 	if cfg.Compliance.Enabled && cfg.Compliance.Profile == "" {
 		cfg.Compliance.Profile = ComplianceProfessional
@@ -327,6 +331,13 @@ func withHandlers(middleware []HandlerFunc, h HandlerFunc) []HandlerFunc {
 // mw/apikey, IP allowlist) so this route group isn't reachable by anyone who
 // can reach the server.
 func (a *App) EnableComplianceEndpoints(prefix string, middleware ...HandlerFunc) *App {
+	if len(middleware) == 0 && len(a.cfg.Compliance.EndpointAuth) == 0 {
+		log.Printf("fh: EnableComplianceEndpoints called with no auth middleware and no Compliance.EndpointAuth — /_fh/* endpoints NOT mounted; set Config.Compliance.EndpointAuth or pass auth middleware to enable")
+		return a
+	}
+	if len(middleware) == 0 {
+		middleware = a.cfg.Compliance.EndpointAuth
+	}
 	if prefix == "" {
 		prefix = "/_fh"
 	}

@@ -5,9 +5,11 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/hmac"
+	crypto_rand "crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -342,6 +344,7 @@ func (b builtinClientTransport) RoundTrip(req *http.Request) (*http.Response, er
 	}
 	c.cfg.Metrics.Observe(req.Method, req.URL.Host, code, dur)
 	if err != nil {
+		c.cfg.Logger.Error("fh client request failed", "method", req.Method, "url", safeURL(req.URL), "host", req.URL.Host, "error", err, "duration", dur)
 		c.cfg.Metrics.Error(req.Method, req.URL.Host, classifyNetErr(err))
 		callClientHook(c.cfg.Hooks.OnError, event.withErr(err).withDuration(dur))
 		return res, wrapClientErr(req, err, dur)
@@ -927,7 +930,13 @@ func retryDelay(res *http.Response, attempt int, p RetryPolicy) time.Duration {
 		d = max
 	}
 	if p.Jitter && d > 0 {
-		d = time.Duration(rand.Int63n(int64(d)))
+		var buf [8]byte
+		if _, err := crypto_rand.Read(buf[:]); err == nil {
+			frac := float64(binary.BigEndian.Uint64(buf[:])) / float64(^uint64(0))
+			d = time.Duration(float64(d) * frac)
+		} else {
+			d = time.Duration(rand.Int63n(int64(d)))
+		}
 	}
 	return d
 }
@@ -1480,7 +1489,7 @@ func safeURL(u *url.URL) string {
 	q := cp.Query()
 	for k := range q {
 		lk := strings.ToLower(k)
-		if strings.Contains(lk, "token") || strings.Contains(lk, "secret") || strings.Contains(lk, "password") || strings.Contains(lk, "key") {
+		if strings.Contains(lk, "token") || strings.Contains(lk, "secret") || strings.Contains(lk, "password") || strings.Contains(lk, "key") || strings.Contains(lk, "auth") || strings.Contains(lk, "bearer") || strings.Contains(lk, "credential") || strings.Contains(lk, "session") || strings.Contains(lk, "otp") || strings.Contains(lk, "ssn") || strings.Contains(lk, "card") || strings.Contains(lk, "cvv") {
 			q.Set(k, "xxxxx")
 		}
 	}

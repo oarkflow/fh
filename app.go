@@ -125,11 +125,10 @@ type Config struct {
 }
 
 var defaultConfig = Config{
-	// Defaults are intentionally tuned for raw throughput. Production deployments
-	// that face untrusted networks should set ReadTimeout/WriteTimeout/IdleTimeout.
-	ReadTimeout:          0,
-	WriteTimeout:         0,
-	IdleTimeout:          0,
+	ReadTimeout:          10 * time.Second,
+	WriteTimeout:         30 * time.Second,
+	IdleTimeout:          120 * time.Second,
+	ReadHeaderTimeout:    5 * time.Second,
 	ReadBufferSize:       16384,
 	MaxRequestBodySize:   4 << 20,
 	MaxHeaderListSize:    64 << 10,
@@ -453,6 +452,10 @@ func buildApp(cfg Config) *App {
 		}
 		app.reliability = reliability
 		app.middleware = append(app.middleware, reliability.Middleware())
+	}
+
+	if !cfg.DisablePanicRecovery {
+		app.middleware = append([]HandlerFunc{app.defaultRecoveryMiddleware()}, app.middleware...)
 	}
 
 	if cfg.Compliance.ExposeEndpoints {
@@ -1288,31 +1291,33 @@ func (a *App) serveConn(conn net.Conn) {
 	}
 }
 
-func (a *App) dispatch(ctx *DefaultCtx) {
-	if a.cfg.DisablePanicRecovery {
-		a.dispatchCore(ctx)
-		return
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			a.logger.Error("panic recovered",
-				"method", ctx.Method(),
-				"path", ctx.Path(),
-				"ip", ctx.IP(),
-				"panic", r,
-			)
-			if a.cfg.Debug {
-				a.logger.Error("panic stack trace",
-					"method", ctx.Method(),
-					"path", ctx.Path(),
-					"stack", string(debug.Stack()),
+func (a *App) defaultRecoveryMiddleware() HandlerFunc {
+	return func(c Ctx) error {
+		defer func() {
+			if r := recover(); r != nil {
+				a.logger.Error("panic recovered",
+					"method", c.Method(),
+					"path", c.Path(),
+					"ip", c.IP(),
+					"panic", r,
 				)
+				if a.cfg.Debug {
+					a.logger.Error("panic stack trace",
+						"method", c.Method(),
+						"path", c.Path(),
+						"stack", string(debug.Stack()),
+					)
+				}
+				if dc, ok := c.(*DefaultCtx); ok && !dc.responded {
+					a.cfg.ErrorHandler(c, NewPanicError(r))
+				}
 			}
-			if !ctx.responded {
-				a.cfg.ErrorHandler(ctx, NewPanicError(r))
-			}
-		}
-	}()
+		}()
+		return c.Next()
+	}
+}
+
+func (a *App) dispatch(ctx *DefaultCtx) {
 	a.dispatchCore(ctx)
 }
 

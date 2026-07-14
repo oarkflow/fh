@@ -262,6 +262,7 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 		path := uriPath(uri, m.cfg.IncludeQueryInPath)
 		query := uriQuery(uri)
 		ip := ctx.IP()
+		rid := requestIDFromCtx(ctx)
 
 		var errText string
 		if err != nil {
@@ -273,9 +274,9 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 			buf.Reset()
 
 			if m.json {
-				m.renderJSON(buf, end, ip, method, path, query, uri, status, lat, errText)
+				m.renderJSON(buf, end, ip, method, path, query, uri, status, lat, errText, rid)
 			} else {
-				m.renderTokens(buf, end, ip, method, path, query, uri, status, lat, errText)
+				m.renderTokens(buf, end, ip, method, path, query, uri, status, lat, errText, rid)
 			}
 
 			if m.cfg.MaxLineBytes > 0 && buf.Len() > m.cfg.MaxLineBytes {
@@ -301,6 +302,7 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 			rec.URI = string(uri)
 			rec.Query = string(query)
 			rec.IP = ip
+			rec.RequestID = rid
 			rec.Status = status
 			rec.Latency = lat
 			rec.Error = errText
@@ -340,6 +342,7 @@ func (m *Middleware) renderTokens(
 	status int,
 	latency time.Duration,
 	errText string,
+	rid string,
 ) {
 	for _, t := range m.tokens {
 		switch t.typ {
@@ -363,6 +366,8 @@ func (m *Middleware) renderTokens(
 			buf.WriteString(ip)
 		case logError:
 			buf.WriteString(errText)
+		case logRequestID:
+			buf.WriteString(rid)
 		}
 	}
 }
@@ -378,6 +383,7 @@ func (m *Middleware) renderJSON(
 	status int,
 	latency time.Duration,
 	errText string,
+	rid string,
 ) {
 	buf.WriteByte('{')
 
@@ -409,6 +415,12 @@ func (m *Middleware) renderJSON(
 	buf.WriteByte(',')
 	writeJSONKeyString(buf, "latency_us")
 	appendInt64(buf, latency.Microseconds())
+
+	if rid != "" {
+		buf.WriteByte(',')
+		writeJSONKeyString(buf, "request_id")
+		writeJSONString(buf, rid)
+	}
 
 	if errText != "" {
 		buf.WriteByte(',')
@@ -586,6 +598,9 @@ func (o *asyncOutput) writeEntry(e *logEntry) {
 			if e.rec.Query != "" {
 				attrs = append(attrs, slog.String("query", e.rec.Query))
 			}
+			if e.rec.RequestID != "" {
+				attrs = append(attrs, slog.String("request_id", e.rec.RequestID))
+			}
 			if e.rec.Error != "" {
 				attrs = append(attrs, slog.String("error", e.rec.Error))
 			}
@@ -641,15 +656,16 @@ func (o *asyncOutput) Dropped() uint64 {
 }
 
 type slogRecord struct {
-	Time    time.Time
-	Method  string
-	Path    string
-	URI     string
-	Query   string
-	IP      string
-	Status  int
-	Latency time.Duration
-	Error   string
+	Time      time.Time
+	Method    string
+	Path      string
+	URI       string
+	Query     string
+	IP        string
+	RequestID string
+	Status    int
+	Latency   time.Duration
+	Error     string
 }
 
 var slogRecordPool = sync.Pool{
@@ -797,6 +813,16 @@ func uriQuery(uri []byte) []byte {
 	return nil
 }
 
+func requestIDFromCtx(ctx fh.Ctx) string {
+	if v, ok := ctx.Locals("request_id").(string); ok && v != "" {
+		return v
+	}
+	if v := ctx.Get("X-Request-ID"); v != "" {
+		return v
+	}
+	return ""
+}
+
 func asciiEqualBytesString(b []byte, s string) bool {
 	if len(b) != len(s) {
 		return false
@@ -838,6 +864,7 @@ const (
 	logLatency
 	logIP
 	logError
+	logRequestID
 )
 
 type logToken struct {
@@ -876,8 +903,10 @@ func parseLogFormat(format string) []logToken {
 				tokens = append(tokens, logToken{typ: logLatency})
 			case "ip":
 				tokens = append(tokens, logToken{typ: logIP})
-			case "error":
-				tokens = append(tokens, logToken{typ: logError})
+		case "error":
+			tokens = append(tokens, logToken{typ: logError})
+		case "request_id":
+			tokens = append(tokens, logToken{typ: logRequestID})
 			default:
 				tokens = append(tokens, logToken{typ: logText, text: format[i : i+end+1]})
 			}

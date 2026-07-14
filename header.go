@@ -159,8 +159,20 @@ func (h *RequestHeader) Init() {
 }
 
 func (h *RequestHeader) SetCookie(c *DefaultCtx, name, value string) {
-	c.Header.headers[0] = Header{Key: []byte("Cookie"), Value: []byte(name + "=" + value)}
-	c.Header.hcount = 1
+	cookieVal := name + "=" + value
+	for i := 0; i < h.hcount; i++ {
+		if bytesEqualFold(h.headers[i].Key, HeaderCookieBytes) {
+			h.headers[i].Value = []byte(cookieVal)
+			return
+		}
+	}
+	if h.hcount < len(h.headers) {
+		h.headers[h.hcount] = Header{Key: HeaderCookieBytes, Value: []byte(cookieVal)}
+		h.hcount++
+	} else {
+		h.headers = append(h.headers, Header{Key: HeaderCookieBytes, Value: []byte(cookieVal)})
+		h.hcount++
+	}
 }
 
 // Peek returns the value of a header by name (case-insensitive).

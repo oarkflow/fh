@@ -13,15 +13,26 @@ type ResponseConn struct {
 	statusCode  int
 	headers     []Header
 	prefix      []byte // buffered data from the request
+	err         error  // sticky write error
 }
 
 // Write writes body data to the connection. If WriteHeader has not been called,
 // it sends a 200 OK response first.
 func (rc *ResponseConn) Write(p []byte) (int, error) {
+	if rc.err != nil {
+		return 0, rc.err
+	}
 	if !rc.wroteHeader {
 		rc.WriteHeader(StatusOK)
 	}
-	return rc.Conn.Write(p)
+	if rc.err != nil {
+		return 0, rc.err
+	}
+	n, err := rc.Conn.Write(p)
+	if err != nil {
+		rc.err = err
+	}
+	return n, err
 }
 
 // WriteHeader sends the HTTP status line and any buffered headers.
@@ -44,7 +55,10 @@ func (rc *ResponseConn) WriteHeader(statusCode int) {
 		b = append(b, "\r\n"...)
 	}
 	b = append(b, "\r\n"...)
-	rc.Conn.Write(b)
+	_, err := rc.Conn.Write(b)
+	if err != nil {
+		rc.err = err
+	}
 	rc.wroteHeader = true
 }
 

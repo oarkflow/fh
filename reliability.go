@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"runtime/debug"
 	"syscall"
 	"time"
 )
@@ -865,7 +866,7 @@ func (q *DurableQueue) worker() {
 	defer q.wg.Done()
 	defer func() {
 		if r := recover(); r != nil {
-			// Worker goroutine recovered from panic
+			fmt.Fprintf(os.Stderr, "fh: queue worker panic: %v\n%s\n", r, debug.Stack())
 		}
 	}()
 	ticker := time.NewTicker(q.cfg.PollInterval)

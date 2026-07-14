@@ -108,7 +108,14 @@ func (c *DefaultCtx) SendFile(filename string) error {
 	if err != nil {
 		return err
 	}
-	dir, base := filepath.Dir(abs), filepath.Base(abs)
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return err
+	}
+	if resolved != abs {
+		return NotFound("File not found")
+	}
+	dir, base := filepath.Dir(resolved), filepath.Base(resolved)
 	s := staticFS{fs: os.DirFS(dir), cfg: DefaultStaticConfig}
 	return s.writeFile(c, base, info)
 }
@@ -121,7 +128,10 @@ func (c *DefaultCtx) File(filename string) error { return c.SendFile(filename) }
 func (c *DefaultCtx) Download(filename string, downloadName ...string) error {
 	name := filepath.Base(filename)
 	if len(downloadName) > 0 && downloadName[0] != "" {
-		name = downloadName[0]
+		name = filepath.Base(downloadName[0])
+		if name == "." || name == string(filepath.Separator) {
+			name = "download"
+		}
 	}
 	c.Attachment(name)
 	return c.SendFile(filename)

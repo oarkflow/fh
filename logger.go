@@ -106,3 +106,21 @@ func (a *App) Logger() Logger {
 	}
 	return a.logger
 }
+
+// NewNoopLogger returns a Logger that silently discards all log messages.
+//
+// It is useful for benchmarks, tests, embedded applications, or deployments
+// where fh logging is handled elsewhere.
+func NewNoopLogger() Logger {
+	return noopLoggerInstance
+}
+
+var noopLoggerInstance Logger = noopLogger{}
+
+type noopLogger struct{}
+
+func (noopLogger) Printf(string, ...any) {}
+func (noopLogger) Info(string, ...any)   {}
+func (noopLogger) Warn(string, ...any)   {}
+func (noopLogger) Error(string, ...any)  {}
+func (noopLogger) Debug(string, ...any)  {}

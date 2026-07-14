@@ -167,7 +167,6 @@ func TenantExtractor(sources ...Extractor[string]) Extractor[string] {
 		sources = []Extractor[string]{
 			PrincipalTenantExtractor(),
 			LocalString(tenantLocalKey),
-			HeaderString("X-Tenant-ID"),
 		}
 	}
 	return FirstString(sources...)

@@ -426,6 +426,25 @@ func (c *DefaultCtx) SafeErrorResponse(err error) error {
 	}
 	he, p, stack := classifyError(err, opts)
 	decorateProblem(c, &p, he, err, opts, stack)
+	if c.server != nil && c.server.logger != nil && len(stack) > 0 {
+		c.server.logger.Error("request error",
+			"request_id", errorRequestIDFromCtx(c),
+			"method", c.Method(),
+			"path", c.Path(),
+			"remote_ip", c.IP(),
+			"status", he.Status,
+			"code", he.Code,
+			"error", err,
+			"stack", string(stack),
+		)
+	}
+	if c.server != nil && c.server.logger != nil {
+		if he.Status >= 500 {
+			c.server.logger.Error("server error", "request_id", errorRequestIDFromCtx(c), "method", c.Method(), "path", c.Path(), "status", he.Status, "error", err)
+		} else if he.Status >= 400 {
+			c.server.logger.Warn("client error", "request_id", errorRequestIDFromCtx(c), "method", c.Method(), "path", c.Path(), "status", he.Status, "error", err)
+		}
+	}
 	if c.server != nil {
 		c.server.recordError(he.Code)
 	}
@@ -551,7 +570,7 @@ func severityForStatus(status int) ErrorSeverity {
 
 // RedactSecrets removes common secret-bearing values from debug strings.
 func RedactSecrets(s string) string {
-	keys := []string{"password", "passwd", "pwd", "secret", "token", "authorization", "api_key", "apikey", "access_token", "refresh_token", "cookie", "set-cookie"}
+	keys := []string{"password", "passwd", "pwd", "secret", "token", "authorization", "api_key", "apikey", "access_token", "refresh_token", "cookie", "set-cookie", "jwt", "bearer", "credential", "private_key", "client_secret", "ssn", "card_number", "cvv", "otp", "mfa_code", "auth_token", "session_id"}
 	lower := strings.ToLower(s)
 	out := s
 	for _, key := range keys {

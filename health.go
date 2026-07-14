@@ -66,6 +66,9 @@ func (a *App) HealthStatus(ctx context.Context) (bool, []HealthCheckResult) {
 			res.Status = "error"
 			res.Error = err.Error()
 			ready = false
+			if a.logger != nil {
+				a.logger.Error("health check failed", "check", chk.Name, "error", err, "latency", res.Latency)
+			}
 		}
 		results = append(results, res)
 	}

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/textproto"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -1011,6 +1012,9 @@ func (c *DefaultCtx) Send(b []byte) error { return c.SendBytes(b) }
 // implement JSONAppender are encoded directly into the response buffer, avoiding
 // a marshal allocation and a second response-copy on the normal hot path.
 func (c *DefaultCtx) JSON(v any) error {
+	if c.contentType != nil && !isJSONContentTypeBytes(c.contentType) && c.server != nil && c.server.logger != nil {
+		c.server.logger.Debug("JSON() overriding content-type", "previous", string(c.contentType), "path", c.Path())
+	}
 	c.contentType = jsonCT
 	if app, ok := v.(JSONAppender); ok {
 		return c.writeJSONAppender(app)
@@ -1132,7 +1136,11 @@ func (c *DefaultCtx) RedirectBack(fallback string, code ...int) error {
 		if ref, err := url.Parse(raw); err == nil {
 			sameOrigin := !ref.IsAbs() || strings.EqualFold(ref.Host, b2s(c.Header.Host))
 			if sameOrigin && ref.User == nil && ref.Path != "" {
-				location = ref.RequestURI()
+				cleaned := path.Clean(ref.Path)
+				if !strings.HasPrefix(cleaned, "//") && !strings.Contains(cleaned, "\\") {
+					ref.Path = cleaned
+					location = ref.RequestURI()
+				}
 			}
 		}
 	}
