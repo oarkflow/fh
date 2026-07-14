@@ -84,17 +84,17 @@ func NewZstdEncoder(level zstd.EncoderLevel) *ZstdEncoder {
 func (e *ZstdEncoder) Encoding() string { return EncodingZstd }
 
 func (e *ZstdEncoder) Encode(dst *bytes.Buffer, src []byte) error {
-	var encoder *zstd.Encoder
 	e.once.Do(func() {
-		enc, err := zstd.NewWriter(io.Discard,
-			zstd.WithEncoderLevel(e.level),
-			zstd.WithEncoderConcurrency(1),
-		)
-		if err != nil {
-			panic("compress: zstd encoder init failed: " + err.Error())
-		}
-		encoder = enc
+		// Each pooled encoder is independent so concurrent Encode calls never
+		// share one *zstd.Encoder (which is not safe for concurrent use).
 		e.pool.New = func() any {
+			enc, err := zstd.NewWriter(io.Discard,
+				zstd.WithEncoderLevel(e.level),
+				zstd.WithEncoderConcurrency(1),
+			)
+			if err != nil {
+				panic("compress: zstd encoder init failed: " + err.Error())
+			}
 			return enc
 		}
 	})

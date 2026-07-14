@@ -270,7 +270,16 @@ func validOrigin(origin string) bool {
 type MemoryOriginStore struct {
 	wildcard bool
 	exact    map[string]struct{}
-	suffixes []string
+	suffixes []wildcardOrigin
+}
+
+// wildcardOrigin matches a "<scheme>://*.<domain>" pattern. An origin matches
+// when it uses the same scheme and its host ends with hostSuffix (the leading
+// "." of hostSuffix guarantees at least one subdomain label, so the bare
+// registrable domain never matches its own wildcard).
+type wildcardOrigin struct {
+	scheme     string // "http://" or "https://"
+	hostSuffix string // e.g. ".example.com"
 }
 
 func NewMemoryOriginStore(origins ...string) *MemoryOriginStore {
@@ -291,12 +300,12 @@ func NewMemoryOriginStore(origins ...string) *MemoryOriginStore {
 
 		// Allows patterns like:
 		// https://*.example.com
-		if strings.Contains(origin, "*.") {
-			prefix := origin[:strings.Index(origin, "*.")]
-			suffix := origin[strings.Index(origin, "*.")+1:]
+		if i := strings.Index(origin, "*."); i >= 0 {
+			scheme := origin[:i]
+			hostSuffix := origin[i+1:] // keep the leading "." — ".example.com"
 
-			if prefix == "http://" || prefix == "https://" {
-				s.suffixes = append(s.suffixes, prefix+suffix)
+			if (scheme == "http://" || scheme == "https://") && len(hostSuffix) > 1 {
+				s.suffixes = append(s.suffixes, wildcardOrigin{scheme: scheme, hostSuffix: hostSuffix})
 			}
 
 			continue
@@ -317,8 +326,20 @@ func (s *MemoryOriginStore) Allowed(origin string) bool {
 		return true
 	}
 
-	for _, suffix := range s.suffixes {
-		if strings.HasSuffix(origin, suffix) && origin != suffix {
+	for _, w := range s.suffixes {
+		if !strings.HasPrefix(origin, w.scheme) {
+			continue
+		}
+		host := origin[len(w.scheme):]
+		// Ignore any port so https://api.example.com:8443 still matches
+		// https://*.example.com. IPv6 literals are bracketed, so a ':' after
+		// a ']' (or with no bracket at all) is the port separator.
+		if i := strings.LastIndexByte(host, ':'); i >= 0 && !strings.Contains(host[i:], "]") {
+			host = host[:i]
+		}
+		// Require a real label before the suffix: len(host) > len(hostSuffix)
+		// rejects the bare ".example.com" while accepting "api.example.com".
+		if len(host) > len(w.hostSuffix) && strings.HasSuffix(host, w.hostSuffix) {
 			return true
 		}
 	}
