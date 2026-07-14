@@ -96,8 +96,25 @@ func New(root string, config ...Config) fh.HandlerFunc {
 			}
 		}
 		if cfg.Download {
-			c.Set("Content-Disposition", "attachment; filename=\""+filepath.Base(full)+"\"")
+			c.Set("Content-Disposition", "attachment; filename=\""+sanitizeFilename(filepath.Base(full))+"\"")
 		}
 		return c.SendBytes(body)
 	}
+}
+
+// sanitizeFilename strips characters from a filename that could break
+// Content-Disposition header quoting or enable header injection.
+func sanitizeFilename(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch c {
+		case '"', '\r', '\n', '\\', '/':
+			b.WriteByte('_')
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }

@@ -26,7 +26,7 @@ func New(cfg Config) fh.HandlerFunc {
 	}
 	if cfg.Reject == nil {
 		cfg.Reject = func(c fh.Ctx, host string) error {
-			return c.Status(fh.StatusMisdirectedRequest).JSON(fh.Map{"error": "host_not_allowed", "host": host})
+			return c.Status(fh.StatusMisdirectedRequest).JSON(fh.Map{"error": "host_not_allowed"})
 		}
 	}
 	return func(c fh.Ctx) error {

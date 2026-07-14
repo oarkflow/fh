@@ -23,11 +23,12 @@ func TestJWTVerifyHS256(t *testing.T) {
 }
 
 func TestJWTSignAndVerify(t *testing.T) {
-	tok, err := Sign(map[string]any{"sub": "u1", "tenant_id": "t1", "roles": []string{"admin"}, "exp": 4102444800}, []byte("secret"), "HS256")
+	secret := []byte("a-secure-secret-that-is-at-least-32-bytes!")
+	tok, err := Sign(map[string]any{"sub": "u1", "tenant_id": "t1", "roles": []string{"admin"}, "exp": 4102444800}, secret, "HS256")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, cl, err := Verify(nil, tok, Config{Secret: []byte("secret")}, nil)
+	_, cl, err := Verify(nil, tok, Config{Secret: secret}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

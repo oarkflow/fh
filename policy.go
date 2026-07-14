@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -227,7 +228,7 @@ type SecureEnvelope struct {
 }
 
 func SealEnvelope(policy DataPolicy, b []byte) (SecureEnvelope, error) {
-	env := SecureEnvelope{Version: 1, KeyID: policy.KeyID, BodyHash: hashBody(b), CreatedAt: time.Now().UTC()}
+	env := SecureEnvelope{Version: 2, KeyID: policy.KeyID, BodyHash: hashBody(b), CreatedAt: time.Now().UTC()}
 	if policy.EncryptAtRest {
 		block, err := aes.NewCipher(policy.Key)
 		if err != nil {
@@ -242,15 +243,29 @@ func SealEnvelope(policy DataPolicy, b []byte) (SecureEnvelope, error) {
 			return env, err
 		}
 		env.Nonce = nonce
-		env.Ciphertext = gcm.Seal(nil, nonce, b, nil)
+		aad := envelopeAAD(env.Version, env.KeyID)
+		env.Ciphertext = gcm.Seal(nil, nonce, b, aad)
 		return env, nil
 	}
 	env.Plaintext = append([]byte(nil), b...)
 	return env, nil
 }
+
+// ErrEnvelopeHashMismatch is returned when the BodyHash in a SecureEnvelope
+// does not match the decrypted plaintext, indicating possible tampering.
+var ErrEnvelopeHashMismatch = errors.New("fh: envelope body hash mismatch")
+
+// ErrEnvelopeAADMismatch is returned when AAD verification fails during
+// envelope decryption, indicating the KeyID or Version was tampered with.
+var ErrEnvelopeAADMismatch = errors.New("fh: envelope AAD verification failed")
+
 func OpenEnvelope(policy DataPolicy, env SecureEnvelope) ([]byte, error) {
 	if len(env.Ciphertext) == 0 {
-		return append([]byte(nil), env.Plaintext...), nil
+		plaintext := append([]byte(nil), env.Plaintext...)
+		if env.BodyHash != "" && hashBody(plaintext) != env.BodyHash {
+			return nil, ErrEnvelopeHashMismatch
+		}
+		return plaintext, nil
 	}
 	block, err := aes.NewCipher(policy.Key)
 	if err != nil {
@@ -260,7 +275,28 @@ func OpenEnvelope(policy DataPolicy, env SecureEnvelope) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return gcm.Open(nil, env.Nonce, env.Ciphertext, nil)
+	var aad []byte
+	if env.Version >= 2 {
+		aad = envelopeAAD(env.Version, env.KeyID)
+	}
+	plaintext, err := gcm.Open(nil, env.Nonce, env.Ciphertext, aad)
+	if err != nil {
+		if env.Version >= 2 {
+			return nil, ErrEnvelopeAADMismatch
+		}
+		return nil, err
+	}
+	if env.BodyHash != "" && hashBody(plaintext) != env.BodyHash {
+		return nil, ErrEnvelopeHashMismatch
+	}
+	return plaintext, nil
+}
+
+// envelopeAAD builds additional authenticated data from envelope metadata.
+// This binds the ciphertext to its key ID and version so an attacker cannot
+// swap ciphertext between different keys or envelope versions.
+func envelopeAAD(version int, keyID string) []byte {
+	return []byte(fmt.Sprintf("v%d:%s", version, keyID))
 }
 
 // Maintenance.

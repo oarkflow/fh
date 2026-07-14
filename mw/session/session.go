@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -157,6 +158,11 @@ type SessionManager struct {
 	path       string
 	domain     string
 	locks      [64]sync.Mutex
+	// LockTimeout is the maximum duration Begin() will wait to acquire the
+	// per-shard lock before returning an error. Zero means wait indefinitely.
+	// Set this when the session store is remote (database, Redis) to prevent
+	// goroutine pile-up under slow backends.
+	LockTimeout time.Duration
 }
 
 // SessionOption configures a SessionManager.
@@ -202,6 +208,12 @@ func SessionPath(p string) SessionOption {
 }
 
 func SessionDomain(domain string) SessionOption { return func(m *SessionManager) { m.domain = domain } }
+
+// SessionLockTimeout limits how long Begin() waits for the per-shard lock.
+// Prevents goroutine pile-up when the session store is remote and slow.
+func SessionLockTimeout(d time.Duration) SessionOption {
+	return func(m *SessionManager) { m.LockTimeout = d }
+}
 
 func NewSessionManager(store SessionStore, opts ...SessionOption) *SessionManager {
 	if store == nil {
@@ -275,7 +287,17 @@ func (m *SessionManager) Begin(ctx fh.Ctx) (*Session, func(fh.Ctx) error, error)
 	}
 	hash := sha256.Sum256([]byte(lockKey))
 	lock := &m.locks[int(hash[0])%len(m.locks)]
-	lock.Lock()
+	if m.LockTimeout > 0 {
+		deadline := time.Now().Add(m.LockTimeout)
+		for !lock.TryLock() {
+			if time.Now().After(deadline) {
+				return nil, nil, errors.New("fh: session lock timeout")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	} else {
+		lock.Lock()
+	}
 	session, err := m.Load(ctx)
 	if err != nil {
 		lock.Unlock()
@@ -456,17 +478,20 @@ func (m *SessionManager) verifyToken(token string) (string, bool) {
 	if base64.RawURLEncoding.EncodeToString(sig) != encodedSig {
 		return "", false
 	}
-	valid := 0
+	// Iterate all secrets (for key rotation support) but use constant-time
+	// comparison for every candidate so the number of valid secrets and their
+	// positions never leak through timing.
+	best := 0
 	for _, secret := range m.secrets {
 		mac := hmac.New(sha256.New, secret)
 		mac.Write([]byte(m.cookieName))
 		mac.Write([]byte{0})
 		mac.Write([]byte(payload))
-		if hmac.Equal(sig, mac.Sum(nil)) {
-			valid = 1
+		if subtle.ConstantTimeCompare(sig, mac.Sum(nil)) == 1 {
+			best = 1
 		}
 	}
-	return payload[3:], valid == 1
+	return payload[3:], best == 1
 }
 
 func validSessionID(id string) bool {

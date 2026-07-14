@@ -26,7 +26,7 @@ func Enable(app *fh.App, cfg Config) *fh.App {
 	}
 	p := trim(cfg.Prefix)
 	auth := func(c fh.Ctx) error {
-		if cfg.Auth != nil && !cfg.Auth(c) {
+		if cfg.Auth == nil || !cfg.Auth(c) {
 			return c.Status(fh.StatusUnauthorized).JSON(fh.Map{"error": "pprof_unauthorized"})
 		}
 		return c.Next()

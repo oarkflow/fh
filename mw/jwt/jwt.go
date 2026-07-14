@@ -209,8 +209,8 @@ func Verify(c fh.Ctx, token string, cfg Config, allowed map[string]bool) (map[st
 // not implement authorization; put roles/scopes/permissions in claims and let
 // fh.Require* or contrib/mw/authz make access decisions.
 func Sign(claims map[string]any, secret []byte, alg string) (string, error) {
-	if len(secret) == 0 {
-		return "", errors.New("missing signing key")
+	if len(secret) < 32 {
+		return "", errors.New("jwt: signing secret must be at least 32 bytes")
 	}
 	if alg == "" {
 		alg = "HS256"

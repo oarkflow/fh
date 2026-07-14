@@ -21,7 +21,14 @@ type Config struct {
 	CookieSameSite fh.SameSite
 	CookieMaxAge   time.Duration
 	TrustedOrigins []string
-	Next           func(fh.Ctx) bool
+	// RequireOriginHeader rejects state-changing requests that carry neither
+	// an Origin nor a Referer header. This prevents CSRF from clients that
+	// strip these headers (some privacy browsers, HTTPS-to-HTTP navigations)
+	// and forces the origin check as a second factor alongside the token.
+	// Set to false when the application must accept state-changing requests
+	// from non-browser clients (curl, mobile apps) that do not send Origin.
+	RequireOriginHeader bool
+	Next                func(fh.Ctx) bool
 }
 
 var DefaultConfig = Config{
@@ -55,7 +62,7 @@ func New(config ...Config) fh.HandlerFunc {
 		if safeMethod(c.Method()) {
 			return c.Next()
 		}
-		if !validOrigin(c, trusted) {
+		if !validOrigin(c, trusted, cfg.RequireOriginHeader) {
 			return csrfError("Request origin is not allowed")
 		}
 		provided := c.Get(cfg.HeaderName)
@@ -85,7 +92,7 @@ func merge(dst *Config, src Config) {
 	if src.TrustedOrigins != nil {
 		dst.TrustedOrigins = src.TrustedOrigins
 	}
-	dst.CookieSecure, dst.CookieSameSite, dst.Next = src.CookieSecure, src.CookieSameSite, src.Next
+	dst.CookieSecure, dst.CookieSameSite, dst.RequireOriginHeader, dst.Next = src.CookieSecure, src.CookieSameSite, src.RequireOriginHeader, src.Next
 }
 
 func safeMethod(method string) bool {
@@ -102,14 +109,14 @@ func csrfError(message string) *fh.HTTPError {
 	return fh.NewHTTPError(fh.StatusForbidden, "CSRF_INVALID", message)
 }
 
-func validOrigin(c fh.Ctx, trusted map[string]struct{}) bool {
+func validOrigin(c fh.Ctx, trusted map[string]struct{}, requireOrigin bool) bool {
 	raw := c.Get("Origin")
 	if raw == "" {
 		raw = c.Get("Referer")
 	}
 	if raw == "" {
-		return true
-	} // Non-browser clients; the token remains required.
+		return !requireOrigin
+	}
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return false

@@ -79,7 +79,7 @@ func defaultConfig() Config {
 	return Config{
 		Header:            DefaultHeader,
 		LocalKey:          DefaultLocalKey,
-		TrustIncoming:     true,
+		TrustIncoming:     false,
 		MaxIncomingLength: defaultMaxIncomingLen,
 		Generator:         NewAtomicGenerator(),
 		Validator:         DefaultValidator,

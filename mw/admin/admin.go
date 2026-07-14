@@ -13,9 +13,13 @@ import (
 type AuthFunc func(fh.Ctx) bool
 type AuditFunc func(ctx fh.Ctx, action string, allowed bool)
 type Config struct {
-	Prefix        string
-	Auth          AuthFunc
-	Timeout       time.Duration
+	Prefix string
+	Auth   AuthFunc
+	Timeout time.Duration
+	// AllowInsecure disables all authentication and IP allowlisting for admin
+	// endpoints. This exposes runtime introspection (goroutines, routes, queue
+	// internals) to any client that can reach the server. NEVER enable this in
+	// production or on a network reachable from untrusted clients.
 	AllowInsecure bool
 	AllowedIPs    []string
 	Audit         AuditFunc
@@ -30,6 +34,9 @@ func Enable(app *fh.App, cfg Config) *fh.App {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 5 * time.Second
+	}
+	if cfg.AllowInsecure && cfg.Auth == nil && len(cfg.AllowedIPs) == 0 {
+		app.Logger().Warn("fh: admin.Enable called with AllowInsecure=true and no Auth or AllowedIPs — admin endpoints are fully open; restrict access in production")
 	}
 	mw := func(c fh.Ctx) error {
 		allowed := cfg.AllowInsecure || cfg.Auth != nil

@@ -412,6 +412,19 @@ func buildApp(cfg Config) *App {
 		logger = newSlogLogger()
 	}
 
+	prod := cfg.Mode == ModeProduction || cfg.Mode == ModeStrict || cfg.Mode == ModeEnterprise || cfg.Compliance.Enabled
+	if prod {
+		if cfg.ReadTimeout == 0 {
+			logger.Warn("fh: ReadTimeout is 0 in production mode — server is vulnerable to slowloris attacks; set Config.ReadTimeout")
+		}
+		if cfg.WriteTimeout == 0 {
+			logger.Warn("fh: WriteTimeout is 0 in production mode — responses may never complete; set Config.WriteTimeout")
+		}
+		if cfg.ReadHeaderTimeout == 0 {
+			logger.Warn("fh: ReadHeaderTimeout is 0 in production mode — header reads are unbounded; set Config.ReadHeaderTimeout")
+		}
+	}
+
 	app := &App{
 		cfg:        cfg,
 		router:     newRouter(),
