@@ -6,7 +6,7 @@
 go get github.com/oarkflow/fh
 ```
 
-**Requirements:** Go 1.26.2 or later
+**Requirements:** Go 1.23.2 or later
 
 ## Quick Start
 

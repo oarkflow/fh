@@ -1,6 +1,6 @@
 # Middleware
 
-fh includes 34 built-in middleware packages and 2 contributed middleware packages. All middleware follows the standard handler signature:
+fh ships 65+ built-in middleware packages under `mw/`. This page documents the most commonly used ones in depth; every package (including those not detailed below) has its own `README.md` in its `mw/<package>/` directory — see the [full index](#full-package-index). All middleware follows the standard handler signature:
 
 ```go
 func(c *fh.Ctx) error
@@ -642,28 +642,6 @@ app.Post("/process", handler)
 
 ---
 
-## Contributed Middleware
-
-Located in `contrib/mw/`:
-
-### authorizer
-
-Advanced authorization middleware with custom logic.
-
-```go
-import "github.com/oarkflow/fh/contrib/mw/authorizer"
-```
-
-### authz
-
-Authorization using BCL (Business Constraint Language) policy rules.
-
-```go
-import "github.com/oarkflow/fh/contrib/mw/authz"
-```
-
----
-
 ## Recommended Middleware Order (Production Baseline)
 
 ```go
@@ -684,3 +662,49 @@ app.Use(
     compress.New(),          // 14. Compression
 )
 ```
+
+---
+
+## Full Package Index
+
+Packages detailed above: `actor`, `apikey`, `apiversion`, `basicauth`, `bodylimit`, `cache`, `circuitbreaker`, `compress`, `contract`, `correlationid`, `cors`, `csrf`, `earlydata`, `idempotency`, `ipwhitelist`, `lifecycle`, `logger`, `metrics`, `policy`, `proxy`, `ratelimiter`, `recover`, `reliability`, `replay`, `requestid`, `rewrite`, `security`, `session`, `signature`, `skip`, `static`, `timeout`, `workflow`.
+
+Remaining packages — see `mw/<package>/README.md` for full usage:
+
+| Package | Description |
+|---|---|
+| `mw/acceptquery` | Advertises/enforces RFC 10008 Accept-Query formats for HTTP QUERY |
+| `mw/adaptiveconcurrency` | Auto-adjusts in-flight request limit based on latency/errors |
+| `mw/admin` | Protected ops endpoints: runtime info, routes, queue stats/retry |
+| `mw/audit` | Records structured audit events for compliance/security review |
+| `mw/backpressure` | Rejects/slows admission under queue or worker saturation |
+| `mw/bulkhead` | Limits concurrent execution globally or per key |
+| `mw/coalesce` | Collapses concurrent identical requests into a single upstream call |
+| `mw/compliance` | Enforces route security metadata and attaches data policy |
+| `mw/conditional` | Handles If-None-Match / If-Match / If-Modified-Since preconditions |
+| `mw/contentdigest` | Verifies/adds RFC 9530 Content-Digest header |
+| `mw/decompress` | Bounded gzip request decompression with expansion-ratio limits |
+| `mw/etag` | Adds/validates ETag headers |
+| `mw/hostguard` | Rejects requests with unexpected Host headers |
+| `mw/jwt` | Verifies signed JWTs, stores claims, sets `fh.Principal` |
+| `mw/maintenance` | Runtime maintenance-mode switch for controlled downtime |
+| `mw/mtls` | Validates verified client cert chains for high-trust routes |
+| `mw/pprof` | Protected Go profiling endpoints |
+| `mw/privacy` | Privacy-aware telemetry filtering for logs/traces/metrics/audit |
+| `mw/realip` | Normalizes client IP from trusted proxy headers |
+| `mw/requestdedup` | Prevents duplicate processing of identical requests |
+| `mw/requesthash` | Computes/exposes request body hash for idempotency/audit |
+| `mw/retrybudget` | Limits retry traffic per key to prevent outage amplification |
+| `mw/scheduler` | Priority-based weighted admission with concurrency limits |
+| `mw/securetransport` | Application-layer encrypted Fetch transport for WASM clients |
+| `mw/servertiming` | Emits `Server-Timing` response headers |
+| `mw/slidingwindow` | Sliding-window rate limiting |
+| `mw/slowlog` | Logs requests exceeding a latency threshold |
+| `mw/smartcache` | Adaptive response caching |
+| `mw/tenant` | Extracts tenant identity from header/host/path/JWT |
+| `mw/tenantlimit` | Limits concurrent requests per tenant |
+| `mw/tracing` | Creates/propagates trace IDs and span metadata |
+| `mw/validate` | Request validation |
+| `mw/webhook` | Verifies webhook signatures with replay protection |
+
+See [`mw/README.md`](../mw/README.md) for the package overview.

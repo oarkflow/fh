@@ -76,9 +76,9 @@ The implementation includes unit coverage for JSON decoding, retries, middleware
 go test -run 'TestHTTPClient' .
 ```
 
-## Continued Production Features
+## Additional Production Features
 
-The root `fh` package HTTP client now also includes:
+The root `fh` package HTTP client also includes:
 
 - replayable JSON/form/multipart bodies for safe retry behavior
 - status-error middleware through `ClientRequireStatus`

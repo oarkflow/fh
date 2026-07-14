@@ -58,21 +58,10 @@ app.Post("/echo", func(c *fh.Ctx) error {
 
 `JSON(v)` still supports the configured JSON engine for compatibility. For stable DTOs that need the highest throughput, implement `AppendJSON(dst []byte) ([]byte, error)` on the response type.
 
-## Validation run used for this patch
-
-The sandbox only has Go 1.23.2 and cannot download the Go 1.26.2 toolchain declared by the project, so validation was run by temporarily lowering `go.mod` to Go 1.23.2 and restoring it afterward:
+## Benchmarking
 
 ```bash
-GOTOOLCHAIN=local go test -run '^$' .
-GOTOOLCHAIN=local go test -run '^$' ./mw/... ./pkg/...
-GOTOOLCHAIN=local go test -run '^$' -bench 'BenchmarkFH_(HelloWorld|RouteWithParams)$' -benchmem .
+go test -bench=. -benchmem ./...
 ```
 
-Observed in-memory pipe benchmarks in the sandbox:
-
-```text
-BenchmarkFH_HelloWorld-56          231103    4901 ns/op    0 B/op    0 allocs/op
-BenchmarkFH_RouteWithParams-56     221042    5203 ns/op    0 B/op    0 allocs/op
-```
-
-These pipe benchmarks are not a replacement for TCP `bombardier` results on your target machine, but they verify the package compiles and keeps the hot route path allocation-free.
+See [`benchmarks/`](../benchmarks/README.md) for cross-framework comparisons against Fiber and fasthttp.

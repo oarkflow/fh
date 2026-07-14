@@ -256,6 +256,34 @@ app.EnableRouteList("/_fh/routes")
 
 ---
 
+## Gateway & Reverse Proxy
+
+```go
+app.Get("/api/*", proxy.New(proxy.Config{
+    Target: "http://backend:9000",
+}))
+
+app.Use(proxy.Gateway(map[string]proxy.Config{
+    "/users": {Target: "http://users-svc:9001"},
+    "/orders": {Target: "http://orders-svc:9002"},
+}))
+```
+
+`mw/proxy` supports path strip/add rewrite, header/director rewrite, and per-upstream timeouts. Combine with `mw/circuitbreaker` for upstream fault isolation.
+
+## API Versioning
+
+```go
+app.Use(apiversion.New(apiversion.Config{
+    Header:     "Accept-Version",
+    Default:    "2026-06-01",
+    Supported:  []string{"2026-01-01", "2026-06-01"},
+    Deprecated: map[string]string{"2026-01-01": "2026-12-31"},
+}))
+```
+
+`mw/apiversion` sets `api_version` in locals and emits `Deprecation` and `Sunset` headers for deprecated versions.
+
 ## Pluggable JSON Engine
 
 ```go
