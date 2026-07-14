@@ -71,6 +71,7 @@ func refreshDateCache() {
 type Ctx interface {
 	Next() error
 	Method() string
+	MethodBytes() []byte
 	OriginalURL() string
 	Path() string
 	Rewrite(target string) error

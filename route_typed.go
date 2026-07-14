@@ -85,6 +85,9 @@ func (a *App) addTyped(method, path string, handler any, middleware ...HandlerFu
 		if err := bindTaggedFields(c, reqPtr.Elem()); err != nil {
 			return c.Status(StatusBadRequest).JSON(StructuredError{Error: "invalid_request", Message: err.Error(), RequestID: requestIDFromCtx(c)})
 		}
+		if err := ValidateStruct(reqPtr.Interface()); err != nil {
+			return typedValidationError(c, err)
+		}
 		reqVal := reqPtr.Elem()
 		if v, ok := reqPtr.Interface().(Validator); ok {
 			if err := v.Validate(); err != nil {
@@ -225,7 +228,13 @@ func niceTypeName(t reflect.Type) string {
 	return t.Name()
 }
 func typedValidationError(c Ctx, err error) error {
-	return c.Status(StatusUnprocessableEntity).JSON(StructuredError{Error: "validation_failed", Message: err.Error(), RequestID: requestIDFromCtx(c)})
+	se := StructuredError{Error: "validation_failed", Message: err.Error(), RequestID: requestIDFromCtx(c)}
+	if ve, ok := err.(*ValidationError); ok {
+		se.Fields = ve.Fields
+	} else if ve, ok := err.(ValidationErrors); ok {
+		se.Fields = []FieldError(ve)
+	}
+	return c.Status(StatusUnprocessableEntity).JSON(se)
 }
 func requestIDFromCtx(c Ctx) string {
 	if v := c.Get(HeaderRequestID); v != "" {
