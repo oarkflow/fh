@@ -21,3 +21,26 @@ func TestLoadJSONAppConfig(t *testing.T) {
 		t.Fatalf("bad reliability %+v", ac.Reliability)
 	}
 }
+
+func TestSecureByDefaultConfigAndEnv(t *testing.T) {
+	cfg, err := LoadJSON(strings.NewReader(`{"server":{"secure_by_default":true}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ac, err := cfg.AppConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ac.SecureByDefault {
+		t.Fatal("secure_by_default was not mapped to fh.Config")
+	}
+
+	t.Setenv("FH_SECURE_BY_DEFAULT", "true")
+	cfg, err = ApplyEnv(Config{}, "FH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Server.SecureByDefault {
+		t.Fatal("FH_SECURE_BY_DEFAULT was not applied")
+	}
+}

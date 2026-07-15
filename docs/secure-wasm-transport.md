@@ -74,7 +74,7 @@ go run ./examples/secure_wasm -generate-key
 Store the returned base64url value in a secret manager or KMS-protected configuration:
 
 ```bash
-export FH_SECURE_SERVER_KEY='<base64url-x25519-private-key>'
+export FH_SECURE_SERVER_KEY_FILE='/run/secrets/fh-transport-key'
 ```
 
 Production initialization rejects an absent server key. `AllowEphemeralServerKey` exists only for tests/local development; it invalidates pins and sessions on restart.
@@ -82,7 +82,14 @@ Production initialization rejects an absent server key. `AllowEphemeralServerKey
 ## Server installation
 
 ```go
-serverKey, err := securetransport.DecodeServerPrivateKey(os.Getenv("FH_SECURE_SERVER_KEY"))
+privateValue, err := config.RequireSecretString(
+    "FH_SECURE_SERVER_KEY",      // legacy direct-value fallback
+    "FH_SECURE_SERVER_KEY_FILE", // preferred mounted secret
+)
+if err != nil {
+    log.Fatal(err)
+}
+serverKey, err := securetransport.DecodeServerPrivateKey(privateValue)
 if err != nil {
     log.Fatal(err)
 }

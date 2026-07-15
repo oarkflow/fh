@@ -118,6 +118,34 @@ func TestWriteAllHandlesShortWrites(t *testing.T) {
 	}
 }
 
+func TestSecureByDefaultResponseHeaders(t *testing.T) {
+	app := New(WithSecureByDefault(true))
+	c := &DefaultCtx{server: app}
+	c.reset()
+	c.handlers = append(c.handlers, app.middleware...)
+	c.handlers = append(c.handlers, func(c Ctx) error {
+		// Application policy remains able to replace a baseline default.
+		c.Set("Cross-Origin-Resource-Policy", "same-site")
+		return nil
+	})
+	if err := c.Next(); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{
+		"X-Content-Type-Options":       "nosniff",
+		"X-Frame-Options":              "DENY",
+		"Referrer-Policy":              "no-referrer",
+		"Permissions-Policy":           "geolocation=(), microphone=(), camera=(), payment=(), usb=()",
+		"Strict-Transport-Security":    "max-age=31536000; includeSubDomains",
+		"Cross-Origin-Opener-Policy":   "same-origin",
+		"Cross-Origin-Resource-Policy": "same-site",
+	} {
+		if got := c.GetRespHeader(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
 // ── HTTP/1.1 Compliance (RFC 9112) ─────────────────────────────────────────
 
 func TestParseRequestLineAbsoluteForm(t *testing.T) {

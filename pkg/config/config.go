@@ -20,6 +20,7 @@ import (
 
 type Server struct {
 	Addr               string `json:"addr"`
+	SecureByDefault    bool   `json:"secure_by_default"`
 	ReadTimeout        string `json:"read_timeout"`
 	WriteTimeout       string `json:"write_timeout"`
 	IdleTimeout        string `json:"idle_timeout"`
@@ -108,6 +109,14 @@ func ApplyEnv(c Config, prefix string) (Config, error) {
 			errs = append(errs, fmt.Errorf("FH_DEBUG: %w", err))
 		} else {
 			c.Server.Debug = b
+		}
+	}
+	if v := os.Getenv(key("SECURE_BY_DEFAULT")); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("FH_SECURE_BY_DEFAULT: %w", err))
+		} else {
+			c.Server.SecureByDefault = b
 		}
 	}
 	if v := os.Getenv(key("MAX_CONNECTIONS")); v != "" {
@@ -224,6 +233,7 @@ func (c Config) AppConfig() (fh.Config, error) {
 		out.ReadHeaderTimeout = 5 * time.Second
 	}
 	out.MaxConnections = c.Server.MaxConnections
+	out.SecureByDefault = c.Server.SecureByDefault
 	out.MaxRequestBodySize = c.Server.MaxRequestBodySize
 	out.MaxHeaderListSize = c.Server.MaxHeaderListSize
 	out.MaxHeaderCount = c.Server.MaxHeaderCount

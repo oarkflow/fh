@@ -65,19 +65,24 @@ app.Use(basicauth.NewWithConfig(basicauth.Config{
 }))
 ```
 
-### Dynamic function returning plaintext users
+### Startup-loaded plaintext users
 
-This is convenient for tests or secret-manager integrations where the secret is protected externally. For persistent storage, prefer hashed `UsersProvider`.
+This is convenient for tests or small deployments using mounted secrets. Load
+once during startup so request handling never reads process environment. For
+persistent storage, prefer hashed `UsersProvider`.
 
 ```go
-app.Use(basicauth.NewWithConfig(basicauth.Config{
-    PlainUsersProvider: func() ([]basicauth.PlainUser, error) {
-        return []basicauth.PlainUser{
-            {Username: "admin", Password: os.Getenv("ADMIN_PASSWORD"), Roles: []string{"admin"}},
-            {Username: "ops", Password: os.Getenv("OPS_PASSWORD"), Roles: []string{"ops"}},
-        }, nil
-    },
-}))
+adminPassword, err := config.RequireSecretString("ADMIN_PASSWORD", "ADMIN_PASSWORD_FILE")
+if err != nil { log.Fatal(err) }
+opsPassword, err := config.RequireSecretString("OPS_PASSWORD", "OPS_PASSWORD_FILE")
+if err != nil { log.Fatal(err) }
+
+auth, err := basicauth.NewFromPlainUsers(map[string]string{
+    "admin": adminPassword,
+    "ops":   opsPassword,
+})
+if err != nil { log.Fatal(err) }
+app.Use(auth)
 ```
 
 ### Custom storage

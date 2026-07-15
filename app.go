@@ -52,6 +52,12 @@ type Hooks struct {
 
 // Config holds server configuration.
 type Config struct {
+	// SecureByDefault enables the framework's fail-closed protocol and response
+	// baseline. It is resolved once while the app is built, so disabled servers
+	// pay no request-path cost. Application-specific authentication,
+	// authorization, CORS, CSRF, and rate-limit policies must still be installed
+	// explicitly because the framework cannot infer them safely.
+	SecureByDefault bool
 	// Mode controls secure default and compliance validation behavior.
 	Mode Mode
 	// Compliance enables business/professional/enterprise/security evidence endpoints and profiles.
@@ -198,6 +204,12 @@ func WithSendKeepAliveHeader(enabled bool) Option {
 }
 func WithStrictHeaderValueValidation(enabled bool) Option {
 	return func(c *Config) { c.StrictHeaderValueValidation = enabled }
+}
+
+// WithSecureByDefault enables the fail-closed framework security baseline.
+// It is equivalent to setting Config.SecureByDefault.
+func WithSecureByDefault(enabled bool) Option {
+	return func(c *Config) { c.SecureByDefault = enabled }
 }
 func WithDisableKeepAlive(disabled bool) Option {
 	return func(c *Config) { c.DisableKeepAlive = disabled }
@@ -403,6 +415,7 @@ func applyConfigDefaults(cfg *Config) {
 // handlers and initializes the app struct together with the reliability
 // subsystem when enabled.
 func buildApp(cfg Config) *App {
+	applySecureDefaults(&cfg)
 	applyComplianceDefaults(&cfg)
 	if cfg.ErrorHandler == nil {
 		cfg.ErrorHandler = defaultErrorHandler

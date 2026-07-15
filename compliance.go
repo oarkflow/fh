@@ -96,6 +96,7 @@ type ComplianceReport struct {
 
 // SafeConfig is a redacted summary of runtime configuration.
 type SafeConfig struct {
+	SecureByDefault       bool              `json:"secure_by_default"`
 	ReadTimeout           string            `json:"read_timeout,omitempty"`
 	ReadHeaderTimeout     string            `json:"read_header_timeout,omitempty"`
 	WriteTimeout          string            `json:"write_timeout,omitempty"`
@@ -210,11 +211,73 @@ func applyComplianceDefaults(cfg *Config) {
 	}
 }
 
+// applySecureDefaults resolves the opt-in security baseline at construction
+// time. Keep this free of request-time feature switches: parsers and response
+// writers should only observe the resulting concrete configuration.
+func applySecureDefaults(cfg *Config) {
+	if cfg == nil || !cfg.SecureByDefault {
+		return
+	}
+
+	// SecureByDefault wins over benchmark/development modes. Enterprise already
+	// includes the strict baseline plus its compliance facilities.
+	if cfg.Mode != ModeEnterprise {
+		cfg.Mode = ModeStrict
+	}
+	cfg.Environment = EnvProduction
+	cfg.Debug = false
+	cfg.ErrorOptions.Environment = EnvProduction
+	cfg.ErrorOptions.ExposeDebug = false
+	cfg.ErrorOptions.ExposeStackTrace = false
+	cfg.ErrorOptions.ExposeCauses = false
+	cfg.DisablePanicRecovery = false
+	cfg.StrictHeaderValueValidation = true
+	cfg.SendDateHeader = true
+	cfg.ServerHeader = ""
+
+	// Bound every untrusted request dimension. Preserve stricter caller values,
+	// but do not allow permissive values to weaken the baseline.
+	if cfg.ReadBufferSize <= 0 || cfg.ReadBufferSize > 64<<10 {
+		cfg.ReadBufferSize = 16 << 10
+	}
+	if cfg.MaxConnections <= 0 || cfg.MaxConnections > 10_000 {
+		cfg.MaxConnections = 10_000
+	}
+	if cfg.MaxRequestBodySize <= 0 || cfg.MaxRequestBodySize > 4<<20 {
+		cfg.MaxRequestBodySize = 4 << 20
+	}
+	if cfg.MaxHeaderListSize <= 0 || cfg.MaxHeaderListSize > 32<<10 {
+		cfg.MaxHeaderListSize = 32 << 10
+	}
+	if cfg.MaxHeaderCount <= 0 || cfg.MaxHeaderCount > 64 {
+		cfg.MaxHeaderCount = 64
+	}
+	if cfg.MaxRequestLineSize <= 0 || cfg.MaxRequestLineSize > 8<<10 {
+		cfg.MaxRequestLineSize = 8 << 10
+	}
+	if cfg.MaxConcurrentStreams == 0 || cfg.MaxConcurrentStreams > 128 {
+		cfg.MaxConcurrentStreams = 128
+	}
+	if cfg.ReadHeaderTimeout <= 0 || cfg.ReadHeaderTimeout > 5*time.Second {
+		cfg.ReadHeaderTimeout = 5 * time.Second
+	}
+	if cfg.ReadTimeout <= 0 || cfg.ReadTimeout > 10*time.Second {
+		cfg.ReadTimeout = 10 * time.Second
+	}
+	if cfg.WriteTimeout <= 0 || cfg.WriteTimeout > 30*time.Second {
+		cfg.WriteTimeout = 30 * time.Second
+	}
+	if cfg.IdleTimeout <= 0 || cfg.IdleTimeout > 60*time.Second {
+		cfg.IdleTimeout = 60 * time.Second
+	}
+}
+
 func (a *App) SafeConfig() SafeConfig {
 	if a == nil {
 		return SafeConfig{}
 	}
 	return SafeConfig{
+		SecureByDefault:       a.cfg.SecureByDefault,
 		ReadTimeout:           a.cfg.ReadTimeout.String(),
 		ReadHeaderTimeout:     a.cfg.ReadHeaderTimeout.String(),
 		WriteTimeout:          a.cfg.WriteTimeout.String(),

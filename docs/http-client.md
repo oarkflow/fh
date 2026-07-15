@@ -22,13 +22,20 @@ res, err := client.R().
 ## Production middleware stack
 
 ```go
+signingSecret, err := config.RequireSecretString(
+    "SIGNING_SECRET",      // legacy direct-value fallback
+    "SIGNING_SECRET_FILE", // preferred mounted secret
+)
+if err != nil {
+    log.Fatal(err)
+}
 client.Use(
     fh.ClientRecover(),
     fh.ClientLogger(fh.NewDefaultLogger()),
     fh.ClientCircuitBreaker(fh.CircuitConfig{FailureThreshold: 5}),
     fh.ClientBulkhead(512, 100*time.Millisecond),
     fh.ClientRateLimit(5000),
-    fh.ClientHMACSigner("X-Signature", os.Getenv("SIGNING_SECRET")),
+    fh.ClientHMACSigner("X-Signature", signingSecret),
 )
 ```
 

@@ -33,12 +33,12 @@ The loopback example permits an ephemeral key and ephemeral session-cookie secre
 ```sh
 export FH_EXAMPLE_ADDR=':8443'
 export FH_EXAMPLE_ORIGIN='https://app.example.com'
-export FH_SECURE_SERVER_KEY='<base64url 32-byte X25519 private key>'
-export FH_RESPONSE_SIGNING_PRIVATE_KEY='<base64url Ed25519 private seed>'
+export FH_SECURE_SERVER_KEY_FILE='/run/secrets/fh-transport-key'
+export FH_RESPONSE_SIGNING_PRIVATE_KEY_FILE='/run/secrets/fh-response-signing-key'
 export FH_RESPONSE_SIGNING_KEY_ID='secure-wasm-response-2026-01'
-export FH_EXAMPLE_SESSION_SECRET='<base64url random value of at least 32 bytes>'
+export FH_EXAMPLE_SESSION_SECRET_FILE='/run/secrets/fh-session-secret'
 export FH_EXAMPLE_USER='<bootstrap login user>'
-export FH_EXAMPLE_PASSWORD='<bootstrap login password>'
+export FH_EXAMPLE_PASSWORD_FILE='/run/secrets/fh-bootstrap-password'
 ```
 
 Terminate TLS 1.3 at a correctly configured reverse proxy or replace `Listen` with `ListenTLS`. Store the transport key and session secret in a secret manager or KMS; never commit either value. Replace the demonstration login, in-memory stores, and transfer handler with real authentication, distributed atomic replay storage, encrypted session-key storage, authorization, idempotency, and transactional persistence.
@@ -51,9 +51,9 @@ Production WASM refuses to initialize without a complete build-time trust bundle
 
 ```sh
 export FH_EXAMPLE_ORIGIN='https://app.example.com'
-export FH_SECURE_SERVER_KEY='<private X25519 key from the secret manager>'
+export FH_SECURE_SERVER_KEY_FILE='/run/secrets/fh-transport-key'
 export FH_SECURE_SERVER_KEY_ID='secure-wasm-example-v1'
-export FH_RESPONSE_SIGNING_PRIVATE_KEY='<private Ed25519 seed from the secret manager>'
+export FH_RESPONSE_SIGNING_PRIVATE_KEY_FILE='/run/secrets/fh-response-signing-key'
 export FH_RESPONSE_SIGNING_KEY_ID='secure-wasm-response-2026-01'
 
 go run ./examples/secure_wasm -print-wasm-trust

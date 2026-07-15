@@ -16,6 +16,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 - **Typed endpoints & OpenAPI 3.1** — generic request/response handlers with auto-generated specs
 - **Reliability layer** — request journaling, idempotency, durable async queue, outbox/inbox, DLQ
 - **Compliance layer** — Business/Professional/Enterprise/Security profiles, audit ledger, route security metadata
+- **Opt-in fail-closed baseline** — `fh.WithSecureByDefault(true)` bounds every protocol input, enables strict parsing, recovery, redaction, and hardened response headers
 - **Template engine** — agnostic interface, any engine implementing `Render(w, name, data, layout...)`
 - **Static file serving** — directory listings, compression, cache control, range requests
 - **Graceful shutdown** — `app.ShutdownWithContext(ctx)` or `app.ListenWithGracefulShutdown(addr)`

@@ -21,6 +21,7 @@ import (
 	"github.com/oarkflow/fh/mw/securetransport"
 	"github.com/oarkflow/fh/mw/security"
 	"github.com/oarkflow/fh/mw/session"
+	appconfig "github.com/oarkflow/fh/pkg/config"
 	responseprotocol "github.com/oarkflow/fh/pkg/httpsignature"
 	protocol "github.com/oarkflow/fh/pkg/securetransport"
 )
@@ -155,6 +156,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	loginUser := env("FH_EXAMPLE_USER", "demo")
+	loginPassword, err := appconfig.SecretString("FH_EXAMPLE_PASSWORD", "FH_EXAMPLE_PASSWORD_FILE")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if loginPassword == "" {
+		if productionTLS {
+			log.Fatal("FH_EXAMPLE_PASSWORD_FILE is required for a production HTTPS origin")
+		}
+		loginPassword = "demo"
+	}
 	webSessions := session.NewSessionManager(
 		session.NewMemoryStore(time.Minute),
 		session.SessionCookieName(cookieName(productionTLS)),
@@ -250,7 +262,7 @@ func main() {
 		if err := json.Unmarshal(c.BodyCopy(), &input); err != nil {
 			return fh.NewHTTPError(fh.StatusBadRequest, "INVALID_LOGIN", "invalid login request")
 		}
-		if !secretEqual(input.Username, env("FH_EXAMPLE_USER", "demo")) || !secretEqual(input.Password, env("FH_EXAMPLE_PASSWORD", "demo")) {
+		if !secretEqual(input.Username, loginUser) || !secretEqual(input.Password, loginPassword) {
 			return fh.NewHTTPError(fh.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid credentials")
 		}
 		web := session.Get(c)
@@ -345,10 +357,13 @@ func loadManifest(path string) (assetManifest, error) {
 }
 
 func loadServerKey(production bool) ([]byte, bool, error) {
-	value := strings.TrimSpace(os.Getenv("FH_SECURE_SERVER_KEY"))
+	value, err := appconfig.SecretString("FH_SECURE_SERVER_KEY", "FH_SECURE_SERVER_KEY_FILE")
+	if err != nil {
+		return nil, false, err
+	}
 	if value == "" {
 		if production {
-			return nil, false, fmt.Errorf("FH_SECURE_SERVER_KEY is required for a production HTTPS origin")
+			return nil, false, fmt.Errorf("FH_SECURE_SERVER_KEY_FILE is required for a production HTTPS origin")
 		}
 		log.Print("WARNING: using an ephemeral secure-transport key for loopback development")
 		return nil, true, nil
@@ -358,7 +373,10 @@ func loadServerKey(production bool) ([]byte, bool, error) {
 }
 
 func loadResponseSigningKey(production bool) (ed25519.PublicKey, ed25519.PrivateKey, bool, error) {
-	value := strings.TrimSpace(os.Getenv("FH_RESPONSE_SIGNING_PRIVATE_KEY"))
+	value, err := appconfig.SecretString("FH_RESPONSE_SIGNING_PRIVATE_KEY", "FH_RESPONSE_SIGNING_PRIVATE_KEY_FILE")
+	if err != nil {
+		return nil, nil, false, err
+	}
 	if value != "" {
 		privateKey, err := responseprotocol.DecodePrivateKey(value)
 		if err != nil {
@@ -367,7 +385,7 @@ func loadResponseSigningKey(production bool) (ed25519.PublicKey, ed25519.Private
 		return privateKey.Public().(ed25519.PublicKey), privateKey, false, nil
 	}
 	if production {
-		return nil, nil, false, fmt.Errorf("FH_RESPONSE_SIGNING_PRIVATE_KEY is required for a production HTTPS origin")
+		return nil, nil, false, fmt.Errorf("FH_RESPONSE_SIGNING_PRIVATE_KEY_FILE is required for a production HTTPS origin")
 	}
 	publicKey, privateKey, err := responseprotocol.GenerateKey()
 	return publicKey, privateKey, true, err
@@ -378,7 +396,11 @@ func printWASMTrustConfiguration() {
 	if origin == "" {
 		log.Fatal("FH_EXAMPLE_ORIGIN is required")
 	}
-	serverPrivate, err := securetransport.DecodeServerPrivateKey(strings.TrimSpace(os.Getenv("FH_SECURE_SERVER_KEY")))
+	serverPrivateValue, err := appconfig.RequireSecretString("FH_SECURE_SERVER_KEY", "FH_SECURE_SERVER_KEY_FILE")
+	if err != nil {
+		log.Fatal(err)
+	}
+	serverPrivate, err := securetransport.DecodeServerPrivateKey(serverPrivateValue)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -386,7 +408,11 @@ func printWASMTrustConfiguration() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	responsePrivate, err := responseprotocol.DecodePrivateKey(strings.TrimSpace(os.Getenv("FH_RESPONSE_SIGNING_PRIVATE_KEY")))
+	responsePrivateValue, err := appconfig.RequireSecretString("FH_RESPONSE_SIGNING_PRIVATE_KEY", "FH_RESPONSE_SIGNING_PRIVATE_KEY_FILE")
+	if err != nil {
+		log.Fatal(err)
+	}
+	responsePrivate, err := responseprotocol.DecodePrivateKey(responsePrivateValue)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -399,7 +425,10 @@ func printWASMTrustConfiguration() {
 }
 
 func loadSessionSecret(production bool) ([]byte, error) {
-	value := strings.TrimSpace(os.Getenv("FH_EXAMPLE_SESSION_SECRET"))
+	value, err := appconfig.SecretString("FH_EXAMPLE_SESSION_SECRET", "FH_EXAMPLE_SESSION_SECRET_FILE")
+	if err != nil {
+		return nil, err
+	}
 	if value != "" {
 		secret, err := base64.RawURLEncoding.DecodeString(value)
 		if err != nil || len(secret) < 32 {
@@ -408,10 +437,10 @@ func loadSessionSecret(production bool) ([]byte, error) {
 		return secret, nil
 	}
 	if production {
-		return nil, fmt.Errorf("FH_EXAMPLE_SESSION_SECRET is required for a production HTTPS origin")
+		return nil, fmt.Errorf("FH_EXAMPLE_SESSION_SECRET_FILE is required for a production HTTPS origin")
 	}
 	secret := make([]byte, 32)
-	_, err := rand.Read(secret)
+	_, err = rand.Read(secret)
 	return secret, err
 }
 

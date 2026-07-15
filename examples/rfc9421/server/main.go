@@ -12,6 +12,7 @@ import (
 	"github.com/oarkflow/fh"
 	middleware "github.com/oarkflow/fh/mw/httpsignature"
 	"github.com/oarkflow/fh/mw/security"
+	appconfig "github.com/oarkflow/fh/pkg/config"
 	protocol "github.com/oarkflow/fh/pkg/httpsignature"
 )
 
@@ -82,7 +83,10 @@ func main() {
 }
 
 func loadPrivateKey() (ed25519.PrivateKey, bool) {
-	value := strings.TrimSpace(os.Getenv("FH_RFC9421_PRIVATE_KEY"))
+	value, err := appconfig.SecretString("FH_RFC9421_PRIVATE_KEY", "FH_RFC9421_PRIVATE_KEY_FILE")
+	if err != nil {
+		log.Fatal(err)
+	}
 	if value != "" {
 		key, err := protocol.DecodePrivateKey(value)
 		if err != nil {

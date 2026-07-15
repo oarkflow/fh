@@ -10,10 +10,11 @@ Generate a persistent key pair:
 go run ./examples/rfc9421/server -generate-key
 ```
 
-Export the printed values, then start the server:
+Mount the private seed as a secret file, keep the public key in ordinary
+configuration, then start the server:
 
 ```sh
-export FH_RFC9421_PRIVATE_KEY='<printed private seed>'
+export FH_RFC9421_PRIVATE_KEY_FILE='/run/secrets/fh-rfc9421-private-key'
 export FH_RFC9421_PUBLIC_KEY='<printed public key>'
 go run ./examples/rfc9421/server
 ```

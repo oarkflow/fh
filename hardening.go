@@ -1,8 +1,8 @@
 package fh
 
 // defaultHardeningMiddleware returns a middleware that applies production
-// security defaults. It is auto-prepended when Mode is production, strict,
-// or enterprise. Returns nil for non-production modes.
+// security defaults. Static policy is resolved once here; the request path is
+// a small fixed loop with no mode branches or allocations.
 func defaultHardeningMiddleware(cfg Config) HandlerFunc {
 	mode := cfg.Mode
 	isProd := mode == ModeProduction || mode == ModeStrict || mode == ModeEnterprise || cfg.Compliance.Enabled
@@ -11,52 +11,36 @@ func defaultHardeningMiddleware(cfg Config) HandlerFunc {
 		return nil
 	}
 
+	strict := mode == ModeStrict || mode == ModeEnterprise || cfg.Compliance.Strict || cfg.SecureByDefault
+	referrer := "strict-origin-when-cross-origin"
+	if strict {
+		referrer = "no-referrer"
+	}
+	headers := [][2]string{
+		{"X-Content-Type-Options", "nosniff"},
+		{"X-Frame-Options", "DENY"},
+		{"Referrer-Policy", referrer},
+		{"X-XSS-Protection", "0"},
+		{"Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=(), usb=()"},
+	}
+	if cfg.SecureByDefault {
+		headers = append(headers,
+			[2]string{"Strict-Transport-Security", "max-age=31536000; includeSubDomains"},
+			[2]string{"Cross-Origin-Opener-Policy", "same-origin"},
+			[2]string{"Cross-Origin-Resource-Policy", "same-origin"},
+		)
+	}
+
 	return func(c Ctx) error {
-		dc, ok := c.(*DefaultCtx)
-		if !ok {
-			return c.Next()
-		}
-
-		if !hasCustomHeader(dc, "X-Content-Type-Options") {
-			dc.Set("X-Content-Type-Options", "nosniff")
-		}
-
-		if !hasCustomHeader(dc, "X-Frame-Options") {
-			dc.Set("X-Frame-Options", "DENY")
-		}
-
-		if !hasCustomHeader(dc, "Referrer-Policy") {
-			if mode == ModeStrict || mode == ModeEnterprise || cfg.Compliance.Strict {
-				dc.Set("Referrer-Policy", "no-referrer")
-			} else {
-				dc.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		if dc, ok := c.(*DefaultCtx); ok {
+			for _, header := range headers {
+				dc.Set(header[0], header[1])
+			}
+		} else {
+			for _, header := range headers {
+				c.Set(header[0], header[1])
 			}
 		}
-
-		if !hasCustomHeader(dc, "X-XSS-Protection") {
-			dc.Set("X-XSS-Protection", "0")
-		}
-
-		if !hasCustomHeader(dc, "Permissions-Policy") {
-			dc.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=(), usb=()")
-		}
-
 		return c.Next()
 	}
-}
-
-// hasCustomHeader reports whether a header with the given name has already
-// been queued on the context via Set or Append.
-func hasCustomHeader(dc *DefaultCtx, name string) bool {
-	for i := 0; i < dc.chCount; i++ {
-		if bytesEqualFold(dc.customHeaders[i].Key, []byte(name)) {
-			return true
-		}
-	}
-	for _, h := range dc.extraHeaders {
-		if bytesEqualFold(h.Key, []byte(name)) {
-			return true
-		}
-	}
-	return false
 }

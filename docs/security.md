@@ -1,5 +1,37 @@
 # Modern server and security capabilities
 
+## Fail-closed server baseline
+
+Enable the framework-wide baseline when creating the app:
+
+```go
+app := fh.New(fh.WithSecureByDefault(true))
+// or: fh.NewWithConfig(fh.Config{SecureByDefault: true})
+```
+
+The flag is resolved once during construction. It enables strict HTTP input
+validation, bounds body/header/request-line/stream sizes and timeouts, keeps
+panic recovery and redaction enabled, disables debug error and server-version
+exposure, and emits HSTS, nosniff, frame, referrer, permissions, COOP, and CORP
+headers. Stricter caller-supplied limits are preserved. Configuration loaded
+through `pkg/config` accepts `server.secure_by_default` or
+`FH_SECURE_BY_DEFAULT=true`.
+
+Authentication, authorization, CORS, CSRF, trusted-host/proxy, rate-limit, and
+application input-schema policies remain explicit middleware because safe
+values depend on the deployment. Serve public traffic with `ServeTLS` or TLS at
+a trusted edge; the flag cannot provision certificates.
+
+## Configuration and secrets
+
+Use environment variables for small deployment overrides and for paths to
+mounted secrets, not for persistent application data. `pkg/config.SecretString`
+supports a direct-value variable for compatibility and a preferred file
+variable such as `SIGNING_KEY_FILE=/run/secrets/signing-key`. It rejects both
+being configured together, bounds file reads, and is intended to run once at
+startup. Store sessions, queues, audit records, and other mutable data in their
+configured storage backends.
+
 ## TLS and mutual TLS
 
 `NewServerTLSConfig` defaults to TLS 1.3 and validates certificate and client-CA
@@ -51,4 +83,3 @@ untrusted hop. Rate limiters and logging then consume the normalized `Ctx.IP()`.
 
 `mw/acceptquery` emits RFC 10008 `Accept-Query` as a Structured Fields List and
 can enforce the advertised media types on QUERY request content.
-
