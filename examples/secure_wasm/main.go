@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -16,9 +17,11 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	responsemiddleware "github.com/oarkflow/fh/mw/httpsignature"
 	"github.com/oarkflow/fh/mw/securetransport"
 	"github.com/oarkflow/fh/mw/security"
 	"github.com/oarkflow/fh/mw/session"
+	responseprotocol "github.com/oarkflow/fh/pkg/httpsignature"
 	protocol "github.com/oarkflow/fh/pkg/securetransport"
 )
 
@@ -94,6 +97,8 @@ func (s *grantStore) consume(raw, principal, sessionID string) bool {
 
 func main() {
 	generateKey := flag.Bool("generate-key", false, "print a base64url X25519 server private key and exit")
+	generateSigningKey := flag.Bool("generate-signing-key", false, "print an RFC 9421 Ed25519 private seed and public key and exit")
+	printWASMTrust := flag.Bool("print-wasm-trust", false, "print public build-time WASM trust variables from configured private keys and exit")
 	flag.Parse()
 	if *generateKey {
 		key, err := securetransport.GenerateServerPrivateKey()
@@ -107,6 +112,20 @@ func main() {
 		fmt.Println(encoded)
 		return
 	}
+	if *generateSigningKey {
+		publicKey, privateKey, err := responseprotocol.GenerateKey()
+		if err != nil {
+			log.Fatal(err)
+		}
+		privateValue, _ := responseprotocol.EncodePrivateKey(privateKey)
+		publicValue, _ := responseprotocol.EncodePublicKey(publicKey)
+		fmt.Printf("FH_RESPONSE_SIGNING_PRIVATE_KEY=%s\nFH_RESPONSE_SIGNING_PUBLIC_KEY=%s\n", privateValue, publicValue)
+		return
+	}
+	if *printWASMTrust {
+		printWASMTrustConfiguration()
+		return
+	}
 
 	addr := env("FH_EXAMPLE_ADDR", "127.0.0.1:8080")
 	origin := strings.TrimRight(env("FH_EXAMPLE_ORIGIN", "http://"+addr), "/")
@@ -115,21 +134,27 @@ func main() {
 		log.Fatal("FH_EXAMPLE_ORIGIN must be an origin such as https://app.example.com")
 	}
 	productionTLS := originURL.Scheme == "https"
+	allowedOrigins := exampleOrigins(originURL)
 
-	manifest, err := loadManifest("wasm/dist/asset-manifest.json")
+	manifest, err := loadManifest("examples/secure_wasm/wasm/asset-manifest.json")
 	if err != nil {
-		log.Fatalf("load WASM manifest (run `make wasm` first): %v", err)
+		log.Fatalf("load example WASM manifest: %v", err)
 	}
 
 	serverKey, ephemeral, err := loadServerKey(productionTLS)
 	if err != nil {
 		log.Fatal(err)
 	}
+	responsePublicKey, responsePrivateKey, responseKeyEphemeral, err := loadResponseSigningKey(productionTLS)
+	if err != nil {
+		log.Fatal(err)
+	}
+	responsePublicValue, _ := responseprotocol.EncodePublicKey(responsePublicKey)
+	responseKeyID := env("FH_RESPONSE_SIGNING_KEY_ID", "secure-wasm-response-2026-01")
 	sessionSecret, err := loadSessionSecret(productionTLS)
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	webSessions := session.NewSessionManager(
 		session.NewMemoryStore(time.Minute),
 		session.SessionCookieName(cookieName(productionTLS)),
@@ -157,19 +182,19 @@ func main() {
 	}))
 	// Register immutable assets before session/transport middleware so fetching
 	// JS/WASM never creates or refreshes an authentication cookie.
-	app.Static("/wasm", "wasm/dist", fh.StaticConfig{MaxAge: 31536000, CacheDuration: time.Minute})
+	app.Static("/wasm", "examples/secure_wasm/wasm", fh.StaticConfig{MaxAge: 31536000, CacheDuration: time.Minute})
 	app.Static("/", "examples/secure_wasm/public", fh.StaticConfig{CacheDuration: time.Second})
 	app.Use(session.New(webSessions))
 
 	transport, err := securetransport.Install(app, securetransport.Config{
 		ServerPrivateKey:        serverKey,
 		AllowEphemeralServerKey: ephemeral,
-		KeyID:                   "secure-wasm-example-v1",
+		KeyID:                   env("FH_SECURE_SERVER_KEY_ID", "secure-wasm-example-v1"),
 		RequireSecure:           true,
 		Protect: func(c fh.Ctx) bool {
 			return strings.HasPrefix(c.Path(), "/api/")
 		},
-		AllowedOrigins: []string{origin},
+		AllowedOrigins: allowedOrigins,
 		RequireOrigin:  true,
 		AuthorizeDeviceRegistration: func(c fh.Ctx, _ protocol.DeviceRegistrationRequest) (string, error) {
 			web := session.Get(c)
@@ -193,9 +218,29 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	responseSigner, err := responsemiddleware.New(responsemiddleware.Config{
+		PrivateKey:     responsePrivateKey,
+		KeyID:          responseKeyID,
+		Origin:         origin,
+		AllowedOrigins: allowedOrigins[1:],
+		Validity:       90 * time.Second,
+		MaxBodySize:    protocol.DefaultMaxBody + 64<<10,
+		Skip: func(c fh.Ctx) bool {
+			return !strings.HasPrefix(c.Path(), "/api/")
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Ordering is intentional: securetransport encrypts the logical response,
+	// then RFC 9421 signs the actual ciphertext HTTP representation.
+	app.Use(responseSigner)
+	if responseKeyEphemeral {
+		log.Printf("WARNING: using an ephemeral RFC 9421 response-signing key; trusted public key is %s", responsePublicValue)
+	}
 
 	app.Post("/auth/login", func(c fh.Ctx) error {
-		if !sameOriginRequest(c, origin) {
+		if !sameOriginRequest(c, allowedOrigins) {
 			return fh.NewHTTPError(fh.StatusForbidden, "ORIGIN_REJECTED", "same-origin login required")
 		}
 		var input struct {
@@ -217,7 +262,7 @@ func main() {
 	})
 
 	app.Post("/auth/logout", func(c fh.Ctx) error {
-		if !sameOriginRequest(c, origin) {
+		if !sameOriginRequest(c, allowedOrigins) {
 			return fh.NewHTTPError(fh.StatusForbidden, "ORIGIN_REJECTED", "same-origin logout required")
 		}
 		return webSessions.Destroy(c, session.Get(c))
@@ -233,17 +278,25 @@ func main() {
 		if err != nil {
 			return fh.NewHTTPError(fh.StatusServiceUnavailable, "GRANT_UNAVAILABLE", "registration grant unavailable")
 		}
+		requestOrigin, ok := originForHost(allowedOrigins, c.Get(fh.HeaderHostStr))
+		if !ok {
+			return fh.NewHTTPError(fh.StatusMisdirectedRequest, "ORIGIN_NOT_ALLOWED", "request host is not an allowed development origin")
+		}
 		c.Set("Cache-Control", "no-store")
 		return c.JSON(fh.Map{
-			"baseURL":               origin,
-			"pinnedServerKey":       transport.PublicKeyBase64(),
-			"pinnedServerKeyID":     transport.KeyID(),
-			"registrationToken":     grant,
-			"wasmURL":               "/wasm/securefetch.wasm",
-			"wasmExecURL":           "/wasm/wasm_exec.js",
-			"wasmIntegrity":         manifest.Assets["securefetch.wasm"].Integrity,
-			"wasmExecIntegrity":     manifest.Assets["wasm_exec.js"].Integrity,
-			"requireAssetIntegrity": true,
+			"baseURL":                  requestOrigin,
+			"pinnedServerKey":          transport.PublicKeyBase64(),
+			"pinnedServerKeyID":        transport.KeyID(),
+			"responseSigningPublicKey": responsePublicValue,
+			"responseSigningKeyID":     responseKeyID,
+			"requireResponseSignature": true,
+			"requireEmbeddedTrust":     productionTLS,
+			"registrationToken":        grant,
+			"wasmURL":                  "/wasm/securefetch.wasm",
+			"wasmExecURL":              "/wasm/wasm_exec.js",
+			"wasmIntegrity":            manifest.Assets["securefetch.wasm"].Integrity,
+			"wasmExecIntegrity":        manifest.Assets["wasm_exec.js"].Integrity,
+			"requireAssetIntegrity":    true,
 		})
 	})
 
@@ -304,6 +357,47 @@ func loadServerKey(production bool) ([]byte, bool, error) {
 	return key, false, err
 }
 
+func loadResponseSigningKey(production bool) (ed25519.PublicKey, ed25519.PrivateKey, bool, error) {
+	value := strings.TrimSpace(os.Getenv("FH_RESPONSE_SIGNING_PRIVATE_KEY"))
+	if value != "" {
+		privateKey, err := responseprotocol.DecodePrivateKey(value)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		return privateKey.Public().(ed25519.PublicKey), privateKey, false, nil
+	}
+	if production {
+		return nil, nil, false, fmt.Errorf("FH_RESPONSE_SIGNING_PRIVATE_KEY is required for a production HTTPS origin")
+	}
+	publicKey, privateKey, err := responseprotocol.GenerateKey()
+	return publicKey, privateKey, true, err
+}
+
+func printWASMTrustConfiguration() {
+	origin := strings.TrimRight(strings.TrimSpace(os.Getenv("FH_EXAMPLE_ORIGIN")), "/")
+	if origin == "" {
+		log.Fatal("FH_EXAMPLE_ORIGIN is required")
+	}
+	serverPrivate, err := securetransport.DecodeServerPrivateKey(strings.TrimSpace(os.Getenv("FH_SECURE_SERVER_KEY")))
+	if err != nil {
+		log.Fatal(err)
+	}
+	serverPublic, err := securetransport.ServerPublicKey(serverPrivate)
+	if err != nil {
+		log.Fatal(err)
+	}
+	responsePrivate, err := responseprotocol.DecodePrivateKey(strings.TrimSpace(os.Getenv("FH_RESPONSE_SIGNING_PRIVATE_KEY")))
+	if err != nil {
+		log.Fatal(err)
+	}
+	responsePublic, _ := responseprotocol.EncodePublicKey(responsePrivate.Public().(ed25519.PublicKey))
+	fmt.Printf("WASM_TRUSTED_ORIGIN=%s\n", origin)
+	fmt.Printf("WASM_TRUSTED_TRANSPORT_KEY=%s\n", base64.RawURLEncoding.EncodeToString(serverPublic[:]))
+	fmt.Printf("WASM_TRUSTED_TRANSPORT_KEY_ID=%s\n", env("FH_SECURE_SERVER_KEY_ID", "secure-wasm-example-v1"))
+	fmt.Printf("WASM_TRUSTED_RESPONSE_KEY=%s\n", responsePublic)
+	fmt.Printf("WASM_TRUSTED_RESPONSE_KEY_ID=%s\n", env("FH_RESPONSE_SIGNING_KEY_ID", "secure-wasm-response-2026-01"))
+}
+
 func loadSessionSecret(production bool) ([]byte, error) {
 	value := strings.TrimSpace(os.Getenv("FH_EXAMPLE_SESSION_SECRET"))
 	if value != "" {
@@ -327,8 +421,49 @@ func secretEqual(actual, expected string) bool {
 	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
 }
 
-func sameOriginRequest(c fh.Ctx, expected string) bool {
-	return strings.TrimRight(c.Get(fh.HeaderOriginStr), "/") == expected && strings.ToLower(c.Get("Sec-Fetch-Site")) != "cross-site"
+func sameOriginRequest(c fh.Ctx, allowed []string) bool {
+	requestOrigin, ok := originForHost(allowed, c.Get(fh.HeaderHostStr))
+	return ok && strings.EqualFold(strings.TrimRight(strings.TrimSpace(c.Get(fh.HeaderOriginStr)), "/"), requestOrigin) && strings.ToLower(c.Get("Sec-Fetch-Site")) != "cross-site"
+}
+
+func originForHost(allowed []string, host string) (string, bool) {
+	host = strings.TrimSpace(host)
+	for _, origin := range allowed {
+		parsed, err := url.Parse(origin)
+		if err == nil && strings.EqualFold(parsed.Host, host) {
+			return origin, true
+		}
+	}
+	return "", false
+}
+
+func exampleOrigins(canonical *url.URL) []string {
+	origin := strings.TrimRight(canonical.String(), "/")
+	out := []string{origin}
+	if canonical.Scheme != "http" || !isDevelopmentHost(canonical.Hostname()) {
+		return out
+	}
+	port := canonical.Port()
+	for _, host := range []string{"localhost", "127.0.0.1", "0.0.0.0"} {
+		authority := host
+		if port != "" {
+			authority += ":" + port
+		}
+		candidate := canonical.Scheme + "://" + authority
+		if !strings.EqualFold(candidate, origin) {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func isDevelopmentHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "0.0.0.0", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func hstsAge(enabled bool) int {

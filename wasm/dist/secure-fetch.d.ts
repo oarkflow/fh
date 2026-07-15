@@ -12,6 +12,14 @@ export interface SecureFetchConfig {
     pinnedServerKey?: string;
     /** Optional key identifier expected in the authenticated server handshake. */
     pinnedServerKeyID?: string;
+    /** Trusted base64url Ed25519 key for RFC 9421 response verification. */
+    responseSigningPublicKey?: string;
+    /** Required RFC 9421 response-signing key identifier. */
+    responseSigningKeyID?: string;
+    /** Fail closed during initialization unless response-signing pins are set. */
+    requireResponseSignature?: boolean;
+    /** Require the origin and both public keys to be embedded in the WASM build. */
+    requireEmbeddedTrust?: boolean;
     /** Development-only escape hatch. Production clients should always pin. */
     allowUnpinnedServerKey?: boolean;
     clientBuild?: string;
@@ -34,6 +42,7 @@ export interface SecureSessionInfo {
     sessionId?: string;
     expiresAt?: number;
     sequence?: number;
+    trustMode?: "embedded" | "loopback-development";
 }
 export type SecureFetchBody = BodyInit | Record<string, unknown> | readonly unknown[] | number | boolean | null;
 export interface SecureFetchInit extends Omit<RequestInit, "body"> {

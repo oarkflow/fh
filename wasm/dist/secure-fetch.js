@@ -131,7 +131,10 @@ async function startRuntime(config) {
     }
     if (typeof globalThis.fetch !== "function")
         throw new Error("FH secure fetch requires native Fetch");
-    if (!globalThis.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
+    if (!globalThis.isSecureContext &&
+        location.hostname !== "localhost" &&
+        location.hostname !== "127.0.0.1" &&
+        location.hostname !== "0.0.0.0") {
         throw new Error("FH secure fetch requires a secure browser context");
     }
     if (config.requireAssetIntegrity && (!config.wasmIntegrity || !config.wasmExecIntegrity)) {

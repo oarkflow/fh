@@ -67,6 +67,7 @@ Use the following middleware order for most public APIs:
 | `csrf` | CSRF token validation using header, form field, and cookie token. |
 | `earlydata` | Rejects unsafe TLS early-data requests. |
 | `idempotency` | Stores a deterministic idempotency key in request locals. |
+| `httpsignature` | Negotiates and signs nonce-bound RFC 9421 responses with Ed25519. |
 | `ipwhitelist` | IP/CIDR allowlist and blocklist enforcement. |
 | `lifecycle` | Request lifecycle hooks around handler execution. |
 | `logger` | Async access logging with formats, slog, skip rules, and backpressure controls. |

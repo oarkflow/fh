@@ -1,0 +1,5 @@
+:root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+main { width: min(50rem, calc(100% - 2rem)); margin: 4rem auto; }
+button { padding: .7rem 1rem; font: inherit; font-weight: 650; cursor: pointer; }
+pre { min-height: 10rem; overflow: auto; padding: 1rem; border: 1px solid #8888; border-radius: .4rem; white-space: pre-wrap; }
+.warning { padding: .8rem; border-left: .25rem solid #d88b00; }

@@ -14,6 +14,14 @@ export interface SecureFetchConfig {
   pinnedServerKey?: string;
   /** Optional key identifier expected in the authenticated server handshake. */
   pinnedServerKeyID?: string;
+  /** Trusted base64url Ed25519 key for RFC 9421 response verification. */
+  responseSigningPublicKey?: string;
+  /** Required RFC 9421 response-signing key identifier. */
+  responseSigningKeyID?: string;
+  /** Fail closed during initialization unless response-signing pins are set. */
+  requireResponseSignature?: boolean;
+  /** Require the origin and both public keys to be embedded in the WASM build. */
+  requireEmbeddedTrust?: boolean;
   /** Development-only escape hatch. Production clients should always pin. */
   allowUnpinnedServerKey?: boolean;
   clientBuild?: string;
@@ -37,6 +45,7 @@ export interface SecureSessionInfo {
   sessionId?: string;
   expiresAt?: number;
   sequence?: number;
+  trustMode?: "embedded" | "loopback-development";
 }
 
 export type SecureFetchBody =
@@ -218,7 +227,12 @@ async function startRuntime(config: SecureFetchConfig): Promise<FHSecureWasmAPI>
     throw new Error("FH secure fetch requires WebCrypto, IndexedDB, and WebAssembly");
   }
   if (typeof globalThis.fetch !== "function") throw new Error("FH secure fetch requires native Fetch");
-  if (!globalThis.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
+  if (
+    !globalThis.isSecureContext &&
+    location.hostname !== "localhost" &&
+    location.hostname !== "127.0.0.1" &&
+    location.hostname !== "0.0.0.0"
+  ) {
     throw new Error("FH secure fetch requires a secure browser context");
   }
   if (config.requireAssetIntegrity && (!config.wasmIntegrity || !config.wasmExecIntegrity)) {

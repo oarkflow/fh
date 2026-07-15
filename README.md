@@ -119,6 +119,7 @@ Commonly used packages:
 | `mw/circuitbreaker` / `mw/bulkhead` / `mw/loadshed` | Overload and fault protection |
 | `mw/proxy` | Reverse proxy and API gateway handlers |
 | `mw/mtls` | Verified client-certificate authorization |
+| `mw/httpsignature` | Nonce-bound RFC 9421 Ed25519 response signatures |
 | `mw/metrics` | Prometheus-style metrics endpoint |
 
 This is a subset — fh ships **65+ middleware packages** under `mw/`, each with its own `README.md`. See [`docs/middleware.md`](docs/middleware.md) for the full reference and recommended ordering, or [`mw/README.md`](mw/README.md) for the package index.
@@ -365,13 +366,19 @@ Includes fluent request building, typed helpers (`GetJSON[T]`, `PostJSON[Req,Res
 
 ## Secure WASM Transport
 
-`mw/securetransport`, the shared `pkg/securetransport` protocol, and a TypeScript/JavaScript Go-WASM Fetch client under `wasm/` provide device-signed session establishment, X25519 key agreement, AES-256-GCM encrypted bodies/headers, replay prevention, and pluggable stores.
+`mw/securetransport`, the shared `pkg/securetransport` protocol, and a TypeScript/JavaScript Go-WASM Fetch client under `wasm/` provide device-signed session establishment, X25519 key agreement, AES-256-GCM encrypted bodies/headers, replay prevention, and pluggable stores. The secure WASM example additionally negotiates RFC 9421/RFC 9530 Ed25519 signatures over ciphertext and verifies them before decryption.
 
 ```bash
 make wasm
 ```
 
 See [Secure WASM Transport](docs/secure-wasm-transport.md) and [`examples/secure_wasm`](examples/secure_wasm).
+
+## Signed HTTP Responses
+
+`mw/httpsignature` and `pkg/httpsignature` implement a strict RFC 9421 Ed25519 response-signature profile. A fresh client nonce and the originating method and target URI bind each signed response to its request; RFC 9530 `Content-Digest` binds the exact response bytes.
+
+See [RFC 9421 Response Signatures](docs/rfc9421-response-signatures.md) and the runnable Go and WebCrypto clients in [`examples/rfc9421`](examples/rfc9421).
 
 ## Examples
 
@@ -392,6 +399,7 @@ Full working examples in [`examples/`](examples/):
 | `scheduler` | Priority-based request scheduling with concurrency pools |
 | `slo` | Route-level SLO monitoring with burn-rate alerts |
 | `secure_wasm` | Session + secure WASM client demo for encrypted API calls |
+| `rfc9421` | RFC 9421 signed-response server plus fail-closed Go and WebCrypto clients |
 | `production` | Combined production middleware stack |
 | `workflow` | Checkout workflow: sequential/parallel/branch steps, retry, timeout, compensation, async job handoff |
 | `webhook-receiver` | Secure, idempotent webhook ingestion: signature verification, replay protection, business-level dedup |

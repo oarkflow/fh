@@ -689,6 +689,7 @@ Remaining packages — see `mw/<package>/README.md` for full usage:
 | `mw/decompress` | Bounded gzip request decompression with expansion-ratio limits |
 | `mw/etag` | Adds/validates ETag headers |
 | `mw/hostguard` | Rejects requests with unexpected Host headers |
+| `mw/httpsignature` | Nonce-bound RFC 9421 Ed25519 response signatures |
 | `mw/jwt` | Verifies signed JWTs, stores claims, sets `fh.Principal` |
 | `mw/maintenance` | Runtime maintenance-mode switch for controlled downtime |
 | `mw/mtls` | Validates verified client cert chains for high-trust routes |

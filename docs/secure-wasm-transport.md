@@ -19,12 +19,21 @@
 - GET/HEAD requests carry their small encrypted request envelope in `X-FH-Envelope`; body-capable methods use a binary body.
 - HEAD, 1xx, 204, and 304 responses carry the authenticated response envelope in `X-FH-Response` because HTTP forbids a response body.
 - Device and session stores, replay storage, registration authorization, key persistence, security event reporting, and device revocation are pluggable.
+- Optional RFC 9421/RFC 9530 verification signs the outer ciphertext response with Ed25519 and is checked before decryption.
 
 ## Browser security boundary
 
 WASM is tamper-resistant, not tamperproof. A compromised page, malicious extension, injected script, browser exploit, or compromised operating system can observe data before encryption or after decryption. FH must still enforce authentication, authorization, validation, rate limits, and transaction policy on the server.
 
 Do not embed server private keys, permanent API secrets, database credentials, or token-signing secrets in JavaScript or WASM.
+
+## Embedded production root of trust
+
+A non-loopback WASM client fails closed unless its build contains a complete immutable trust bundle: expected origin, X25519 transport public key and key ID, plus Ed25519 response-signing public key and key ID. Runtime bootstrap configuration may repeat these public values, but it cannot replace them. Partial bundles, origin changes, key substitution, and key-ID substitution are rejected before device registration or session establishment.
+
+Build with all five `WASM_TRUSTED_*` variables documented in [`examples/secure_wasm`](../examples/secure_wasm). The Makefile injects public values into non-exported Go variables using linker build values. No private key is embedded.
+
+The WASM artifact is the final trust anchor. Publish its generated SHA-256/SRI value through a separately authenticated release system, signed native application, managed extension policy, TUF/Sigstore metadata, or another channel the network attacker cannot rewrite. A normal website's first load ultimately trusts browser PKI; no JavaScript/WASM protocol can defeat a hostile installed root CA that can replace the page, loader, artifact, and pins together.
 
 ## Build
 
@@ -38,6 +47,7 @@ This performs all of the following:
 2. Copies the matching `wasm_exec.js` from the active Go toolchain.
 3. Compiles the TypeScript facade and encrypted IndexedDB storage bridge.
 4. Writes `wasm/dist/SHA256SUMS` and `wasm/dist/asset-manifest.json` with SHA-256/SRI pins.
+5. Synchronizes a complete runnable copy into `examples/secure_wasm/wasm`.
 
 Artifacts:
 
@@ -102,6 +112,20 @@ if err != nil {
     log.Fatal(err)
 }
 _ = transport
+
+responseSigner, err := httpsignature.New(httpsignature.Config{
+    PrivateKey: responseSigningPrivateKey,
+    KeyID:      "api-response-2026-01",
+    Origin:     "https://api.example.com",
+    Skip: func(c fh.Ctx) bool {
+        return !strings.HasPrefix(c.Path(), "/api/")
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+// Must be registered after securetransport: encrypt first, sign ciphertext last.
+app.Use(responseSigner)
 ```
 
 The safe defaults deliberately reject:
@@ -125,6 +149,10 @@ const secure = await createSecureFetch({
   baseURL: "https://api.example.com",
   pinnedServerKey: "<base64url-x25519-public-key>",
   pinnedServerKeyID: "api-transport-2026-01",
+  responseSigningPublicKey: "<base64url-ed25519-public-key>",
+  responseSigningKeyID: "api-response-2026-01",
+  requireResponseSignature: true,
+  requireEmbeddedTrust: true,
   wasmURL: "/wasm/securefetch.wasm",
   wasmExecURL: "/wasm/wasm_exec.js",
   wasmIntegrity: "sha256-<from-asset-manifest>",
@@ -148,6 +176,10 @@ console.log(response.status, await response.json());
 ```
 
 `pinnedServerKey` is required by default. `allowUnpinnedServerKey: true` is enforced as a loopback-only development option and removes application-layer server authentication. `pinnedServerKeyID` additionally prevents an unexpected key/version from being selected during deployment or rotation.
+
+With `requireResponseSignature: true`, `responseSigningPublicKey` and `responseSigningKeyID` are also mandatory. WASM generates a fresh RFC 9421 nonce, puts the negotiation inside the encrypted request, verifies the RFC 9530 digest and Ed25519 signature over the ciphertext response, and only then decrypts it. For cross-origin use, CORS must expose `Content-Digest`, `Signature-Input`, and `Signature`.
+
+`requireEmbeddedTrust: true` explicitly requires build-time pins even on loopback. Independently of this setting, every non-loopback browser execution requires embedded trust and cannot be downgraded by runtime configuration. Inspect `secure.sessionInfo().trustMode`; production must report `embedded`.
 
 Set `requireAssetIntegrity: true` in production and provide the SHA-256 SRI values generated in `wasm/dist/asset-manifest.json`. The loader verifies the WASM bytes before instantiation and lets the browser enforce SRI on `wasm_exec.js`.
 
@@ -186,19 +218,20 @@ security response headers
 CORS/preflight
 session/authentication
 FH secure transport
+RFC 9421 response signer
 authorization
 schema validation
 business handler
 ```
 
-Put cookie/session middleware before FH secure transport when device registration or `ValidateSession` needs the normal login session. Put authorization and business handlers after FH secure transport so they see the decrypted body, restored protected headers, and secure transport locals. The transport encrypts the final buffered response after downstream handling.
+Put cookie/session middleware before FH secure transport when device registration or `ValidateSession` needs the normal login session. Register the RFC 9421 signer immediately after secure transport, then authorization and business handlers. On the response path, secure transport encrypts first and the signer covers the actual outer ciphertext representation.
 
 ## Operational requirements
 
 - HTTPS/TLS 1.3 is mandatory outside loopback development.
 - Use a strict CSP. Go WASM requires the narrower `'wasm-unsafe-eval'` source expression for WebAssembly compilation in browsers: `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`.
 - Serve immutable, content-addressed WASM/JS files, enforce their SRI pins, and publish the generated manifest through a separately signed release process.
-- Pin the server public key in a trusted application build. Fetching a pin from the same untrusted connection is useful for configuration but is not out-of-band pinning.
+- Embed both public keys and the origin in the trusted WASM build. Runtime values are assertions only, not trust anchors.
 - Rotate server keys with an overlap window and explicit key IDs. This implementation currently supports one active transport key per `Transport`; deploy parallel versions during rotation.
 - Set bounded body/header limits.
 - Export `OnSecurityEvent` to the audit/SIEM pipeline.

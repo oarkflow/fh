@@ -4,6 +4,7 @@ package main
 
 import (
 	"crypto/ecdh"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -16,6 +17,7 @@ import (
 	"syscall/js"
 	"time"
 
+	httpsig "github.com/oarkflow/fh/pkg/httpsignature"
 	protocol "github.com/oarkflow/fh/pkg/securetransport"
 )
 
@@ -33,20 +35,23 @@ type clientSession struct {
 }
 
 type clientConfig struct {
-	BaseURL           string
-	Prefix            string
-	ClientBuild       string
-	DeviceName        string
-	Credentials       string
-	RegistrationToken string
-	PinnedServer      [32]byte
-	HasPinnedKey      bool
-	PinnedServerKeyID string
-	HandshakeTTL      time.Duration
-	ClockSkew         time.Duration
-	RequestTTL        time.Duration
-	MaxSessionTTL     time.Duration
-	Limits            protocol.Limits
+	BaseURL               string
+	Prefix                string
+	ClientBuild           string
+	DeviceName            string
+	Credentials           string
+	RegistrationToken     string
+	PinnedServer          [32]byte
+	HasPinnedKey          bool
+	PinnedServerKeyID     string
+	ResponseSigningKeyID  string
+	ResponseSigningPublic ed25519.PublicKey
+	EmbeddedTrust         bool
+	HandshakeTTL          time.Duration
+	ClockSkew             time.Duration
+	RequestTTL            time.Duration
+	MaxSessionTTL         time.Duration
+	Limits                protocol.Limits
 }
 
 const maxControlResponseBody = 4096
@@ -64,6 +69,14 @@ type secureClient struct {
 var (
 	client = &secureClient{}
 	kept   []js.Func
+
+	// These public trust anchors are injected with -ldflags -X by `make wasm`.
+	// Production origins reject builds where the complete bundle is absent.
+	embeddedTrustedOrigin            string
+	embeddedTransportPublicKey       string
+	embeddedTransportKeyID           string
+	embeddedResponseSigningPublicKey string
+	embeddedResponseSigningKeyID     string
 )
 
 func main() {
@@ -215,6 +228,20 @@ func (c *secureClient) configure(v js.Value) error {
 		wipe(decoded)
 		cfg.HasPinnedKey = true
 	}
+	cfg.ResponseSigningKeyID = stringValue(v.Get("responseSigningKeyID"))
+	if len(cfg.ResponseSigningKeyID) > 128 {
+		return errors.New("fh secure fetch: responseSigningKeyID exceeds 128 bytes")
+	}
+	if value := stringValue(v.Get("responseSigningPublicKey")); value != "" {
+		key, err := httpsig.DecodePublicKey(value)
+		if err != nil {
+			return fmt.Errorf("fh secure fetch: invalid response signing public key: %w", err)
+		}
+		cfg.ResponseSigningPublic = key
+	}
+	if err := applyEmbeddedTrust(&cfg, boolValue(v.Get("requireEmbeddedTrust"))); err != nil {
+		return err
+	}
 	if !cfg.HasPinnedKey {
 		if !boolValue(v.Get("allowUnpinnedServerKey")) {
 			return errors.New("fh secure fetch: pinnedServerKey is required; allowUnpinnedServerKey is development-only")
@@ -222,6 +249,12 @@ func (c *secureClient) configure(v js.Value) error {
 		if !isLoopbackHost(parsed.Hostname()) {
 			return errors.New("fh secure fetch: unpinned server keys are permitted only on loopback")
 		}
+	}
+	if boolValue(v.Get("requireResponseSignature")) && (len(cfg.ResponseSigningPublic) != ed25519.PublicKeySize || cfg.ResponseSigningKeyID == "") {
+		return errors.New("fh secure fetch: trusted response signing key and key ID are required")
+	}
+	if len(cfg.ResponseSigningPublic) != 0 && cfg.ResponseSigningKeyID == "" {
+		return errors.New("fh secure fetch: responseSigningKeyID is required with responseSigningPublicKey")
 	}
 	nativeFetch := js.Global().Get("__fhNativeFetch")
 	if nativeFetch.Type() != js.TypeFunction {
@@ -244,6 +277,49 @@ func (c *secureClient) configure(v js.Value) error {
 	c.storage = storage
 	c.session = nil
 	c.mu.Unlock()
+	return nil
+}
+
+func applyEmbeddedTrust(cfg *clientConfig, explicitlyRequired bool) error {
+	bundle, err := protocol.ParseTrustBundle(
+		embeddedTrustedOrigin,
+		embeddedTransportPublicKey,
+		embeddedTransportKeyID,
+		embeddedResponseSigningPublicKey,
+		embeddedResponseSigningKeyID,
+	)
+	if err != nil {
+		if errors.Is(err, protocol.ErrTrustUnavailable) {
+			location := js.Global().Get("location")
+			browserLoopback := !location.IsUndefined() && !location.IsNull() && isLoopbackHost(location.Get("hostname").String())
+			if explicitlyRequired || !browserLoopback {
+				return errors.New("fh secure fetch: this build has no embedded root of trust")
+			}
+			return nil
+		}
+		return fmt.Errorf("fh secure fetch: invalid embedded root of trust: %w", err)
+	}
+	if cfg.BaseURL != bundle.Origin {
+		return errors.New("fh secure fetch: configured origin does not match the embedded trusted origin")
+	}
+	if cfg.HasPinnedKey && subtle.ConstantTimeCompare(cfg.PinnedServer[:], bundle.TransportPublicKey[:]) != 1 {
+		return errors.New("fh secure fetch: runtime transport key conflicts with embedded trust")
+	}
+	if cfg.PinnedServerKeyID != "" && subtle.ConstantTimeCompare([]byte(cfg.PinnedServerKeyID), []byte(bundle.TransportKeyID)) != 1 {
+		return errors.New("fh secure fetch: runtime transport key ID conflicts with embedded trust")
+	}
+	if len(cfg.ResponseSigningPublic) != 0 && subtle.ConstantTimeCompare(cfg.ResponseSigningPublic, bundle.ResponseSigningPublicKey[:]) != 1 {
+		return errors.New("fh secure fetch: runtime response key conflicts with embedded trust")
+	}
+	if cfg.ResponseSigningKeyID != "" && subtle.ConstantTimeCompare([]byte(cfg.ResponseSigningKeyID), []byte(bundle.ResponseSigningKeyID)) != 1 {
+		return errors.New("fh secure fetch: runtime response key ID conflicts with embedded trust")
+	}
+	copy(cfg.PinnedServer[:], bundle.TransportPublicKey[:])
+	cfg.HasPinnedKey = true
+	cfg.PinnedServerKeyID = bundle.TransportKeyID
+	cfg.ResponseSigningPublic = append(ed25519.PublicKey(nil), bundle.ResponseSigningPublicKey[:]...)
+	cfg.ResponseSigningKeyID = bundle.ResponseSigningKeyID
+	cfg.EmbeddedTrust = true
 	return nil
 }
 
@@ -479,6 +555,18 @@ func (c *secureClient) secureRequest(v js.Value) (js.Value, error) {
 	c.mu.Unlock()
 	defer wipe(keys.ClientToServer[:])
 	defer wipe(keys.ServerToClient[:])
+	var signatureNonce string
+	if len(cfg.ResponseSigningPublic) == ed25519.PublicKeySize {
+		signatureNonce, err = httpsig.NewNonce()
+		if err != nil {
+			return js.Undefined(), err
+		}
+		acceptSignature, formatErr := httpsig.FormatAcceptSignature(httpsig.DefaultLabel, signatureNonce, cfg.ResponseSigningKeyID)
+		if formatErr != nil {
+			return js.Undefined(), formatErr
+		}
+		headers = append(headers, protocol.Header{Name: strings.ToLower(httpsig.HeaderAcceptSignature), Value: acceptSignature})
+	}
 
 	now := time.Now()
 	expires := now.Add(cfg.RequestTTL)
@@ -573,6 +661,16 @@ func (c *secureClient) secureRequest(v js.Value) (js.Value, error) {
 			return js.Undefined(), errors.New("fh secure fetch: protected response exceeds the configured limit")
 		}
 	}
+	if len(cfg.ResponseSigningPublic) == ed25519.PublicKeySize {
+		outerBody := encryptedResponse
+		if noBodyResponse {
+			outerBody = nil
+		}
+		if err := verifyOuterResponseSignature(method, requestURL, status, responseHeaders, outerBody, signatureNonce, cfg); err != nil {
+			wipe(encryptedResponse)
+			return js.Undefined(), err
+		}
+	}
 	responseEnv, payload, err := protocol.DecryptResponse(keys.ServerToClient, status, encryptedResponse, cfg.Limits)
 	wipe(encryptedResponse)
 	if err != nil {
@@ -608,6 +706,36 @@ func (c *secureClient) secureRequest(v js.Value) (js.Value, error) {
 	result.Set("url", requestURL)
 	result.Set("requestId", protocol.EncodeID(requestID))
 	return result, nil
+}
+
+func verifyOuterResponseSignature(method, requestURL string, status int, headers js.Value, body []byte, nonce string, cfg clientConfig) error {
+	if _, err := url.Parse(requestURL); err != nil {
+		return errors.New("fh secure fetch: signed response request URL is invalid")
+	}
+	values := make(map[string]string, 4)
+	for _, name := range []string{httpsig.HeaderContentDigest, httpsig.HeaderSignatureInput, httpsig.HeaderSignature, "Content-Type"} {
+		value := headers.Call("get", name)
+		if !value.IsNull() && !value.IsUndefined() && value.String() != "" {
+			values[name] = value.String()
+		}
+	}
+	verifier := httpsig.Verifier{
+		KeyID:       cfg.ResponseSigningKeyID,
+		PublicKey:   cfg.ResponseSigningPublic,
+		ClockSkew:   30 * time.Second,
+		MaxValidity: 2 * time.Minute,
+	}
+	response := httpsig.ResponseMessage{
+		Status:         status,
+		ContentDigest:  values[httpsig.HeaderContentDigest],
+		ContentType:    values["Content-Type"],
+		SignatureInput: values[httpsig.HeaderSignatureInput],
+		Signature:      values[httpsig.HeaderSignature],
+	}
+	if err := verifier.VerifyMessage(method, requestURL, response, body, nonce); err != nil {
+		return fmt.Errorf("fh secure fetch: RFC 9421 response verification failed: %w", err)
+	}
+	return nil
 }
 
 type binaryResponse struct {
@@ -717,6 +845,11 @@ func (c *secureClient) infoObject() js.Value {
 	result := js.Global().Get("Object").New()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.cfg.EmbeddedTrust {
+		result.Set("trustMode", "embedded")
+	} else {
+		result.Set("trustMode", "loopback-development")
+	}
 	if c.device != nil {
 		result.Set("deviceId", protocol.EncodeID(c.device.ID))
 		result.Set("deviceName", c.device.Name)
@@ -762,6 +895,11 @@ func headersFromJS(v js.Value) ([]protocol.Header, string, error) {
 		}
 		name := strings.ToLower(strings.TrimSpace(pair.Index(0).String()))
 		value := pair.Index(1).String()
+		if name == strings.ToLower(httpsig.HeaderAcceptSignature) {
+			// Signature negotiation is generated inside WASM from a fresh nonce;
+			// page script cannot inject or reuse one.
+			continue
+		}
 		if name == "content-type" {
 			contentType = value
 			continue
@@ -894,7 +1032,7 @@ func durationMillis(v js.Value, fallback time.Duration) time.Duration {
 
 func isLoopbackHost(host string) bool {
 	switch strings.ToLower(host) {
-	case "localhost", "127.0.0.1", "::1":
+	case "localhost", "127.0.0.1", "0.0.0.0", "::1":
 		return true
 	default:
 		return false

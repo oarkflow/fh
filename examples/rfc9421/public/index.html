@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RFC 9421 response verification</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <main>
+      <h1>RFC 9421 response verification</h1>
+      <p>The response is displayed only after its nonce, lifetime, content digest, request binding, key ID, and Ed25519 signature verify.</p>
+      <button id="request" type="button">Request and verify response</button>
+      <pre id="output" aria-live="polite">Ready.</pre>
+      <p class="warning">This runnable demo obtains its public key from the same server. Production applications must embed or obtain the key through an independently trusted channel.</p>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

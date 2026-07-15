@@ -38,6 +38,7 @@ See the [root README](../README.md) for a quick tour. This folder is the full re
 | [Reliability Layer](reliability.md) | Request journaling, idempotency, durable queue, outbox/inbox, DLQ, custom storage |
 | [Security](security.md) | TLS/mTLS, read budgets, trusted-proxy identity, message integrity, HTTP QUERY |
 | [Secure WASM Transport](secure-wasm-transport.md) | Device-bound encrypted Fetch transport for browser/WASM clients |
+| [RFC 9421 Response Signatures](rfc9421-response-signatures.md) | Nonce-bound Ed25519 response integrity for Go and browser clients |
 | [Merkle Audit](merkle_audit.md) | Tamper-evident audit checkpoints via Merkle tree |
 | [SLO Tracking](slo.md) | Route-level availability/latency SLOs and burn-rate alerts |
 | [Budgets](budget.md) | Hierarchical per-request execution budgets (time, memory, upstream, retries) |

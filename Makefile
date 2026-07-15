@@ -4,10 +4,32 @@ TSC ?= tsc
 GOROOT := $(shell $(GO) env GOROOT)
 WASM_DIR := wasm
 WASM_DIST := $(WASM_DIR)/dist
+WASM_EXAMPLE_DIR := examples/secure_wasm/wasm
 WASM_EXEC_SRC := $(firstword $(wildcard $(GOROOT)/lib/wasm/wasm_exec.js $(GOROOT)/misc/wasm/wasm_exec.js))
 WASM_BINARY := $(WASM_DIST)/securefetch.wasm
 
-.PHONY: all test secure-test wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-clean clean
+WASM_TRUST_VALUES := $(strip $(WASM_TRUSTED_ORIGIN)$(WASM_TRUSTED_TRANSPORT_KEY)$(WASM_TRUSTED_TRANSPORT_KEY_ID)$(WASM_TRUSTED_RESPONSE_KEY)$(WASM_TRUSTED_RESPONSE_KEY_ID))
+WASM_TRUST_LDFLAGS :=
+ifneq ($(WASM_TRUST_VALUES),)
+ifeq ($(strip $(WASM_TRUSTED_ORIGIN)),)
+$(error WASM_TRUSTED_ORIGIN is required when building a trusted WASM artifact)
+endif
+ifeq ($(strip $(WASM_TRUSTED_TRANSPORT_KEY)),)
+$(error WASM_TRUSTED_TRANSPORT_KEY is required when building a trusted WASM artifact)
+endif
+ifeq ($(strip $(WASM_TRUSTED_TRANSPORT_KEY_ID)),)
+$(error WASM_TRUSTED_TRANSPORT_KEY_ID is required when building a trusted WASM artifact)
+endif
+ifeq ($(strip $(WASM_TRUSTED_RESPONSE_KEY)),)
+$(error WASM_TRUSTED_RESPONSE_KEY is required when building a trusted WASM artifact)
+endif
+ifeq ($(strip $(WASM_TRUSTED_RESPONSE_KEY_ID)),)
+$(error WASM_TRUSTED_RESPONSE_KEY_ID is required when building a trusted WASM artifact)
+endif
+WASM_TRUST_LDFLAGS := -X main.embeddedTrustedOrigin=$(WASM_TRUSTED_ORIGIN) -X main.embeddedTransportPublicKey=$(WASM_TRUSTED_TRANSPORT_KEY) -X main.embeddedTransportKeyID=$(WASM_TRUSTED_TRANSPORT_KEY_ID) -X main.embeddedResponseSigningPublicKey=$(WASM_TRUSTED_RESPONSE_KEY) -X main.embeddedResponseSigningKeyID=$(WASM_TRUSTED_RESPONSE_KEY_ID)
+endif
+
+.PHONY: all test secure-test wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-clean clean
 
 all: test wasm
 
@@ -17,11 +39,11 @@ test:
 secure-test:
 	$(GO) test ./pkg/securetransport ./mw/securetransport
 
-wasm: wasm-check
+wasm: wasm-example
 
 wasm-go:
 	@mkdir -p $(WASM_DIST)
-	GOOS=js GOARCH=wasm CGO_ENABLED=0 $(GO) build -trimpath -buildvcs=false -ldflags="-s -w" -o $(WASM_BINARY) ./wasm/cmd/securefetch
+	GOOS=js GOARCH=wasm CGO_ENABLED=0 $(GO) build -trimpath -buildvcs=false -ldflags="-s -w $(WASM_TRUST_LDFLAGS)" -o $(WASM_BINARY) ./wasm/cmd/securefetch
 	@if command -v wasm-opt >/dev/null 2>&1; then \
 		before=$$(wc -c < $(WASM_BINARY)); \
 		wasm-opt -Oz --enable-bulk-memory --enable-sign-ext --enable-nontrapping-float-to-int \
@@ -57,8 +79,15 @@ wasm-check: wasm-manifest
 	} > SHA256SUMS
 	@echo "Built $(WASM_BINARY) and copied Go runtime to $(WASM_DIST)/wasm_exec.js"
 
+wasm-example: wasm-check
+	@mkdir -p $(WASM_EXAMPLE_DIR)
+	cp $(WASM_DIST)/securefetch.wasm $(WASM_DIST)/wasm_exec.js $(WASM_DIST)/secure-fetch.js $(WASM_DIST)/storage.js $(WASM_DIST)/index.js $(WASM_DIST)/secure-fetch.d.ts $(WASM_DIST)/storage.d.ts $(WASM_DIST)/index.d.ts $(WASM_DIST)/asset-manifest.json $(WASM_DIST)/SHA256SUMS $(WASM_EXAMPLE_DIR)/
+	@echo "Synchronized complete WASM bundle to $(WASM_EXAMPLE_DIR)"
+
 wasm-clean:
 	rm -f $(WASM_DIST)/securefetch.wasm $(WASM_DIST)/wasm_exec.js $(WASM_DIST)/SHA256SUMS $(WASM_DIST)/asset-manifest.json
 	rm -f $(WASM_DIST)/*.js $(WASM_DIST)/*.d.ts
+	rm -f $(WASM_EXAMPLE_DIR)/securefetch.wasm $(WASM_EXAMPLE_DIR)/wasm_exec.js $(WASM_EXAMPLE_DIR)/SHA256SUMS $(WASM_EXAMPLE_DIR)/asset-manifest.json
+	rm -f $(WASM_EXAMPLE_DIR)/*.js $(WASM_EXAMPLE_DIR)/*.d.ts
 
 clean: wasm-clean

@@ -36,6 +36,22 @@ func DecodeServerPrivateKey(value string) ([]byte, error) {
 	return key, nil
 }
 
+// ServerPublicKey derives the public X25519 pin from a server private key.
+func ServerPublicKey(privateKey []byte) ([protocol.X25519KeySize]byte, error) {
+	var out [protocol.X25519KeySize]byte
+	if len(privateKey) != protocol.X25519KeySize {
+		return out, errors.New("secure transport: X25519 private key must be 32 bytes")
+	}
+	keyBytes := append([]byte(nil), privateKey...)
+	defer clear(keyBytes)
+	key, err := ecdh.X25519().NewPrivateKey(keyBytes)
+	if err != nil {
+		return out, errors.New("secure transport: invalid X25519 private key")
+	}
+	copy(out[:], key.PublicKey().Bytes())
+	return out, nil
+}
+
 func SessionFromContext(c fh.Ctx) (SessionInfo, bool) {
 	if c == nil {
 		return SessionInfo{}, false

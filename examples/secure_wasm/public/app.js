@@ -11,7 +11,7 @@ function show(value) {
 
 async function responseJSON(response) {
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.message ?? `HTTP ${response.status}`);
+  if (!response.ok) throw new Error(body.detail ?? body.message ?? `HTTP ${response.status}`);
   return body;
 }
 

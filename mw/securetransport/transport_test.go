@@ -10,12 +10,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/oarkflow/fh"
+	responsemiddleware "github.com/oarkflow/fh/mw/httpsignature"
+	responseprotocol "github.com/oarkflow/fh/pkg/httpsignature"
 	protocol "github.com/oarkflow/fh/pkg/securetransport"
 )
 
@@ -116,6 +119,20 @@ func TestEncryptedFHRequestResponseAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	responsePublicKey, responsePrivateKey, err := responseprotocol.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseSigner, err := responsemiddleware.New(responsemiddleware.Config{
+		PrivateKey: responsePrivateKey,
+		KeyID:      "test-response-key",
+		Origin:     "http://localhost",
+		Skip:       func(c fh.Ctx) bool { return !strings.HasPrefix(c.Path(), "/api/") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Use(responseSigner)
 	app.Post("/api/echo", func(c fh.Ctx) error {
 		if c.Get("Authorization") != "Bearer bound-token" {
 			return fh.NewHTTPError(fh.StatusUnauthorized, "TOKEN_MISSING", "token missing")
@@ -217,10 +234,15 @@ func TestEncryptedFHRequestResponseAndReplay(t *testing.T) {
 		ExpiresAt: requestNow.Add(time.Minute).UnixMilli(),
 		Nonce:     requestNonce,
 	}
+	responseNonce, _ := responseprotocol.NewNonce()
+	acceptSignature, _ := responseprotocol.FormatAcceptSignature(responseprotocol.DefaultLabel, responseNonce, "test-response-key")
 	secureBody, err := protocol.EncryptRequest(keys.ClientToServer, "POST", "/api/echo", requestEnvelope, protocol.RequestPayload{
 		ContentType: "application/json",
-		Headers:     []protocol.Header{{Name: "authorization", Value: "Bearer bound-token"}},
-		Body:        []byte(`{"message":"hello"}`),
+		Headers: []protocol.Header{
+			{Name: "authorization", Value: "Bearer bound-token"},
+			{Name: strings.ToLower(responseprotocol.HeaderAcceptSignature), Value: acceptSignature},
+		},
+		Body: []byte(`{"message":"hello"}`),
 	}, protocol.Limits{})
 	if err != nil {
 		t.Fatal(err)
@@ -243,6 +265,7 @@ func TestEncryptedFHRequestResponseAndReplay(t *testing.T) {
 	if _, exposed := secured.headers["x-secret-meta"]; exposed {
 		t.Fatal("application response metadata leaked outside encrypted envelope")
 	}
+	verifySignedCiphertext(t, responsePublicKey, "test-response-key", "POST", "http://localhost/api/echo", responseNonce, secured)
 	responseEnvelope, responsePayload, err := protocol.DecryptResponse(keys.ServerToClient, secured.status, secured.body, protocol.Limits{})
 	if err != nil {
 		t.Fatal(err)
@@ -279,7 +302,11 @@ func TestEncryptedFHRequestResponseAndReplay(t *testing.T) {
 		ExpiresAt: errorNow.Add(time.Minute).UnixMilli(),
 		Nonce:     errorNonce,
 	}
-	errorBody, err := protocol.EncryptRequest(keys.ClientToServer, "POST", "/api/error", errorEnvelope, protocol.RequestPayload{}, protocol.Limits{})
+	errorResponseNonce, _ := responseprotocol.NewNonce()
+	errorAcceptSignature, _ := responseprotocol.FormatAcceptSignature(responseprotocol.DefaultLabel, errorResponseNonce, "test-response-key")
+	errorBody, err := protocol.EncryptRequest(keys.ClientToServer, "POST", "/api/error", errorEnvelope, protocol.RequestPayload{
+		Headers: []protocol.Header{{Name: strings.ToLower(responseprotocol.HeaderAcceptSignature), Value: errorAcceptSignature}},
+	}, protocol.Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,12 +320,40 @@ func TestEncryptedFHRequestResponseAndReplay(t *testing.T) {
 	if securedError.headers[strings.ToLower(protocol.HeaderSecure)] != "1" {
 		t.Fatal("application error response was not protected")
 	}
+	verifySignedCiphertext(t, responsePublicKey, "test-response-key", "POST", "http://localhost/api/error", errorResponseNonce, securedError)
 	errorResponseEnvelope, errorPayload, err := protocol.DecryptResponse(keys.ServerToClient, securedError.status, securedError.body, protocol.Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !protocol.EqualID(errorResponseEnvelope.RequestID, errorRequestID) || errorPayload.Status != fh.StatusUnprocessableEntity || len(errorPayload.Body) == 0 {
 		t.Fatalf("unexpected encrypted error response: request=%s status=%d body=%q", protocol.EncodeID(errorResponseEnvelope.RequestID), errorPayload.Status, errorPayload.Body)
+	}
+}
+
+func verifySignedCiphertext(t *testing.T, publicKey ed25519.PublicKey, keyID, method, target, nonce string, response rawResponse) {
+	t.Helper()
+	request, err := http.NewRequest(method, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpResponse := &http.Response{StatusCode: response.status, Header: make(http.Header)}
+	for name, value := range response.headers {
+		httpResponse.Header.Set(name, value)
+	}
+	verifier := responseprotocol.Verifier{KeyID: keyID, PublicKey: publicKey}
+	if err := verifier.Verify(request, httpResponse, response.body, nonce); err != nil {
+		t.Fatalf("signed ciphertext verification failed: %v", err)
+	}
+	withoutSignature := &http.Response{StatusCode: httpResponse.StatusCode, Header: httpResponse.Header.Clone()}
+	withoutSignature.Header.Del(responseprotocol.HeaderSignature)
+	if err := verifier.Verify(request, withoutSignature, response.body, nonce); err == nil {
+		t.Fatal("missing RFC 9421 signature was accepted")
+	}
+
+	tampered := append([]byte(nil), response.body...)
+	tampered[len(tampered)/2] ^= 0x01
+	if err := verifier.Verify(request, httpResponse, tampered, nonce); err == nil {
+		t.Fatal("tampered secure-transport ciphertext passed RFC 9421 verification")
 	}
 }
 
