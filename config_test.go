@@ -86,6 +86,9 @@ func TestSecureByDefaultResolvesFailClosedBaseline(t *testing.T) {
 	if app.cfg.ServerHeader != "" {
 		t.Fatalf("ServerHeader = %q, want empty", app.cfg.ServerHeader)
 	}
+	if !app.cfg.DisableH2C {
+		t.Fatal("secure baseline did not disable cleartext HTTP/2")
+	}
 	if app.cfg.ReadHeaderTimeout != 5*time.Second || app.cfg.ReadTimeout != 10*time.Second || app.cfg.WriteTimeout != 30*time.Second || app.cfg.IdleTimeout != 60*time.Second {
 		t.Fatalf("timeouts were not bounded: %#v", app.cfg)
 	}

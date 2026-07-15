@@ -94,9 +94,6 @@ func (o ErrorOptions) normalize(appDebug bool) ErrorOptions {
 	if !o.IncludeInstance {
 		o.IncludeInstance = true
 	}
-	if !o.LogInternal {
-		o.LogInternal = true
-	}
 	if o.Redact == nil {
 		o.Redact = RedactSecrets
 	}
@@ -349,7 +346,10 @@ func classifyError(err error, opts ErrorOptions) (*HTTPError, Problem, []byte) {
 	if errors.As(err, &pe) {
 		he := WrapHTTPError(pe, StatusInternalServerError, "PANIC", "An internal server error occurred")
 		he.Kind, he.Severity = KindPanic, SeverityCritical
-		return he, Problem{Status: he.Status, Code: he.Code, Detail: he.Message}, pe.Stack
+		if opts.LogInternal {
+			stack = pe.Stack
+		}
+		return he, Problem{Status: he.Status, Code: he.Code, Detail: he.Message}, stack
 	}
 	var he *HTTPError
 	if errors.As(err, &he) {
@@ -410,7 +410,11 @@ func (c *DefaultCtx) ErrorReport(err error) ErrorReport {
 	}
 	he, p, stack := classifyError(err, opts)
 	decorateProblem(c, &p, he, err, opts, stack)
-	return ErrorReport{Error: he, Problem: p, RequestID: errorRequestIDFromCtx(c), Timestamp: time.Now().UTC(), Path: c.Path(), Method: c.Method(), RemoteIP: c.IP(), Stack: stack, Cause: he.Error()}
+	cause := he.Message
+	if opts.ExposeDebug || opts.LogInternal {
+		cause = opts.Redact(he.Error())
+	}
+	return ErrorReport{Error: he, Problem: p, RequestID: errorRequestIDFromCtx(c), Timestamp: time.Now().UTC(), Path: c.Path(), Method: c.Method(), RemoteIP: c.IP(), Stack: stack, Cause: cause}
 }
 
 func (c *DefaultCtx) ErrorResponse(err error) error { return c.SafeErrorResponse(err) }
@@ -428,23 +432,30 @@ func (c *DefaultCtx) SafeErrorResponse(err error) error {
 	}
 	he, p, stack := classifyError(err, opts)
 	decorateProblem(c, &p, he, err, opts, stack)
-	if c.server != nil && c.server.logger != nil && len(stack) > 0 {
-		c.server.logger.Error("request error",
+	if c.server != nil && c.server.logger != nil {
+		loggedError := he.Message
+		if he.Status < 500 || opts.ExposeDebug || opts.LogInternal {
+			loggedError = opts.Redact(err.Error())
+		}
+		args := []any{
 			"request_id", errorRequestIDFromCtx(c),
 			"method", c.Method(),
 			"path", c.Path(),
 			"remote_ip", c.IP(),
 			"status", he.Status,
 			"code", he.Code,
-			"error", err,
-			"stack", string(stack),
-		)
-	}
-	if c.server != nil && c.server.logger != nil {
+			"kind", he.Kind,
+			"severity", he.Severity,
+			"retryable", he.Retryable,
+			"error", loggedError,
+		}
+		if len(stack) > 0 {
+			args = append(args, "stack", opts.Redact(string(stack)))
+		}
 		if he.Status >= 500 {
-			c.server.logger.Error("server error", "request_id", errorRequestIDFromCtx(c), "method", c.Method(), "path", c.Path(), "status", he.Status, "error", err)
+			c.server.logger.Error("server error", args...)
 		} else if he.Status >= 400 {
-			c.server.logger.Warn("client error", "request_id", errorRequestIDFromCtx(c), "method", c.Method(), "path", c.Path(), "status", he.Status, "error", err)
+			c.server.logger.Warn("client error", args...)
 		}
 	}
 	if c.server != nil {

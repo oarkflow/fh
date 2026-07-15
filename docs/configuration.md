@@ -6,9 +6,13 @@
 type Config struct {
     ReadTimeout          time.Duration            // Default: 10s
 	ReadHeaderTimeout    time.Duration            // Default: 5s (production)
-    WriteTimeout         time.Duration            // Default: 10s
-    IdleTimeout          time.Duration            // Default: 60s
-    MaxConnections       int                      // Default: 0 (unlimited)
+    RequestBodyTimeout   time.Duration            // Default: 10s
+    WriteTimeout         time.Duration            // Default: 30s
+    HandlerTimeout       time.Duration            // Default: 0 (no handler deadline)
+    IdleTimeout          time.Duration            // Default: 120s
+    TLSHandshakeTimeout  time.Duration            // Default: 10s
+    HTTP2IdleTimeout     time.Duration            // Default: 120s
+    MaxConnections       int                      // Default: 10,000
     ReadBufferSize       int                      // Default: 16384 (16KB)
     MaxRequestBodySize   int                      // Default: 4194304 (4MB)
     MaxHeaderListSize    int                      // Default: 65536 (64KB)
@@ -17,6 +21,8 @@ type Config struct {
     MaxConcurrentStreams uint32                   // Default: 128 (HTTP/2)
     DisableKeepAlive     bool                     // Default: false
     DisableHTTP2         bool                     // Default: false
+    DisableH2C           bool                     // Default: false; true in SecureByDefault
+    RequestHeadHandler   HandlerFunc              // Optional pre-body admission/auth hook
     ErrorHandler         ErrorHandler             // Default: logs + problem JSON
     NotFoundHandler      NotFoundHandler          // Default: 404 text/plain
     MethodNotAllowed     MethodNotAllowedHandler  // Default: 405 + Allow header
@@ -34,8 +40,12 @@ type Config struct {
 |-------|---------|-------------|
 | `ReadTimeout` | 10s | Maximum duration for reading the entire request |
 | `ReadHeaderTimeout` | 5s | Absolute request-line/header budget after the first byte |
-| `WriteTimeout` | 10s | Maximum duration for writing the response |
-| `IdleTimeout` | 60s | Maximum idle time for keep-alive connections |
+| `RequestBodyTimeout` | 10s | Absolute budget for receiving one request body |
+| `WriteTimeout` | 30s | Per-write socket deadline; streaming writes refresh it |
+| `HandlerTimeout` | disabled | Optional deadline exposed through `Ctx.Context()` |
+| `IdleTimeout` | 120s | Maximum idle time for HTTP/1 keep-alive connections |
+| `TLSHandshakeTimeout` | 10s | Maximum TLS handshake duration |
+| `HTTP2IdleTimeout` | 120s | Maximum interval between HTTP/2 frames |
 
 ### Buffer/Limit Sizes
 
@@ -53,6 +63,7 @@ type Config struct {
 |-------|---------|-------------|
 | `MaxConcurrentStreams` | 128 | Maximum concurrent HTTP/2 streams |
 | `DisableHTTP2` | false | Disable HTTP/2 support |
+| `DisableH2C` | false | Disable cleartext prior-knowledge and upgrade HTTP/2 while retaining TLS ALPN HTTP/2 |
 
 ### Behavior
 
@@ -73,7 +84,7 @@ type Config struct {
 ### Template Engine
 
 ```go
-app := fh.New(fh.Config{
+app := fh.NewWithConfig(fh.Config{
     TemplateEngine: &MyTemplateEngine{},
 })
 // Then in handler:

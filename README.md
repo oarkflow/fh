@@ -8,7 +8,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 
 - **Zero dependencies** — only the Go standard library
 - **HTTP/1.1** — full request/response parsing, chunked transfer, trailers
-- **HTTP/2** — TLS ALPN, h2c prior knowledge, h2c upgrade, stream multiplexing, flow control
+- **HTTP/2** — TLS ALPN, optional h2c prior knowledge/upgrade, stream multiplexing, flow control
 - **WebSocket** — RFC 6455 server implementation with `EventHub` pub/sub layer
 - **Trie-based router** — radix tree with named (`:param`) and wildcard (`*wild`) parameters
 - **Codec system** — pluggable body parsers for JSON, XML, form, multipart, CSV, NDJSON, text, binary
@@ -20,6 +20,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 - **Template engine** — agnostic interface, any engine implementing `Render(w, name, data, layout...)`
 - **Static file serving** — directory listings, compression, cache control, range requests
 - **Graceful shutdown** — `app.ShutdownWithContext(ctx)` or `app.ListenWithGracefulShutdown(addr)`
+- **Graceful TLS shutdown** — `app.ListenTLSWithGracefulShutdown(addr, certFile, keyFile)`
 - **Pool-based zero-allocation** — `sync.Pool` for contexts, byte buffers, HPACK decoders
 - **Hardened TLS/mTLS** — TLS 1.3 config builder, verified peer state in request contexts, atomic certificate reload
 - **Outbound HTTP client** — connection pooling, retries, circuit breaker, SSRF protection (`fh.NewClient`)
@@ -182,7 +183,7 @@ app.StaticFS("/", fh.StaticConfig{
 
 ## HTTP/2
 
-fh supports TLS + ALPN (`app.ListenTLS(":443", "cert.pem", "key.pem")`), h2c prior knowledge (automatic on `app.Listen`), and h2c upgrade from HTTP/1.1 — all handled transparently. See [HTTP/2](docs/http2.md).
+fh supports TLS + ALPN (`app.ListenTLS(":443", "cert.pem", "key.pem")`), h2c prior knowledge, and h2c upgrade from HTTP/1.1. Use `fh.WithDisableH2C(true)` on cleartext listeners that should accept only HTTP/1; `WithSecureByDefault(true)` applies that restriction automatically. See [HTTP/2](docs/http2.md).
 
 ## WebSocket
 
@@ -229,7 +230,7 @@ return fh.NotFound("User not found")
 return fh.Unauthorized("Sign in required")
 return fh.NewHTTPError(fh.StatusConflict, "USER_EXISTS", "User already exists")
 
-app := fh.New(fh.Config{
+app := fh.NewWithConfig(fh.Config{
     ErrorHandler: func(c *fh.Ctx, err error) { _ = c.ErrorResponse(err) },
     NotFoundHandler: func(c *fh.Ctx) error {
         return c.Status(fh.StatusNotFound).JSON(fh.Map{"error": "missing"})
@@ -246,7 +247,10 @@ app := fh.New(fh.Config{
     ReadTimeout:          10 * time.Second,
     WriteTimeout:         10 * time.Second,
     IdleTimeout:          120 * time.Second,
-    MaxConnections:       256 * 1000,
+    RequestBodyTimeout:   10 * time.Second,
+    TLSHandshakeTimeout:  10 * time.Second,
+    HTTP2IdleTimeout:     60 * time.Second,
+    MaxConnections:       10_000,
     MaxRequestBodySize:   4 * 1024 * 1024, // 4MB
     MaxConcurrentStreams: 128,
     ErrorHandler:         customErrorHandler,

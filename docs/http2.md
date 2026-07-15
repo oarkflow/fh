@@ -19,7 +19,7 @@ fh implements HTTP/2 (RFC 7540 / RFC 9113) entirely from scratch, including HPAC
 HTTP/2 is enabled by default. Disable it:
 
 ```go
-app := fh.New(fh.Config{
+app := fh.NewWithConfig(fh.Config{
     DisableHTTP2: true,
 })
 ```
@@ -27,9 +27,10 @@ app := fh.New(fh.Config{
 ### HTTP/2-Specific Settings
 
 ```go
-app := fh.New(fh.Config{
+app := fh.NewWithConfig(fh.Config{
     MaxConcurrentStreams: 256, // default: 128
-    WriteTimeout:         30 * time.Second,
+    HTTP2IdleTimeout:     60 * time.Second,
+    RequestBodyTimeout:   10 * time.Second,
 })
 ```
 
@@ -60,6 +61,10 @@ app.ListenTLS(":443", "cert.pem", "key.pem")
 // Server auto-detects and switches to HTTP/2
 app.Listen(":8080")
 ```
+
+Cleartext HTTP/2 should normally be limited to a trusted internal network. To
+serve HTTP/2 only through TLS/ALPN, use `fh.WithDisableH2C(true)`. The
+`SecureByDefault` profile applies this setting automatically.
 
 ### h2c Upgrade
 

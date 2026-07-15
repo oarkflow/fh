@@ -19,19 +19,25 @@ import (
 )
 
 type Server struct {
-	Addr               string `json:"addr"`
-	SecureByDefault    bool   `json:"secure_by_default"`
-	ReadTimeout        string `json:"read_timeout"`
-	WriteTimeout       string `json:"write_timeout"`
-	IdleTimeout        string `json:"idle_timeout"`
-	MaxConnections     int    `json:"max_connections"`
-	MaxRequestBodySize int    `json:"max_request_body_size"`
-	MaxHeaderListSize  int    `json:"max_header_list_size"`
-	MaxHeaderCount     int    `json:"max_header_count"`
-	MaxRequestLineSize int    `json:"max_request_line_size"`
-	DisableHTTP2       bool   `json:"disable_http2"`
-	Debug              bool   `json:"debug"`
-	Environment        string `json:"environment"`
+	Addr                string `json:"addr"`
+	SecureByDefault     bool   `json:"secure_by_default"`
+	ReadTimeout         string `json:"read_timeout"`
+	ReadHeaderTimeout   string `json:"read_header_timeout"`
+	RequestBodyTimeout  string `json:"request_body_timeout"`
+	WriteTimeout        string `json:"write_timeout"`
+	HandlerTimeout      string `json:"handler_timeout"`
+	IdleTimeout         string `json:"idle_timeout"`
+	TLSHandshakeTimeout string `json:"tls_handshake_timeout"`
+	HTTP2IdleTimeout    string `json:"http2_idle_timeout"`
+	MaxConnections      int    `json:"max_connections"`
+	MaxRequestBodySize  int    `json:"max_request_body_size"`
+	MaxHeaderListSize   int    `json:"max_header_list_size"`
+	MaxHeaderCount      int    `json:"max_header_count"`
+	MaxRequestLineSize  int    `json:"max_request_line_size"`
+	DisableHTTP2        bool   `json:"disable_http2"`
+	DisableH2C          bool   `json:"disable_h2c"`
+	Debug               bool   `json:"debug"`
+	Environment         string `json:"environment"`
 }
 
 type StartupBanner struct {
@@ -94,11 +100,26 @@ func ApplyEnv(c Config, prefix string) (Config, error) {
 	if v := os.Getenv(key("READ_TIMEOUT")); v != "" {
 		c.Server.ReadTimeout = v
 	}
+	if v := os.Getenv(key("READ_HEADER_TIMEOUT")); v != "" {
+		c.Server.ReadHeaderTimeout = v
+	}
+	if v := os.Getenv(key("REQUEST_BODY_TIMEOUT")); v != "" {
+		c.Server.RequestBodyTimeout = v
+	}
 	if v := os.Getenv(key("WRITE_TIMEOUT")); v != "" {
 		c.Server.WriteTimeout = v
 	}
+	if v := os.Getenv(key("HANDLER_TIMEOUT")); v != "" {
+		c.Server.HandlerTimeout = v
+	}
 	if v := os.Getenv(key("IDLE_TIMEOUT")); v != "" {
 		c.Server.IdleTimeout = v
+	}
+	if v := os.Getenv(key("TLS_HANDSHAKE_TIMEOUT")); v != "" {
+		c.Server.TLSHandshakeTimeout = v
+	}
+	if v := os.Getenv(key("HTTP2_IDLE_TIMEOUT")); v != "" {
+		c.Server.HTTP2IdleTimeout = v
 	}
 	if v := os.Getenv(key("ENVIRONMENT")); v != "" {
 		c.Server.Environment = v
@@ -117,6 +138,14 @@ func ApplyEnv(c Config, prefix string) (Config, error) {
 			errs = append(errs, fmt.Errorf("FH_SECURE_BY_DEFAULT: %w", err))
 		} else {
 			c.Server.SecureByDefault = b
+		}
+	}
+	if v := os.Getenv(key("DISABLE_H2C")); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("FH_DISABLE_H2C: %w", err))
+		} else {
+			c.Server.DisableH2C = b
 		}
 	}
 	if v := os.Getenv(key("MAX_CONNECTIONS")); v != "" {
@@ -189,7 +218,12 @@ func ApplyEnv(c Config, prefix string) (Config, error) {
 }
 
 func (c Config) Validate() error {
-	for name, raw := range map[string]string{"read_timeout": c.Server.ReadTimeout, "write_timeout": c.Server.WriteTimeout, "idle_timeout": c.Server.IdleTimeout} {
+	for name, raw := range map[string]string{
+		"read_timeout": c.Server.ReadTimeout, "read_header_timeout": c.Server.ReadHeaderTimeout,
+		"request_body_timeout": c.Server.RequestBodyTimeout, "write_timeout": c.Server.WriteTimeout,
+		"handler_timeout": c.Server.HandlerTimeout, "idle_timeout": c.Server.IdleTimeout,
+		"tls_handshake_timeout": c.Server.TLSHandshakeTimeout, "http2_idle_timeout": c.Server.HTTP2IdleTimeout,
+	} {
 		if raw != "" {
 			if _, err := time.ParseDuration(raw); err != nil {
 				return fmt.Errorf("%s: %w", name, err)
@@ -212,13 +246,33 @@ func (c Config) AppConfig() (fh.Config, error) {
 	if err != nil {
 		return fh.Config{}, fmt.Errorf("read_timeout: %w", err)
 	}
+	out.ReadHeaderTimeout, err = dur(c.Server.ReadHeaderTimeout)
+	if err != nil {
+		return fh.Config{}, fmt.Errorf("read_header_timeout: %w", err)
+	}
+	out.RequestBodyTimeout, err = dur(c.Server.RequestBodyTimeout)
+	if err != nil {
+		return fh.Config{}, fmt.Errorf("request_body_timeout: %w", err)
+	}
 	out.WriteTimeout, err = dur(c.Server.WriteTimeout)
 	if err != nil {
 		return fh.Config{}, fmt.Errorf("write_timeout: %w", err)
 	}
+	out.HandlerTimeout, err = dur(c.Server.HandlerTimeout)
+	if err != nil {
+		return fh.Config{}, fmt.Errorf("handler_timeout: %w", err)
+	}
 	out.IdleTimeout, err = dur(c.Server.IdleTimeout)
 	if err != nil {
 		return fh.Config{}, fmt.Errorf("idle_timeout: %w", err)
+	}
+	out.TLSHandshakeTimeout, err = dur(c.Server.TLSHandshakeTimeout)
+	if err != nil {
+		return fh.Config{}, fmt.Errorf("tls_handshake_timeout: %w", err)
+	}
+	out.HTTP2IdleTimeout, err = dur(c.Server.HTTP2IdleTimeout)
+	if err != nil {
+		return fh.Config{}, fmt.Errorf("http2_idle_timeout: %w", err)
 	}
 	if out.ReadTimeout == 0 {
 		out.ReadTimeout = 30 * time.Second
@@ -239,6 +293,7 @@ func (c Config) AppConfig() (fh.Config, error) {
 	out.MaxHeaderCount = c.Server.MaxHeaderCount
 	out.MaxRequestLineSize = c.Server.MaxRequestLineSize
 	out.DisableHTTP2 = c.Server.DisableHTTP2
+	out.DisableH2C = c.Server.DisableH2C
 	out.Debug = c.Server.Debug
 	out.StartupBanner = fh.StartupBannerConfig{
 		Disabled: c.StartupBanner.Disabled,

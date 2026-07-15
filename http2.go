@@ -150,6 +150,7 @@ type h2Stream struct {
 	dispatched       bool
 	ended            bool
 	reset            atomic.Bool
+	bodyTimer        *time.Timer
 	ctx              context.Context
 	cancel           context.CancelFunc
 	hasContentLength bool
@@ -220,11 +221,8 @@ func maxH2RequestBodySize(app *App) int {
 func (h *h2Conn) newStreamContext() (context.Context, context.CancelFunc) {
 	// Derive from the connection-level context so that stream contexts are
 	// cancelled when the TCP connection closes or when the server drains.
-	// WriteTimeout is applied as an upper bound for handler lifetime when
-	// configured. If your Config has a dedicated HandlerTimeout, replace
-	// this with that field.
-	if h.app.cfg.WriteTimeout > 0 {
-		return context.WithTimeout(h.ctx, h.app.cfg.WriteTimeout)
+	if h.app.cfg.HandlerTimeout > 0 {
+		return context.WithTimeout(h.ctx, h.app.cfg.HandlerTimeout)
 	}
 	return context.WithCancel(h.ctx)
 }
@@ -239,6 +237,9 @@ func (h *h2Conn) closeAllStreams() {
 
 	for _, s := range streams {
 		s.reset.Store(true)
+		if s.bodyTimer != nil {
+			s.bodyTimer.Stop()
+		}
 		if s.cancel != nil {
 			s.cancel()
 		}
@@ -276,7 +277,7 @@ func (h *h2Conn) serve(initial []byte, prefaceConsumed bool) {
 		}
 	}()
 	if !prefaceConsumed {
-		if timeout := h.app.cfg.WriteTimeout; timeout > 0 {
+		if timeout := h.app.cfg.ReadHeaderTimeout; timeout > 0 {
 			_ = h.conn.SetReadDeadline(time.Now().Add(timeout))
 		}
 		var preface [24]byte
@@ -358,7 +359,7 @@ func (e h2ConnError) Error() string {
 }
 
 func (h *h2Conn) readFrame() (h2Frame, error) {
-	if timeout := h.app.cfg.WriteTimeout; timeout > 0 {
+	if timeout := h.app.cfg.HTTP2IdleTimeout; timeout > 0 {
 		_ = h.conn.SetReadDeadline(time.Now().Add(timeout))
 	}
 
@@ -574,6 +575,7 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 
 	h.mu.Lock()
 	s := h.streams[f.streamID]
+	newStream := s == nil
 	if s == nil {
 		if f.streamID&1 == 0 || f.streamID <= h.lastStream {
 			h.mu.Unlock()
@@ -608,7 +610,18 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			h.sendRST(f.streamID, h2ProtocolError)
 			return nil
 		}
+		if s.hasContentLength && s.contentLength > maxH2RequestBodySize(h.app) {
+			h.mu.Unlock()
+			h.sendRST(f.streamID, h2Cancel)
+			return nil
+		}
 		h.streams[f.streamID] = s
+		if f.flags&h2FlagEndStream == 0 && h.app.cfg.RequestBodyTimeout > 0 {
+			streamID := f.streamID
+			s.bodyTimer = time.AfterFunc(h.app.cfg.RequestBodyTimeout, func() {
+				h.sendRST(streamID, h2Cancel)
+			})
+		}
 	} else {
 		st := s.state.Load()
 		if st == int32(stateHalfClosedRemote) {
@@ -648,6 +661,10 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 	}
 	end := f.flags&h2FlagEndStream != 0
 	if end {
+		if s.bodyTimer != nil {
+			s.bodyTimer.Stop()
+			s.bodyTimer = nil
+		}
 		s.ended = true
 		for {
 			st := s.state.Load()
@@ -666,6 +683,9 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 	h.mu.Unlock()
 	if end && !validH2ContentLength(s) {
 		h.sendRST(f.streamID, h2ProtocolError)
+		return nil
+	}
+	if newStream && h.app.cfg.RequestHeadHandler != nil && !h.runRequestHeadHandler(s) {
 		return nil
 	}
 	if end {
@@ -764,6 +784,10 @@ func (h *h2Conn) handleData(f h2Frame) error {
 	}
 	end := f.flags&h2FlagEndStream != 0
 	if end {
+		if s.bodyTimer != nil {
+			s.bodyTimer.Stop()
+			s.bodyTimer = nil
+		}
 		s.ended = true
 		for {
 			st := s.state.Load()
@@ -860,48 +884,15 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 
 	go func() {
 		defer func() { <-h.streamSem }()
-		ctx := acquireCtx(h.conn, h.app)
+		ctx := h.acquireRequestCtx(s)
 		defer func() {
 			if r := recover(); r != nil {
 				releaseCtx(ctx)
 			}
 		}()
-		ctx.h2 = &h2Response{conn: h, stream: s}
-		ctx.flags |= ctxFlagH2
-		ctx.Header.Method = s2b(s.method)
-		ctx.Header.URI = s2b(s.path)
-		ctx.Header.RequestTarget = ctx.Header.URI
-		ctx.Header.Path = ctx.Header.URI
-		ctx.Header.Proto = []byte("HTTP/2.0")
-		ctx.Header.Host = s2b(s.authority)
-		ctx.originalURI = append(ctx.originalURI[:0], ctx.Header.URI...)
-		ctx.Header.KeepAlive = true
-		maxHdrs := h.app.cfg.MaxHeaderCount
-		if maxHdrs <= 0 {
-			maxHdrs = maxHeaders
-		}
-		if cap(ctx.Header.headers) < maxHdrs {
-			ctx.Header.headers = make([]Header, maxHdrs)
-		} else {
-			ctx.Header.headers = ctx.Header.headers[:maxHdrs]
-		}
-		for _, field := range s.headers {
-			if ctx.Header.hcount >= maxHdrs {
-				h.sendRST(s.id, h2EnhanceYourCalm)
-				releaseCtx(ctx)
-				return
-			}
-			ctx.Header.headers[ctx.Header.hcount] = Header{Key: s2b(field.Name), Value: s2b(field.Value)}
-			ctx.Header.hcount++
-			if field.Name == "content-type" {
-				ctx.Header.ContentType = s2b(field.Value)
-			}
-		}
-		ctx.Header.HasContentLength, ctx.Header.ContentLength = s.hasContentLength, s.contentLength
 		s.trailerMu.Lock()
 		ctx.body, ctx.trailers = s.body, s.trailers
 		s.trailerMu.Unlock()
-		ctx.SetContext(s.ctx)
 		h.app.dispatch(ctx)
 		if !ctx.responded && !s.reset.Load() {
 			_ = ctx.SendStatus(200)
@@ -909,6 +900,55 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 		s.cancel()
 		releaseCtx(ctx)
 	}()
+}
+
+func (h *h2Conn) acquireRequestCtx(s *h2Stream) *DefaultCtx {
+	ctx := acquireCtx(h.conn, h.app)
+	ctx.h2 = &h2Response{conn: h, stream: s}
+	ctx.flags |= ctxFlagH2
+	ctx.Header.Method = s2b(s.method)
+	ctx.Header.URI = s2b(s.path)
+	ctx.Header.RequestTarget = ctx.Header.URI
+	ctx.Header.Path = ctx.Header.URI
+	ctx.Header.Proto = []byte("HTTP/2.0")
+	ctx.Header.Host = s2b(s.authority)
+	ctx.originalURI = append(ctx.originalURI[:0], ctx.Header.URI...)
+	ctx.Header.KeepAlive = true
+	maxHdrs := h.app.cfg.MaxHeaderCount
+	if maxHdrs <= 0 {
+		maxHdrs = maxHeaders
+	}
+	if cap(ctx.Header.headers) < maxHdrs {
+		ctx.Header.headers = make([]Header, maxHdrs)
+	} else {
+		ctx.Header.headers = ctx.Header.headers[:maxHdrs]
+	}
+	for _, field := range s.headers {
+		ctx.Header.headers[ctx.Header.hcount] = Header{Key: s2b(field.Name), Value: s2b(field.Value)}
+		ctx.Header.hcount++
+		if field.Name == "content-type" {
+			ctx.Header.ContentType = s2b(field.Value)
+		}
+	}
+	ctx.Header.HasContentLength, ctx.Header.ContentLength = s.hasContentLength, s.contentLength
+	ctx.SetContext(s.ctx)
+	return ctx
+}
+
+func (h *h2Conn) runRequestHeadHandler(s *h2Stream) bool {
+	ctx := h.acquireRequestCtx(s)
+	accepted := h.app.runRequestHeadHandler(ctx)
+	releaseCtx(ctx)
+	if !accepted {
+		h.mu.Lock()
+		if s.bodyTimer != nil {
+			s.bodyTimer.Stop()
+			s.bodyTimer = nil
+		}
+		h.mu.Unlock()
+		s.cancel()
+	}
+	return accepted
 }
 
 func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCountOpt ...int) error {
@@ -922,7 +962,7 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 	seenHost := false
 	cookies := ""
 	for _, f := range fields {
-		if f.Name == "" || strings.ToLower(f.Name) != f.Name || strings.ContainsAny(f.Value, "\x00\r\n") {
+		if f.Name == "" || strings.ToLower(f.Name) != f.Name || !validH2FieldValue(f.Value) {
 			return fmt.Errorf("h2: uppercase header name %q", f.Name)
 		}
 		if strings.HasPrefix(f.Name, ":") {
@@ -949,6 +989,9 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 			case ":path":
 				s.path = f.Value
 			case ":authority":
+				if !validHostField([]byte(f.Value)) {
+					return fmt.Errorf("h2: invalid authority %q", f.Value)
+				}
 				s.authority = f.Value
 			case ":scheme":
 				s.scheme = f.Value
@@ -977,9 +1020,12 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 				return fmt.Errorf("h2: duplicate host header %q", f.Value)
 			}
 			seenHost = true
+			if !validHostField([]byte(f.Value)) {
+				return fmt.Errorf("h2: invalid host %q", f.Value)
+			}
 			if s.authority == "" {
 				s.authority = f.Value
-			} else if s.authority != f.Value {
+			} else if !strings.EqualFold(s.authority, f.Value) {
 				return errors.New("authority mismatch")
 			}
 		case "cookie":
@@ -1020,6 +1066,16 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 		return fmt.Errorf("h2: asterisk path %q requires OPTIONS method", s.path)
 	}
 	return nil
+}
+
+func validH2FieldValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < 0x20 && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRequestTrailers(fields []hpack.HeaderField) ([]Header, error) {
@@ -1460,6 +1516,10 @@ func (h *h2Conn) resetStream(id uint32) {
 	s := h.streams[id]
 	if s != nil {
 		s.reset.Store(true)
+		if s.bodyTimer != nil {
+			s.bodyTimer.Stop()
+			s.bodyTimer = nil
+		}
 		delete(h.streams, id)
 		if s.cancel != nil {
 			s.cancel()

@@ -99,8 +99,14 @@ type SafeConfig struct {
 	SecureByDefault       bool              `json:"secure_by_default"`
 	ReadTimeout           string            `json:"read_timeout,omitempty"`
 	ReadHeaderTimeout     string            `json:"read_header_timeout,omitempty"`
+	RequestBodyTimeout    string            `json:"request_body_timeout,omitempty"`
 	WriteTimeout          string            `json:"write_timeout,omitempty"`
+	HandlerTimeout        string            `json:"handler_timeout,omitempty"`
 	IdleTimeout           string            `json:"idle_timeout,omitempty"`
+	TLSHandshakeTimeout   string            `json:"tls_handshake_timeout,omitempty"`
+	HTTP2IdleTimeout      string            `json:"http2_idle_timeout,omitempty"`
+	MaxConnections        int               `json:"max_connections"`
+	H2CEnabled            bool              `json:"h2c_enabled"`
 	MaxRequestBodySize    int               `json:"max_request_body_size"`
 	MaxHeaderListSize     int               `json:"max_header_list_size"`
 	MaxHeaderCount        int               `json:"max_header_count"`
@@ -147,6 +153,15 @@ func applyComplianceDefaults(cfg *Config) {
 		}
 		if cfg.IdleTimeout == 0 {
 			cfg.IdleTimeout = 60 * time.Second
+		}
+		if cfg.RequestBodyTimeout == 0 {
+			cfg.RequestBodyTimeout = 10 * time.Second
+		}
+		if cfg.TLSHandshakeTimeout == 0 {
+			cfg.TLSHandshakeTimeout = 10 * time.Second
+		}
+		if cfg.HTTP2IdleTimeout == 0 {
+			cfg.HTTP2IdleTimeout = 60 * time.Second
 		}
 		cfg.SendDateHeader = true
 	}
@@ -234,6 +249,7 @@ func applySecureDefaults(cfg *Config) {
 	cfg.StrictHeaderValueValidation = true
 	cfg.SendDateHeader = true
 	cfg.ServerHeader = ""
+	cfg.DisableH2C = true
 
 	// Bound every untrusted request dimension. Preserve stricter caller values,
 	// but do not allow permissive values to weaken the baseline.
@@ -270,6 +286,15 @@ func applySecureDefaults(cfg *Config) {
 	if cfg.IdleTimeout <= 0 || cfg.IdleTimeout > 60*time.Second {
 		cfg.IdleTimeout = 60 * time.Second
 	}
+	if cfg.RequestBodyTimeout <= 0 || cfg.RequestBodyTimeout > 10*time.Second {
+		cfg.RequestBodyTimeout = 10 * time.Second
+	}
+	if cfg.TLSHandshakeTimeout <= 0 || cfg.TLSHandshakeTimeout > 10*time.Second {
+		cfg.TLSHandshakeTimeout = 10 * time.Second
+	}
+	if cfg.HTTP2IdleTimeout <= 0 || cfg.HTTP2IdleTimeout > 60*time.Second {
+		cfg.HTTP2IdleTimeout = 60 * time.Second
+	}
 }
 
 func (a *App) SafeConfig() SafeConfig {
@@ -280,8 +305,14 @@ func (a *App) SafeConfig() SafeConfig {
 		SecureByDefault:       a.cfg.SecureByDefault,
 		ReadTimeout:           a.cfg.ReadTimeout.String(),
 		ReadHeaderTimeout:     a.cfg.ReadHeaderTimeout.String(),
+		RequestBodyTimeout:    a.cfg.RequestBodyTimeout.String(),
 		WriteTimeout:          a.cfg.WriteTimeout.String(),
+		HandlerTimeout:        a.cfg.HandlerTimeout.String(),
 		IdleTimeout:           a.cfg.IdleTimeout.String(),
+		TLSHandshakeTimeout:   a.cfg.TLSHandshakeTimeout.String(),
+		HTTP2IdleTimeout:      a.cfg.HTTP2IdleTimeout.String(),
+		MaxConnections:        a.cfg.MaxConnections,
+		H2CEnabled:            !a.cfg.DisableHTTP2 && !a.cfg.DisableH2C,
 		MaxRequestBodySize:    a.cfg.MaxRequestBodySize,
 		MaxHeaderListSize:     a.cfg.MaxHeaderListSize,
 		MaxHeaderCount:        a.cfg.MaxHeaderCount,
@@ -334,6 +365,21 @@ func (a *App) ValidateSecurity() []SecurityFinding {
 	if prod && a.cfg.WriteTimeout == 0 {
 		f = append(f, SecurityFinding{"high", "WRITE_TIMEOUT_MISSING", "WriteTimeout is disabled", "set Config.WriteTimeout", ""})
 	}
+	if prod && a.cfg.RequestBodyTimeout <= 0 {
+		f = append(f, SecurityFinding{"high", "BODY_READ_TIMEOUT_MISSING", "RequestBodyTimeout is disabled", "set Config.RequestBodyTimeout", ""})
+	}
+	if prod && a.cfg.TLSHandshakeTimeout <= 0 {
+		f = append(f, SecurityFinding{"high", "TLS_HANDSHAKE_TIMEOUT_MISSING", "TLSHandshakeTimeout is disabled", "set Config.TLSHandshakeTimeout", ""})
+	}
+	if prod && !a.cfg.DisableHTTP2 && a.cfg.HTTP2IdleTimeout <= 0 {
+		f = append(f, SecurityFinding{"high", "HTTP2_IDLE_TIMEOUT_MISSING", "HTTP2IdleTimeout is disabled", "set Config.HTTP2IdleTimeout", ""})
+	}
+	if prod && a.cfg.MaxConnections <= 0 {
+		f = append(f, SecurityFinding{"high", "CONNECTION_LIMIT_MISSING", "MaxConnections is unbounded", "set Config.MaxConnections", ""})
+	}
+	if prod && !a.cfg.DisableHTTP2 && !a.cfg.DisableH2C {
+		f = append(f, SecurityFinding{"medium", "H2C_ENABLED", "cleartext HTTP/2 prior knowledge and upgrade are enabled", "disable h2c on public listeners with Config.DisableH2C", ""})
+	}
 	if prod && a.cfg.MaxRequestBodySize <= 0 {
 		f = append(f, SecurityFinding{"critical", "BODY_LIMIT_MISSING", "MaxRequestBodySize is not enforced", "set Config.MaxRequestBodySize", ""})
 	}
@@ -344,7 +390,7 @@ func (a *App) ValidateSecurity() []SecurityFinding {
 		f = append(f, SecurityFinding{"high", "RELIABILITY_DISABLED", "compliance mode should enable reliability", "enable Config.Reliability", ""})
 	}
 	if a.cfg.Compliance.ExposeEndpoints && len(a.cfg.Compliance.EndpointAuth) == 0 {
-		f = append(f, SecurityFinding{"critical", "COMPLIANCE_ENDPOINTS_UNAUTHENTICATED", "compliance/health/runtime introspection endpoints are exposed with no auth middleware, leaking route security posture and config internals to any caller", "set Config.Compliance.EndpointAuth (or fh.WithComplianceEndpointAuth) to an auth middleware", ""})
+		f = append(f, SecurityFinding{"critical", "COMPLIANCE_ENDPOINTS_UNAUTHENTICATED", "compliance endpoint exposure was requested without authentication; fail-closed endpoint mounting left the endpoints disabled", "set Config.Compliance.EndpointAuth (or fh.WithComplianceEndpointAuth) to an auth middleware", ""})
 	}
 	for _, r := range a.Routes() {
 		unsafe := r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" || r.Method == "DELETE"

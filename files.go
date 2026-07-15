@@ -112,7 +112,8 @@ func (c *DefaultCtx) SendFile(filename string) error {
 	if err != nil {
 		return err
 	}
-	if resolved != abs {
+	resolvedInfo, err := os.Stat(resolved)
+	if err != nil || !os.SameFile(info, resolvedInfo) {
 		return NotFound("File not found")
 	}
 	dir, base := filepath.Dir(resolved), filepath.Base(resolved)

@@ -22,6 +22,20 @@ application input-schema policies remain explicit middleware because safe
 values depend on the deployment. Serve public traffic with `ServeTLS` or TLS at
 a trusted edge; the flag cannot provision certificates.
 
+The secure profile also disables h2c. Cleartext prior-knowledge and upgrade
+HTTP/2 can be controlled independently with `WithDisableH2C`, without disabling
+HTTP/2 negotiated through TLS ALPN.
+
+HTTP/1 request lines and fields require CRLF framing, control bytes are rejected,
+absolute-form authority must agree with `Host`, and only the transfer coding the
+server actually decodes (`chunked`) is accepted. HTTP/1 and HTTP/2 both enforce
+configured header-list, header-count, body-size, and absolute body-time limits.
+
+For endpoints that may receive large bodies, configure `WithRequestHeadHandler`
+to perform header-only authentication, admission control, or rate limiting before
+the server sends `100 Continue` or reads the body. The hook receives matched route
+parameters but must not attempt to access the body.
+
 ## Configuration and secrets
 
 Use environment variables for small deployment overrides and for paths to

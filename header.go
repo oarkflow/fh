@@ -100,11 +100,14 @@ type RequestHeader struct {
 	URI    []byte
 	// RequestTarget is the exact target from the request line. URI is kept as
 	// the compatibility alias used by older handlers.
-	RequestTarget               []byte
-	Path                        []byte
-	QueryString                 []byte
-	Proto                       []byte
-	Host                        []byte
+	RequestTarget []byte
+	Path          []byte
+	QueryString   []byte
+	Proto         []byte
+	Host          []byte
+	// targetAuthority is set only for an absolute-form request target. When a
+	// Host field is also present it must identify this same authority.
+	targetAuthority             []byte
 	ContentType                 []byte
 	Expect                      []byte
 	Upgrade                     []byte
@@ -141,6 +144,7 @@ func (h *RequestHeader) resetRetained() {
 	h.QueryString = nil
 	h.Proto = nil
 	h.Host = nil
+	h.targetAuthority = nil
 	h.ContentType = nil
 	h.Expect = nil
 	h.Upgrade = nil
@@ -394,6 +398,8 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 			// CONNECT uses authority-form. Keep it as the request target; routing to
 			// CONNECT handlers remains explicit instead of silently tunnelling.
 			validTarget = true
+			h.targetAuthority = target
+			h.Host = target
 		} else if absIdx := bytes.Index(target, []byte("://")); absIdx > 0 && absIdx+3 < len(target) {
 			validTarget = true
 			for _, c := range target[:absIdx] {
@@ -416,8 +422,9 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 				} else {
 					routeTarget = target[len(target):]
 				}
-				if len(h.Host) == 0 && pathStart > authStart {
-					h.Host = target[authStart:pathStart]
+				if pathStart > authStart {
+					h.targetAuthority = target[authStart:pathStart]
+					h.Host = h.targetAuthority
 				}
 			}
 		}
@@ -496,6 +503,7 @@ func parseHeadersWithLimit(src []byte, h *RequestHeader, maxCount int) (int, err
 }
 
 func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, strictValueValidation bool) (int, error) {
+	_ = strictValueValidation // retained for source compatibility; RFC field-value validation is unconditional.
 	if maxCount <= 0 {
 		maxCount = maxHeaders
 	}
@@ -514,19 +522,13 @@ func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, str
 			pos += 2
 			break
 		}
-		if src[pos] == '\n' {
-			pos++
-			break
-		}
 		// RFC 9112 §5.5: reject obsolete line folding.
 		if src[pos] == ' ' || src[pos] == '\t' {
 			return 0, ErrMalformedRequest
 		}
 
-		// Vectorized line split: find the LF, strip one optional preceding CR.
-		// Any stray CR left inside the line is rejected below — by validToken
-		// for keys and by the value scan for values — preserving the strictness
-		// of the previous byte-at-a-time loop.
+		// RFC 9112 requires CRLF. Accepting LF-only header lines creates parser
+		// differentials with upstream proxies and is a request-smuggling hazard.
 		nl := bytes.IndexByte(src[pos:], '\n')
 		if nl < 0 {
 			return 0, ErrMalformedRequest
@@ -534,9 +536,10 @@ func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, str
 		lineStart := pos
 		lineEnd := pos + nl
 		pos = lineEnd + 1
-		if src[lineEnd-1] == '\r' {
-			lineEnd--
+		if lineEnd == lineStart || src[lineEnd-1] != '\r' {
+			return 0, ErrMalformedRequest
 		}
+		lineEnd--
 		line := src[lineStart:lineEnd]
 		colon := bytes.IndexByte(line, ':')
 		if colon <= 0 {
@@ -551,14 +554,10 @@ func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, str
 			valueStart++
 		}
 		val := trimOWSRight(line[valueStart:])
-		if strictValueValidation {
-			for _, c := range val {
-				if (c < 0x20 && c != '\t') || c == 0x7f {
-					return 0, ErrMalformedRequest
-				}
+		for _, c := range val {
+			if (c < 0x20 && c != '\t') || c == 0x7f {
+				return 0, ErrMalformedRequest
 			}
-		} else if bytes.IndexByte(val, '\r') >= 0 {
-			return 0, ErrMalformedRequest
 		}
 
 		switch knownHeader(key) {
@@ -567,7 +566,17 @@ func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, str
 				return 0, ErrMalformedRequest
 			}
 			seenHost = true
-			h.Host = val
+			if !validHostField(val) {
+				return 0, ErrMalformedRequest
+			}
+			if len(h.targetAuthority) != 0 {
+				if !bytes.EqualFold(h.targetAuthority, val) {
+					return 0, ErrMalformedRequest
+				}
+				h.Host = h.targetAuthority
+			} else {
+				h.Host = val
+			}
 		case knownContentType:
 			h.ContentType = val
 		case knownContentLength:
@@ -606,10 +615,56 @@ func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, str
 	if h.Chunked && h.HasContentLength {
 		return 0, ErrMalformedRequest
 	}
-	if bytes.Equal(h.Proto, strHTTP11) && len(h.Host) == 0 {
+	if bytes.Equal(h.Proto, strHTTP11) && !seenHost {
 		return 0, ErrMalformedRequest
 	}
 	return pos, nil
+}
+
+func validHostField(host []byte) bool {
+	if len(host) == 0 || len(host) > 255 {
+		return false
+	}
+	for _, c := range host {
+		switch c {
+		case ' ', '\t', ',', '/', '\\', '@', '#', '?':
+			return false
+		}
+		if c < 0x21 || c == 0x7f {
+			return false
+		}
+	}
+	if host[0] == '[' {
+		close := bytes.IndexByte(host, ']')
+		if close <= 1 {
+			return false
+		}
+		rest := host[close+1:]
+		return len(rest) == 0 || len(rest) > 1 && rest[0] == ':' && validPort(rest[1:])
+	}
+	if bytes.IndexAny(host, "[]") >= 0 || bytes.Count(host, []byte{':'}) > 1 {
+		return false
+	}
+	if colon := bytes.LastIndexByte(host, ':'); colon >= 0 {
+		if colon == 0 || !validPort(host[colon+1:]) {
+			return false
+		}
+	}
+	return true
+}
+
+func validPort(port []byte) bool {
+	if len(port) == 0 || len(port) > 5 {
+		return false
+	}
+	n := 0
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n <= 65535
 }
 
 type knownHeaderKind uint8
@@ -969,7 +1024,8 @@ func trimRight(b []byte) []byte {
 // (false, true) if the stack is syntactically valid but unsupported,
 // and (false, false) if the value is malformed.
 func parseTransferCoding(val []byte) (chunked bool, ok bool) {
-	last := ""
+	count := 0
+	soleChunked := false
 	start := 0
 	for i := 0; i <= len(val); i++ {
 		if i == len(val) || val[i] == ',' {
@@ -982,14 +1038,18 @@ func parseTransferCoding(val []byte) (chunked bool, ok bool) {
 					return false, false
 				}
 			}
-			last = b2s(part)
+			count++
+			soleChunked = strEqFold(part, "chunked")
 			start = i + 1
 		}
 	}
-	if last == "" {
+	if count == 0 {
 		return false, false
 	}
-	if strEqFold([]byte(last), "chunked") {
+	// fh currently decodes chunk framing only. Accepting a stacked coding such
+	// as gzip, chunked without decoding gzip gives intermediaries a different
+	// message interpretation. Repeated chunked is forbidden as well.
+	if count == 1 && soleChunked {
 		return true, true
 	}
 	return false, true

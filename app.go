@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os/signal"
@@ -73,7 +74,18 @@ type Config struct {
 	ReadHeaderTimeout time.Duration
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
-	MaxConnections    int
+	// HandlerTimeout bounds handler execution through Ctx.Context. It is
+	// independent from WriteTimeout so long-lived streaming responses can refresh
+	// socket write deadlines without inheriting an arbitrary handler lifetime.
+	// Zero means no framework-level handler deadline.
+	HandlerTimeout time.Duration
+	// RequestBodyTimeout is an absolute budget for receiving one request body.
+	RequestBodyTimeout time.Duration
+	// TLSHandshakeTimeout bounds the server-side TLS handshake.
+	TLSHandshakeTimeout time.Duration
+	// HTTP2IdleTimeout bounds the interval between HTTP/2 frames.
+	HTTP2IdleTimeout time.Duration
+	MaxConnections   int
 	// DisablePanicRecovery removes the application-level panic recovery defer from
 	// every request. It is useful for trusted benchmark/edge deployments that use
 	// process supervision or explicit recover middleware. Leave false for robust
@@ -97,10 +109,9 @@ type Config struct {
 	// ServerHeader, when non-empty, is sent as the Server response header.
 	// Empty by default (no Server header sent) for security.
 	ServerHeader string
-	// StrictHeaderValueValidation rejects control bytes inside every request header
-	// value. It is disabled by default for the hot path; structural validation,
-	// duplicate Host, Content-Length conflicts, TE conflicts, and obs-fold
-	// rejection always remain enabled.
+	// StrictHeaderValueValidation is retained for configuration compatibility.
+	// RFC-invalid control bytes are now rejected unconditionally because allowing
+	// them creates unsafe parser differentials.
 	StrictHeaderValueValidation bool
 	ReadBufferSize              int
 	MaxRequestBodySize          int
@@ -110,12 +121,20 @@ type Config struct {
 	MaxConcurrentStreams        uint32
 	DisableKeepAlive            bool
 	DisableHTTP2                bool
-	ErrorHandler                ErrorHandler
-	NotFoundHandler             NotFoundHandler
-	MethodNotAllowed            MethodNotAllowedHandler
-	OptionsHandler              OptionsHandler
-	Logger                      Logger
-	TemplateEngine              TemplateEngine
+	// DisableH2C rejects cleartext HTTP/2 prior knowledge and HTTP/1.1 h2c
+	// upgrades while retaining HTTP/2 over TLS/ALPN.
+	DisableH2C       bool
+	ErrorHandler     ErrorHandler
+	NotFoundHandler  NotFoundHandler
+	MethodNotAllowed MethodNotAllowedHandler
+	OptionsHandler   OptionsHandler
+	// RequestHeadHandler runs after request-line/header validation and route
+	// matching but before 100-continue and body reads. Return nil without writing
+	// a response to accept the body; return an error or write a response to reject
+	// it early. The handler must not attempt to read Body.
+	RequestHeadHandler HandlerFunc
+	Logger             Logger
+	TemplateEngine     TemplateEngine
 	// Reliability enables request journal, idempotency, and durable async queue.
 	Reliability ReliabilityConfig
 	// Environment controls safe error exposure defaults. Use EnvDevelopment locally and EnvProduction in production.
@@ -138,15 +157,21 @@ var defaultConfig = Config{
 	WriteTimeout:         30 * time.Second,
 	IdleTimeout:          120 * time.Second,
 	ReadHeaderTimeout:    5 * time.Second,
+	RequestBodyTimeout:   10 * time.Second,
 	ReadBufferSize:       16384,
 	MaxRequestBodySize:   4 << 20,
 	MaxHeaderListSize:    64 << 10,
 	MaxHeaderCount:       64,
 	MaxRequestLineSize:   8 << 10,
 	MaxConcurrentStreams: 128,
+	MaxConnections:       10_000,
+	TLSHandshakeTimeout:  10 * time.Second,
+	HTTP2IdleTimeout:     120 * time.Second,
 	Environment:          EnvProduction,
 	ErrorOptions:         ErrorOptions{Environment: EnvProduction},
 }
+
+const maxServerHeaderCount = 1024
 
 // Option is a functional option for configuring an App via New.
 type Option func(*Config)
@@ -162,6 +187,18 @@ func WithWriteTimeout(d time.Duration) Option {
 }
 func WithIdleTimeout(d time.Duration) Option {
 	return func(c *Config) { c.IdleTimeout = d }
+}
+func WithHandlerTimeout(d time.Duration) Option {
+	return func(c *Config) { c.HandlerTimeout = d }
+}
+func WithRequestBodyTimeout(d time.Duration) Option {
+	return func(c *Config) { c.RequestBodyTimeout = d }
+}
+func WithTLSHandshakeTimeout(d time.Duration) Option {
+	return func(c *Config) { c.TLSHandshakeTimeout = d }
+}
+func WithHTTP2IdleTimeout(d time.Duration) Option {
+	return func(c *Config) { c.HTTP2IdleTimeout = d }
 }
 func WithShutdownTimeout(d time.Duration) Option {
 	return func(c *Config) { c.ShutdownTimeout = d }
@@ -217,6 +254,9 @@ func WithDisableKeepAlive(disabled bool) Option {
 func WithDisableHTTP2(disabled bool) Option {
 	return func(c *Config) { c.DisableHTTP2 = disabled }
 }
+func WithDisableH2C(disabled bool) Option {
+	return func(c *Config) { c.DisableH2C = disabled }
+}
 func WithDebug(enabled bool) Option {
 	return func(c *Config) { c.Debug = enabled }
 }
@@ -231,6 +271,9 @@ func WithMethodNotAllowedHandler(h MethodNotAllowedHandler) Option {
 }
 func WithOptionsHandler(h OptionsHandler) Option {
 	return func(c *Config) { c.OptionsHandler = h }
+}
+func WithRequestHeadHandler(h HandlerFunc) Option {
+	return func(c *Config) { c.RequestHeadHandler = h }
 }
 func WithLogger(l Logger) Option {
 	return func(c *Config) { c.Logger = l }
@@ -283,7 +326,7 @@ func WithServerHeader(header string) Option {
 // WithWriteTimeout after NewFast's options to restore write deadlines and
 // handler-visible cancellation if this app is exposed beyond a trusted edge.
 func NewFast(opts ...Option) *App {
-	all := append([]Option{WithMode(ModeFast), WithWriteTimeout(0)}, opts...)
+	all := append([]Option{WithMode(ModeFast), WithWriteTimeout(0), WithMaxConnections(0)}, opts...)
 	return New(all...)
 }
 
@@ -406,8 +449,20 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.MaxConcurrentStreams == 0 {
 		cfg.MaxConcurrentStreams = defaultConfig.MaxConcurrentStreams
 	}
+	if cfg.MaxConnections == 0 {
+		cfg.MaxConnections = defaultConfig.MaxConnections
+	}
 	if cfg.Environment == "" {
 		cfg.Environment = defaultConfig.Environment
+	}
+	if cfg.TLSHandshakeTimeout <= 0 {
+		cfg.TLSHandshakeTimeout = defaultConfig.TLSHandshakeTimeout
+	}
+	if cfg.HTTP2IdleTimeout <= 0 {
+		cfg.HTTP2IdleTimeout = defaultConfig.HTTP2IdleTimeout
+	}
+	if cfg.RequestBodyTimeout <= 0 {
+		cfg.RequestBodyTimeout = defaultConfig.RequestBodyTimeout
 	}
 }
 
@@ -417,6 +472,9 @@ func applyConfigDefaults(cfg *Config) {
 func buildApp(cfg Config) *App {
 	applySecureDefaults(&cfg)
 	applyComplianceDefaults(&cfg)
+	if cfg.MaxHeaderCount > maxServerHeaderCount {
+		cfg.MaxHeaderCount = maxServerHeaderCount
+	}
 	if cfg.ErrorHandler == nil {
 		cfg.ErrorHandler = defaultErrorHandler
 	}
@@ -491,11 +549,12 @@ func buildApp(cfg Config) *App {
 
 	if cfg.Compliance.ExposeEndpoints {
 		if len(cfg.Compliance.EndpointAuth) == 0 {
-			app.Logger().Warn("fh: Compliance.ExposeEndpoints is enabled with no Compliance.EndpointAuth — /_fh/* routes (route table, config, health, queue stats) are reachable with no authentication; set Config.Compliance.EndpointAuth or fh.WithComplianceEndpointAuth")
+			app.Logger().Warn("fh: Compliance.ExposeEndpoints is enabled with no Compliance.EndpointAuth — no /_fh/* endpoints were mounted; set Config.Compliance.EndpointAuth or fh.WithComplianceEndpointAuth")
+		} else {
+			app.EnableComplianceEndpoints(cfg.Compliance.EndpointPrefix, cfg.Compliance.EndpointAuth...)
+			app.EnableHealth(cfg.Compliance.EndpointPrefix, cfg.Compliance.EndpointAuth...)
+			app.EnableRuntime(cfg.Compliance.EndpointPrefix, cfg.Compliance.EndpointAuth...)
 		}
-		app.EnableComplianceEndpoints(cfg.Compliance.EndpointPrefix, cfg.Compliance.EndpointAuth...)
-		app.EnableHealth(cfg.Compliance.EndpointPrefix, cfg.Compliance.EndpointAuth...)
-		app.EnableRuntime(cfg.Compliance.EndpointPrefix, cfg.Compliance.EndpointAuth...)
 	}
 	if cfg.Compliance.FailOnCritical && hasCritical(app.ValidateSecurity()) {
 		panic("fh: critical compliance/security findings")
@@ -713,6 +772,26 @@ func (a *App) ListenWithGracefulShutdown(addr string) error {
 	if err != nil {
 		return err
 	}
+	return a.serveWithSignal(ln, a.Serve)
+}
+
+// ListenTLSWithGracefulShutdown is the TLS counterpart to
+// ListenWithGracefulShutdown. It loads the certificate pair, negotiates HTTP/2
+// through ALPN when enabled, and drains on SIGINT or SIGTERM.
+func (a *App) ListenTLSWithGracefulShutdown(addr, certFile, keyFile string) error {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return err
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	return a.serveWithSignal(ln, func(listener net.Listener) error { return a.ServeTLS(listener, tlsConfig) })
+}
+
+func (a *App) serveWithSignal(ln net.Listener, serve func(net.Listener) error) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -727,7 +806,7 @@ func (a *App) ListenWithGracefulShutdown(addr string) error {
 		}
 	}()
 
-	return a.Serve(ln)
+	return serve(ln)
 }
 
 // effectiveShutdownTimeout returns the configured shutdown timeout or a default
@@ -940,7 +1019,11 @@ func (a *App) setH2Conn(conn net.Conn, h2c *h2Conn) {
 func (a *App) serveConn(conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
-			a.logger.Error("connection hook panic", "panic", r, "stack", string(debug.Stack()))
+			args := []any{"panic", "connection hook panic"}
+			if a.cfg.Debug || a.cfg.ErrorOptions.LogInternal {
+				args = append(args, "detail", RedactSecrets(fmt.Sprint(r)), "stack", RedactSecrets(string(debug.Stack())))
+			}
+			a.logger.Error("connection hook panic", args...)
 		}
 		conn.Close()
 		a.connMu.Lock()
@@ -950,7 +1033,11 @@ func (a *App) serveConn(conn net.Conn) {
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						a.logger.Error("close hook panic", "panic", r)
+						args := []any{"panic", "close hook panic"}
+						if a.cfg.Debug || a.cfg.ErrorOptions.LogInternal {
+							args = append(args, "detail", RedactSecrets(fmt.Sprint(r)))
+						}
+						a.logger.Error("close hook panic", args...)
 					}
 				}()
 				fn(conn)
@@ -975,8 +1062,8 @@ func (a *App) serveConn(conn net.Conn) {
 	state := a.conns[conn]
 	a.connMu.Unlock()
 	if tc, ok := conn.(*tls.Conn); ok && !a.cfg.DisableHTTP2 {
-		if a.cfg.ReadTimeout > 0 {
-			_ = tc.SetDeadline(time.Now().Add(a.cfg.ReadTimeout))
+		if a.cfg.TLSHandshakeTimeout > 0 {
+			_ = tc.SetDeadline(time.Now().Add(a.cfg.TLSHandshakeTimeout))
 		}
 		if err := tc.Handshake(); err != nil {
 			if !isExpectedConnErr(err) {
@@ -1001,8 +1088,8 @@ func (a *App) serveConn(conn net.Conn) {
 	} else if tc, ok := conn.(*tls.Conn); ok {
 		// HTTP/2 may be disabled, but TLS state (especially verified client
 		// certificates) must still be visible to HTTP/1 middleware.
-		if a.cfg.ReadTimeout > 0 {
-			_ = tc.SetDeadline(time.Now().Add(a.cfg.ReadTimeout))
+		if a.cfg.TLSHandshakeTimeout > 0 {
+			_ = tc.SetDeadline(time.Now().Add(a.cfg.TLSHandshakeTimeout))
 		}
 		if err := tc.Handshake(); err != nil {
 			if !isExpectedConnErr(err) {
@@ -1048,8 +1135,19 @@ func (a *App) serveConn(conn net.Conn) {
 		headEnd := findHeaderEnd(accumulated)
 		for headEnd < 0 {
 			if len(accumulated) == cap(buf) {
-				conn.Write([]byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
-				return
+				maxHead := a.cfg.MaxRequestLineSize + a.cfg.MaxHeaderListSize + 4
+				if maxHead <= 4 || len(accumulated) >= maxHead {
+					_ = writeAll(conn, serverError431)
+					return
+				}
+				newCap := cap(buf) * 2
+				if newCap > maxHead {
+					newCap = maxHead
+				}
+				grown := make([]byte, len(accumulated), newCap)
+				copy(grown, accumulated)
+				buf = grown[:cap(grown)]
+				accumulated = buf[:len(grown)]
 			}
 
 			n, err := conn.Read(buf[len(accumulated):cap(buf)])
@@ -1072,7 +1170,7 @@ func (a *App) serveConn(conn net.Conn) {
 				return
 			}
 
-			if !a.cfg.DisableHTTP2 && len(accumulated) <= len(h2ClientPreface) && bytes.Equal(accumulated, h2ClientPreface[:len(accumulated)]) {
+			if !a.cfg.DisableHTTP2 && !a.cfg.DisableH2C && len(accumulated) <= len(h2ClientPreface) && bytes.Equal(accumulated, h2ClientPreface[:len(accumulated)]) {
 				if len(accumulated) < len(h2ClientPreface) {
 					continue
 				}
@@ -1082,7 +1180,7 @@ func (a *App) serveConn(conn net.Conn) {
 				h2c.serve(nil, true)
 				return
 			}
-			if !a.cfg.DisableHTTP2 && len(accumulated) > len(h2ClientPreface) && bytes.Equal(accumulated[:len(h2ClientPreface)], h2ClientPreface) {
+			if !a.cfg.DisableHTTP2 && !a.cfg.DisableH2C && len(accumulated) > len(h2ClientPreface) && bytes.Equal(accumulated[:len(h2ClientPreface)], h2ClientPreface) {
 				h2c := newH2Conn(a, conn)
 				a.setH2Conn(conn, h2c)
 				_ = conn.SetReadDeadline(time.Time{})
@@ -1113,6 +1211,11 @@ func (a *App) serveConn(conn net.Conn) {
 			}
 			return
 		}
+		if a.cfg.MaxHeaderListSize > 0 && headEnd+4-consumed > a.cfg.MaxHeaderListSize {
+			releaseCtx(ctx)
+			_ = writeAll(conn, serverError431)
+			return
+		}
 
 		_, err = parseHeadersLimit(accumulated[consumed:headEnd+4], &ctx.Header, a.cfg.MaxHeaderCount, a.cfg.StrictHeaderValueValidation)
 		if err != nil {
@@ -1137,10 +1240,40 @@ func (a *App) serveConn(conn net.Conn) {
 		} else {
 			ctx.originalURI = origTarget
 		}
+		if ctx.Header.ContentLength > a.cfg.MaxRequestBodySize {
+			releaseCtx(ctx)
+			_ = writeAll(conn, serverError413)
+			return
+		}
+		if a.cfg.RequestHeadHandler != nil {
+			headCtx := connCtx
+			cancelHead := func() {}
+			if a.cfg.HandlerTimeout > 0 {
+				headCtx, cancelHead = context.WithTimeout(connCtx, a.cfg.HandlerTimeout)
+			}
+			ctx.SetContext(headCtx)
+			if a.cfg.WriteTimeout > 0 {
+				_ = conn.SetWriteDeadline(time.Now().Add(a.cfg.WriteTimeout))
+			}
+			keepAlive := ctx.Header.KeepAlive
+			ctx.Header.KeepAlive = false // an early response must close because the body remains unread
+			accepted := a.runRequestHeadHandler(ctx)
+			cancelHead()
+			if !accepted {
+				releaseCtx(ctx)
+				return
+			}
+			ctx.Header.KeepAlive = keepAlive
+		}
 
 		// h2c upgrade: HTTP/1.1 Upgrade: h2c, Connection: Upgrade, HTTP2-Settings
 		if !a.cfg.DisableHTTP2 && hasUpgradeH2C(ctx) {
-			leftover, bodyErr := readH2CUpgradeBody(conn, ctx, accumulated, headEnd+4, a.cfg.MaxRequestBodySize, a.cfg.ReadTimeout)
+			if a.cfg.DisableH2C {
+				releaseCtx(ctx)
+				_ = writeAll(conn, serverError400)
+				return
+			}
+			leftover, bodyErr := readH2CUpgradeBody(conn, ctx, accumulated, headEnd+4, a.cfg.MaxRequestBodySize, a.cfg.RequestBodyTimeout)
 			if bodyErr != nil {
 				releaseCtx(ctx)
 				if errors.Is(bodyErr, ErrBodyTooLarge) {
@@ -1172,11 +1305,6 @@ func (a *App) serveConn(conn net.Conn) {
 			return
 		}
 
-		if ctx.Header.ContentLength > a.cfg.MaxRequestBodySize {
-			releaseCtx(ctx)
-			_ = writeAll(conn, serverError413)
-			return
-		}
 		expect := trimOWS(ctx.Header.Expect)
 		if len(expect) > 0 {
 			if !strEqFold(expect, "100-continue") || (!ctx.Header.Chunked && ctx.Header.ContentLength == 0) {
@@ -1193,11 +1321,12 @@ func (a *App) serveConn(conn net.Conn) {
 		bodyLen := ctx.Header.ContentLength
 		var nextData []byte
 		chunkedBody := ctx.Header.Chunked
-		if (chunkedBody || bodyLen > 0) && a.cfg.ReadTimeout > 0 {
-			if requestStart.IsZero() {
-				requestStart = time.Now()
-			}
-			if err := conn.SetReadDeadline(requestStart.Add(a.cfg.ReadTimeout)); err != nil {
+		bodyBudget := a.cfg.RequestBodyTimeout
+		if bodyBudget <= 0 {
+			bodyBudget = a.cfg.ReadTimeout
+		}
+		if (chunkedBody || bodyLen > 0) && bodyBudget > 0 {
+			if err := conn.SetReadDeadline(time.Now().Add(bodyBudget)); err != nil {
 				releaseCtx(ctx)
 				return
 			}
@@ -1205,10 +1334,12 @@ func (a *App) serveConn(conn net.Conn) {
 		}
 
 		if chunkedBody {
-			body, leftover, trailers, readErr := readChunkedBody(conn, accumulated[bodyStart:], a.cfg.MaxRequestBodySize, a.cfg.ReadTimeout)
+			body, leftover, trailers, readErr := readChunkedBody(conn, accumulated[bodyStart:], a.cfg.MaxRequestBodySize, bodyBudget)
 			if readErr != nil {
 				releaseCtx(ctx)
-				if errors.Is(readErr, ErrBodyTooLarge) {
+				if isTimeoutErr(readErr) {
+					_ = writeAll(conn, serverError408)
+				} else if errors.Is(readErr, ErrBodyTooLarge) {
 					_ = writeAll(conn, serverError413)
 				} else {
 					_ = writeAll(conn, serverError400)
@@ -1228,7 +1359,9 @@ func (a *App) serveConn(conn net.Conn) {
 						if len(accumulated) >= messageEnd {
 							break
 						}
-						if err != io.EOF && !isExpectedConnErr(err) {
+						if isTimeoutErr(err) && !a.closed.Load() {
+							_ = writeAll(conn, serverError408)
+						} else if err != io.EOF && !isExpectedConnErr(err) {
 							a.emitError(err)
 						}
 						releaseCtx(ctx)
@@ -1242,6 +1375,9 @@ func (a *App) serveConn(conn net.Conn) {
 				if len(accumulated) < messageEnd {
 					if _, err := io.ReadFull(conn, grown[len(accumulated):]); err != nil {
 						releaseCtx(ctx)
+						if isTimeoutErr(err) && !a.closed.Load() {
+							_ = writeAll(conn, serverError408)
+						}
 						return
 					}
 				}
@@ -1277,14 +1413,11 @@ func (a *App) serveConn(conn net.Conn) {
 		// default request path there is no per-request timeout, so reusing the
 		// connection context avoids context.WithCancel allocation/work on every
 		// request while still cancelling handlers on connection shutdown.
-		if a.cfg.WriteTimeout == 0 {
+		if a.cfg.HandlerTimeout == 0 {
 			ctx.SetContext(connCtx)
 			a.dispatch(ctx)
 		} else {
-			reqCtx, reqCancel := context.WithCancel(connCtx)
-			if a.cfg.WriteTimeout > 0 {
-				reqCtx, reqCancel = context.WithTimeout(connCtx, a.cfg.WriteTimeout)
-			}
+			reqCtx, reqCancel := context.WithTimeout(connCtx, a.cfg.HandlerTimeout)
 			ctx.SetContext(reqCtx)
 			a.dispatch(ctx)
 			reqCancel()
@@ -1322,25 +1455,46 @@ func (a *App) serveConn(conn net.Conn) {
 	}
 }
 
+func (a *App) runRequestHeadHandler(ctx *DefaultCtx) (accepted bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			if !ctx.responded {
+				a.cfg.ErrorHandler(ctx, NewPanicError(r))
+			}
+			accepted = false
+		}
+	}()
+	ctx.params = ctx.params[:0]
+	path := ctx.path()
+	if a.router != nil {
+		handler := a.router.FindBytes(ctx.Header.Method, path, &ctx.params)
+		if handler == nil && bytesEqualFold(ctx.Header.Method, MethodHEADBytes) {
+			ctx.params = ctx.params[:0]
+			_ = a.router.FindBytes(MethodGETBytes, path, &ctx.params)
+		}
+	}
+	err := a.cfg.RequestHeadHandler(ctx)
+	if err != nil && !ctx.responded {
+		a.cfg.ErrorHandler(ctx, err)
+	}
+	if err != nil && !ctx.responded {
+		_ = ctx.Status(StatusInternalServerError).SendStatus(StatusInternalServerError)
+	}
+	return err == nil && !ctx.responded
+}
+
 func (a *App) defaultRecoveryMiddleware() HandlerFunc {
 	return func(c Ctx) error {
 		defer func() {
 			if r := recover(); r != nil {
-				a.logger.Error("panic recovered",
-					"method", c.Method(),
-					"path", c.Path(),
-					"ip", c.IP(),
-					"panic", r,
-				)
-				if a.cfg.Debug {
-					a.logger.Error("panic stack trace",
-						"method", c.Method(),
-						"path", c.Path(),
-						"stack", string(debug.Stack()),
-					)
-				}
 				if dc, ok := c.(*DefaultCtx); ok && !dc.responded {
 					a.cfg.ErrorHandler(c, NewPanicError(r))
+				} else {
+					args := []any{"method", c.Method(), "path", c.Path(), "ip", c.IP(), "panic", "handler panic after response"}
+					if a.cfg.Debug || a.cfg.ErrorOptions.LogInternal {
+						args = append(args, "detail", RedactSecrets(fmt.Sprint(r)), "stack", RedactSecrets(string(debug.Stack())))
+					}
+					a.logger.Error("panic recovered", args...)
 				}
 			}
 		}()
@@ -1538,30 +1692,6 @@ func isTimeoutErr(err error) bool {
 }
 
 func defaultErrorHandler(ctx Ctx, err error) {
-	if dc, ok := ctx.(*DefaultCtx); ok && dc.server != nil && dc.server.logger != nil {
-		report := dc.ErrorReport(err)
-		args := []any{
-			"method", report.Method,
-			"path", report.Path,
-			"ip", report.RemoteIP,
-			"error_code", report.Error.Code,
-			"error_kind", report.Error.Kind,
-			"error_severity", report.Error.Severity,
-			"error_message", report.Error.Message,
-			"retryable", report.Error.Retryable,
-			"status", report.Error.Status,
-		}
-		if report.RequestID != "" {
-			args = append(args, "request_id", report.RequestID)
-		}
-		if report.Cause != "" {
-			args = append(args, "cause", report.Cause)
-		}
-		if len(report.Stack) > 0 {
-			args = append(args, "stack", string(report.Stack))
-		}
-		dc.server.logger.Error("request error", args...)
-	}
 	_ = ctx.SafeErrorResponse(err)
 }
 

@@ -6,3 +6,7 @@ dagflow/data/*
 .fh-reliability
 .idea
 *.wasm
+*.key
+*.pem
+*.p12
+*.pfx
