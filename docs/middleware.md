@@ -259,9 +259,9 @@ CSRF token validation using double-submit cookie pattern.
 import "github.com/oarkflow/fh/mw/csrf"
 
 app.Use(csrf.New(csrf.Config{
-    Secret:     "csrf-secret-key",
-    CookieName: "csrf_token",
-    HeaderName: "X-CSRF-Token",
+	CookieName: "csrf_token",
+	HeaderName: "X-CSRF-Token",
+	TrustedOrigins: []string{"https://app.example.com"},
 }))
 ```
 

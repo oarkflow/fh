@@ -217,11 +217,10 @@ func NewWithConfig(cfg Config, handler func(*Conn) error) fh.HandlerFunc {
 			ws := newConn(conn, cfg, selectedProtocol)
 
 			if cfg.Manager != nil {
-				if cfg.Manager.MaxConnections > 0 && int(cfg.Manager.activeConns.Load()) >= cfg.Manager.MaxConnections {
+				if !cfg.Manager.TryAdd(ws) {
 					_ = ws.CloseWithStatus(CloseTryAgainLater, "connection limit exceeded")
 					return ErrWebSocketClosed
 				}
-				cfg.Manager.Add(ws)
 				defer cfg.Manager.Remove(ws)
 			}
 
@@ -1385,14 +1384,27 @@ func NewManager() *Manager {
 }
 
 func (m *Manager) Add(c *Conn) {
+	_ = m.TryAdd(c)
+}
+
+// TryAdd atomically enforces MaxConnections and registers c. It returns false
+// when the manager is full or either argument is nil.
+func (m *Manager) TryAdd(c *Conn) bool {
 	if m == nil || c == nil {
-		return
+		return false
 	}
 
-	m.activeConns.Add(1)
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.conns[c]; exists {
+		return true
+	}
+	if m.MaxConnections > 0 && len(m.conns) >= m.MaxConnections {
+		return false
+	}
 	m.conns[c] = struct{}{}
-	m.mu.Unlock()
+	m.activeConns.Add(1)
+	return true
 }
 
 func (m *Manager) Remove(c *Conn) {
@@ -1401,9 +1413,12 @@ func (m *Manager) Remove(c *Conn) {
 	}
 
 	m.mu.Lock()
-	delete(m.conns, c)
+	_, existed := m.conns[c]
+	if existed {
+		delete(m.conns, c)
+		m.activeConns.Add(-1)
+	}
 	m.mu.Unlock()
-	m.activeConns.Add(-1)
 }
 
 func (m *Manager) Count() int {

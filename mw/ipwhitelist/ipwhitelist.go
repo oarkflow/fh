@@ -28,7 +28,10 @@ type Config struct {
 
 	KeyFunc KeyFunc
 
-	// TrustProxyHeaders should only be enabled behind trusted proxies.
+	// TrustProxyHeaders is retained for source compatibility and has no effect.
+	// Install mw/realip with explicit TrustedProxies before this middleware;
+	// allowlisting then consumes the validated Ctx.IP value.
+	// Deprecated: use mw/realip.
 	TrustProxyHeaders bool
 
 	Forbidden ForbiddenHandler
@@ -54,7 +57,7 @@ func NewWithConfig(config Config) fh.HandlerFunc {
 		}
 
 		if rawIP == "" {
-			rawIP = clientIP(ctx, cfg.TrustProxyHeaders)
+			rawIP = ctx.IP()
 		}
 
 		ip := net.ParseIP(rawIP)
@@ -98,33 +101,6 @@ func normalize(cfg Config) (Config, error) {
 func DefaultForbiddenHandler(ctx fh.Ctx) error {
 	ctx.Set("Content-Type", "text/plain; charset=utf-8")
 	return ctx.Status(403).SendString("Forbidden")
-}
-
-func clientIP(ctx fh.Ctx, trustProxy bool) string {
-	if trustProxy {
-		if ip := firstForwardedIP(ctx.Get("X-Forwarded-For")); ip != "" {
-			return ip
-		}
-		if ip := strings.TrimSpace(ctx.Get("X-Real-IP")); ip != "" {
-			return ip
-		}
-	}
-
-	return ctx.IP()
-}
-
-func firstForwardedIP(v string) string {
-	if v == "" {
-		return ""
-	}
-	parts := strings.Split(v, ",")
-	for i := len(parts) - 1; i >= 0; i-- {
-		ip := strings.TrimSpace(parts[i])
-		if ip != "" {
-			return ip
-		}
-	}
-	return ""
 }
 
 // -----------------------------------------------------------------------------

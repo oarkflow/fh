@@ -1,6 +1,8 @@
 package fh
 
 import (
+	"bytes"
+	"crypto"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -9,10 +11,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/crypto/ocsp"
 )
 
 // ServerTLSOptions builds a hardened server-side tls.Config without coupling
@@ -27,9 +32,11 @@ type ServerTLSOptions struct {
 	MinVersion                uint16
 	NextProtos                []string
 	CurvePreferences          []tls.CurveID
-	// EnablePadding adds TLS record padding to resist JA3/JA4 fingerprinting.
-	// When true, random padding (16-255 bytes) is added to ClientHello to make
-	// fingerprinting unreliable. Has minor performance cost.
+	// EnablePadding is retained for source compatibility. Go's server-side TLS
+	// API does not provide ClientHello or record-padding control, so this field
+	// is deprecated and has no effect.
+	// Deprecated: terminate TLS at an anti-DDoS edge when fingerprint privacy is
+	// a requirement.
 	EnablePadding bool
 }
 
@@ -68,9 +75,6 @@ func NewServerTLSConfig(opt ServerTLSOptions) (*tls.Config, error) {
 		NextProtos:       append([]string(nil), opt.NextProtos...),
 		CurvePreferences: curves,
 	}
-	if opt.EnablePadding {
-		cfg.SessionTicketsDisabled = false
-	}
 	return cfg, nil
 }
 
@@ -90,6 +94,9 @@ func (pc *CertPinningConfig) Verifier() func(rawCerts [][]byte, verifiedChains [
 	return func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			return errors.New("fh: no certificates presented")
+		}
+		if len(verifiedChains) == 0 {
+			return errors.New("fh: certificate pinning requires normal CA and hostname verification")
 		}
 		leaf, err := x509.ParseCertificate(rawCerts[0])
 		if err != nil {
@@ -229,6 +236,20 @@ func (s *OCSPStapler) refresh() error {
 	if err != nil {
 		return err
 	}
+	parsed, err := ocsp.ParseResponseForCert(resp, s.leafCert, s.issuerCert)
+	if err != nil {
+		return errors.New("fh: invalid OCSP response: " + err.Error())
+	}
+	if parsed.Status != ocsp.Good {
+		return errors.New("fh: OCSP responder did not report certificate status good")
+	}
+	now := time.Now()
+	if parsed.ThisUpdate.After(now.Add(5 * time.Minute)) {
+		return errors.New("fh: OCSP response is not yet valid")
+	}
+	if !parsed.NextUpdate.IsZero() && !parsed.NextUpdate.After(now) {
+		return errors.New("fh: OCSP response is expired")
+	}
 
 	s.mu.Lock()
 	s.staple = resp
@@ -237,76 +258,43 @@ func (s *OCSPStapler) refresh() error {
 }
 
 func buildOCSPRequest(leaf, issuer *x509.Certificate) ([]byte, error) {
-	return createOCSPRequest(leaf, issuer)
+	return ocsp.CreateRequest(leaf, issuer, &ocsp.RequestOptions{Hash: crypto.SHA256})
 }
 
 func fetchOCSPResponse(url string, req []byte) ([]byte, error) {
-	httpReq, err := http.NewRequest("POST", url, &readerFromBytes{data: req})
+	parsedURL, err := neturl.Parse(url)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+		return nil, errors.New("fh: invalid OCSP responder URL")
+	}
+	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(req))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/ocsp-request")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("fh: OCSP responder redirects are not allowed")
+		},
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-}
-
-type readerFromBytes struct {
-	data []byte
-	pos  int
-}
-
-func (r *readerFromBytes) Read(p []byte) (int, error) {
-	if r.pos >= len(r.data) {
-		return 0, io.EOF
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, errors.New("fh: OCSP responder returned " + resp.Status)
 	}
-	n := copy(p, r.data[r.pos:])
-	r.pos += n
-	return n, nil
-}
-
-func createOCSPRequest(leaf, issuer *x509.Certificate) ([]byte, error) {
-	// Minimal OCSP request: SEQUENCE { SEQUENCE { ... } }
-	// This is a simplified DER encoder for the OCSP request structure.
-	var buf []byte
-	buf = appendTag(buf, 0x30, encodeOCSPRequestInner(leaf, issuer))
-	return buf, nil
-}
-
-func encodeOCSPRequestInner(leaf, issuer *x509.Certificate) []byte {
-	var inner []byte
-	var certID []byte
-	certID = append(certID, 0x05, 0x00) // SHA-1 algorithm
-	certID = append(certID, issuer.RawIssuer...)
-	certID = append(certID, leaf.SerialNumber.Bytes()...)
-	inner = appendTag(inner, 0x30, certID)
-	return inner
-}
-
-func appendTag(buf []byte, tag byte, content []byte) []byte {
-	buf = append(buf, tag)
-	buf = appendLength(buf, len(content))
-	buf = append(buf, content...)
-	return buf
-}
-
-func appendLength(buf []byte, length int) []byte {
-	if length < 0x80 {
-		return append(buf, byte(length))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return nil, err
 	}
-	if length < 0x100 {
-		return append(buf, 0x81, byte(length))
+	if len(body) > 1<<20 {
+		return nil, errors.New("fh: OCSP response exceeds 1 MiB")
 	}
-	if length < 0x10000 {
-		return append(buf, 0x82, byte(length>>8), byte(length))
-	}
-	return append(buf, 0x83, byte(length>>16), byte(length>>8), byte(length))
+	return body, nil
 }
 
 // Staple returns the cached OCSP response, or nil if not available.

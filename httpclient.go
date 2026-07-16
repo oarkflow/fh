@@ -71,17 +71,21 @@ type ClientConfig struct {
 	DisableKeepAlives     bool
 	ForceAttemptHTTP2     bool
 	TLSConfig             *tls.Config
-	Proxy                 func(*http.Request) (*url.URL, error)
-	Jar                   http.CookieJar
-	Transport             http.RoundTripper
-	Logger                Logger
-	Metrics               ClientMetrics
-	Hooks                 ClientHooks
-	Security              ClientSecurity
-	Retry                 RetryPolicy
-	Redirect              RedirectPolicy
-	BodyLimit             int64
-	ResponseBodyLimit     int64
+	// AllowInsecureTLS must be explicitly enabled before a TLSConfig with
+	// InsecureSkipVerify can be used. Prefer normal certificate validation;
+	// certificate pinning also requires a verified chain.
+	AllowInsecureTLS  bool
+	Proxy             func(*http.Request) (*url.URL, error)
+	Jar               http.CookieJar
+	Transport         http.RoundTripper
+	Logger            Logger
+	Metrics           ClientMetrics
+	Hooks             ClientHooks
+	Security          ClientSecurity
+	Retry             RetryPolicy
+	Redirect          RedirectPolicy
+	BodyLimit         int64
+	ResponseBodyLimit int64
 }
 
 func (c ClientConfig) normalize() ClientConfig {
@@ -153,6 +157,18 @@ func NewClient(cfg ...ClientConfig) *Client {
 		c = cfg[0]
 	}
 	c = c.normalize()
+	if c.TLSConfig != nil {
+		c.TLSConfig = c.TLSConfig.Clone()
+		if c.TLSConfig.InsecureSkipVerify && !c.AllowInsecureTLS {
+			panic("fh: refusing TLSConfig.InsecureSkipVerify without AllowInsecureTLS")
+		}
+		if c.TLSConfig.MinVersion == 0 {
+			c.TLSConfig.MinVersion = tls.VersionTLS12
+		}
+		if c.TLSConfig.MinVersion < tls.VersionTLS12 {
+			panic("fh: outbound TLS MinVersion must be TLS 1.2 or newer")
+		}
+	}
 	transport := c.Transport
 	if transport == nil {
 		d := &net.Dialer{Timeout: c.DialTimeout, KeepAlive: c.KeepAlive}

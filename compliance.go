@@ -111,6 +111,7 @@ type SafeConfig struct {
 	TLSHandshakeTimeout   string            `json:"tls_handshake_timeout,omitempty"`
 	HTTP2IdleTimeout      string            `json:"http2_idle_timeout,omitempty"`
 	MaxConnections        int               `json:"max_connections"`
+	MaxConnectionsPerIP   int               `json:"max_connections_per_ip"`
 	H2CEnabled            bool              `json:"h2c_enabled"`
 	MaxRequestBodySize    int               `json:"max_request_body_size"`
 	MaxHeaderListSize     int               `json:"max_header_list_size"`
@@ -147,6 +148,9 @@ func applyComplianceDefaults(cfg *Config) {
 		cfg.Redaction = DefaultRedactionConfig()
 	}
 	if cfg.Mode == ModeProduction || cfg.Mode == ModeEnterprise || cfg.Mode == ModeStrict {
+		if cfg.MaxConnectionsPerIP <= 0 {
+			cfg.MaxConnectionsPerIP = 100
+		}
 		if cfg.ReadHeaderTimeout == 0 {
 			cfg.ReadHeaderTimeout = 5 * time.Second
 		}
@@ -264,6 +268,9 @@ func applySecureDefaults(cfg *Config) {
 	if cfg.MaxConnections <= 0 || cfg.MaxConnections > 10_000 {
 		cfg.MaxConnections = 10_000
 	}
+	if cfg.MaxConnectionsPerIP <= 0 || cfg.MaxConnectionsPerIP > 100 {
+		cfg.MaxConnectionsPerIP = 100
+	}
 	if cfg.MaxRequestBodySize <= 0 || cfg.MaxRequestBodySize > 4<<20 {
 		cfg.MaxRequestBodySize = 4 << 20
 	}
@@ -317,6 +324,7 @@ func (a *App) SafeConfig() SafeConfig {
 		TLSHandshakeTimeout:   a.cfg.TLSHandshakeTimeout.String(),
 		HTTP2IdleTimeout:      a.cfg.HTTP2IdleTimeout.String(),
 		MaxConnections:        a.cfg.MaxConnections,
+		MaxConnectionsPerIP:   a.cfg.MaxConnectionsPerIP,
 		H2CEnabled:            !a.cfg.DisableHTTP2 && !a.cfg.DisableH2C,
 		MaxRequestBodySize:    a.cfg.MaxRequestBodySize,
 		MaxHeaderListSize:     a.cfg.MaxHeaderListSize,
@@ -381,6 +389,9 @@ func (a *App) ValidateSecurity() []SecurityFinding {
 	}
 	if prod && a.cfg.MaxConnections <= 0 {
 		f = append(f, SecurityFinding{"high", "CONNECTION_LIMIT_MISSING", "MaxConnections is unbounded", "set Config.MaxConnections", ""})
+	}
+	if prod && a.cfg.MaxConnectionsPerIP <= 0 {
+		f = append(f, SecurityFinding{"medium", "PER_IP_CONNECTION_LIMIT_MISSING", "simultaneous connections from one socket peer are unbounded", "set Config.MaxConnectionsPerIP; use identity-aware limits behind shared NAT", ""})
 	}
 	if prod && !a.cfg.DisableHTTP2 && !a.cfg.DisableH2C {
 		f = append(f, SecurityFinding{"medium", "H2C_ENABLED", "cleartext HTTP/2 prior knowledge and upgrade are enabled", "disable h2c on public listeners with Config.DisableH2C", ""})
@@ -492,6 +503,9 @@ func validateTLSConfig(cfg *tls.Config) error {
 	}
 	if cfg.MinVersion != 0 && cfg.MinVersion < tls.VersionTLS12 {
 		return fmt.Errorf("fh: TLS MinVersion must be TLS 1.2 or newer")
+	}
+	if cfg.MaxVersion != 0 && cfg.MinVersion != 0 && cfg.MaxVersion < cfg.MinVersion {
+		return fmt.Errorf("fh: TLS MaxVersion must not be lower than MinVersion")
 	}
 	return nil
 }

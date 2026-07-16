@@ -13,14 +13,18 @@ import (
 )
 
 type Config struct {
-	CookieName     string
-	HeaderName     string
-	CookiePath     string
-	CookieDomain   string
-	CookieSecure   bool
-	CookieSameSite fh.SameSite
-	CookieMaxAge   time.Duration
-	TrustedOrigins []string
+	CookieName   string
+	HeaderName   string
+	CookiePath   string
+	CookieDomain string
+	CookieSecure bool
+	// AllowInsecureCookie is required to disable Secure on the CSRF cookie.
+	// This explicit opt-out prevents a partial Config literal from silently
+	// weakening the secure default.
+	AllowInsecureCookie bool
+	CookieSameSite      fh.SameSite
+	CookieMaxAge        time.Duration
+	TrustedOrigins      []string
 	// RequireOriginHeader rejects state-changing requests that carry neither
 	// an Origin nor a Referer header. This prevents CSRF from clients that
 	// strip these headers (some privacy browsers, HTTPS-to-HTTP navigations)
@@ -28,13 +32,16 @@ type Config struct {
 	// Set to false when the application must accept state-changing requests
 	// from non-browser clients (curl, mobile apps) that do not send Origin.
 	RequireOriginHeader bool
-	Next                func(fh.Ctx) bool
+	// AllowMissingOrigin explicitly opts out of the secure origin requirement.
+	// Prefer bypassing CSRF middleware only on authenticated non-browser routes.
+	AllowMissingOrigin bool
+	Next               func(fh.Ctx) bool
 }
 
 var DefaultConfig = Config{
 	CookieName: "csrf_token", HeaderName: "X-CSRF-Token", CookiePath: "/",
 	CookieSameSite: fh.SameSiteLax, CookieMaxAge: 12 * time.Hour,
-	CookieSecure: true,
+	CookieSecure: true, RequireOriginHeader: true,
 }
 
 func New(config ...Config) fh.HandlerFunc {
@@ -93,7 +100,10 @@ func merge(dst *Config, src Config) {
 	if src.TrustedOrigins != nil {
 		dst.TrustedOrigins = src.TrustedOrigins
 	}
-	dst.CookieSecure, dst.CookieSameSite, dst.RequireOriginHeader, dst.Next = src.CookieSecure, src.CookieSameSite, src.RequireOriginHeader, src.Next
+	dst.CookieSecure = src.CookieSecure || !src.AllowInsecureCookie
+	dst.CookieSameSite = src.CookieSameSite
+	dst.RequireOriginHeader = src.RequireOriginHeader || !src.AllowMissingOrigin
+	dst.Next = src.Next
 }
 
 func safeMethod(method string) bool {

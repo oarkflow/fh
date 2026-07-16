@@ -21,15 +21,16 @@ type ReplayStore interface {
 }
 
 type Config struct {
-	Secrets         [][]byte
-	Secret          []byte
-	Resolve         SecretResolver
-	SignatureHeader string
-	TimestampHeader string
-	KeyIDHeader     string
-	Scheme          string
-	Tolerance       time.Duration
-	SignedPayload   func(fh.Ctx, string) []byte
+	Secrets          [][]byte
+	Secret           []byte
+	Resolve          SecretResolver
+	SignatureHeader  string
+	TimestampHeader  string
+	KeyIDHeader      string
+	Scheme           string
+	Tolerance        time.Duration
+	MaxReplayEntries int
+	SignedPayload    func(fh.Ctx, string) []byte
 	// Replay guards against a captured signature being resent within the
 	// tolerance window. Defaults to a bounded in-memory store; supply a
 	// distributed ReplayStore (e.g. Redis-backed) for multi-instance
@@ -52,7 +53,7 @@ func New(config Config) fh.HandlerFunc {
 		config.Tolerance = 5 * time.Minute
 	}
 	if config.Replay == nil {
-		config.Replay = newMemoryReplayStore()
+		config.Replay = newMemoryReplayStore(config.MaxReplayEntries)
 	}
 	return func(c fh.Ctx) error {
 		if config.Next != nil && config.Next(c) {
@@ -104,7 +105,8 @@ func New(config Config) fh.HandlerFunc {
 			mac := hmac.New(sha256.New, secret)
 			mac.Write(payload)
 			if hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
-				if config.Replay.Seen(sig+":"+ts, config.Tolerance) {
+				replayTTL := time.Until(when.Add(config.Tolerance))
+				if replayTTL <= 0 || config.Replay.Seen(sig+":"+ts, replayTTL) {
 					return fh.NewHTTPError(fh.StatusConflict, "SIGNATURE_REPLAYED", "signature has already been used")
 				}
 				return c.Next()
@@ -118,24 +120,35 @@ func New(config Config) fh.HandlerFunc {
 // unset. It is process-local; deployments running multiple instances behind
 // a load balancer should supply a shared store instead.
 type memoryReplayStore struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
+	mu         sync.Mutex
+	seen       map[string]time.Time
+	maxEntries int
 }
 
-func newMemoryReplayStore() *memoryReplayStore {
-	return &memoryReplayStore{seen: map[string]time.Time{}}
+func newMemoryReplayStore(maxEntries ...int) *memoryReplayStore {
+	maxSize := 100000
+	if len(maxEntries) > 0 && maxEntries[0] > 0 {
+		maxSize = maxEntries[0]
+	}
+	return &memoryReplayStore{seen: make(map[string]time.Time, min(maxSize, 1024)), maxEntries: maxSize}
 }
 
 func (s *memoryReplayStore) Seen(key string, ttl time.Duration) bool {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k, exp := range s.seen {
-		if exp.Before(now) {
-			delete(s.seen, k)
+	if exp, ok := s.seen[key]; ok && exp.After(now) {
+		return true
+	}
+	if len(s.seen) >= s.maxEntries {
+		for k, exp := range s.seen {
+			if !exp.After(now) {
+				delete(s.seen, k)
+			}
 		}
 	}
-	if exp, ok := s.seen[key]; ok && exp.After(now) {
+	if len(s.seen) >= s.maxEntries {
+		// Fail closed: never evict a still-valid replay marker.
 		return true
 	}
 	s.seen[key] = now.Add(ttl)

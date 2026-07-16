@@ -1,8 +1,10 @@
 package fh
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -247,5 +249,59 @@ func TestWriteAndHandlerTimeoutsAreIndependent(t *testing.T) {
 	_ = pipeRequest(t, bounded, "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
 	if !hadDeadline {
 		t.Fatal("HandlerTimeout did not set a handler context deadline")
+	}
+}
+
+func TestPerIPConnectionReservationIsBoundedAndReleased(t *testing.T) {
+	app := New(WithMaxConnectionsPerIP(2))
+	addr := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 1234}
+	key1, ok := app.reservePeer(addr)
+	if !ok {
+		t.Fatal("first connection was rejected")
+	}
+	key2, ok := app.reservePeer(addr)
+	if !ok || key2 != key1 {
+		t.Fatal("second connection was rejected")
+	}
+	if _, ok := app.reservePeer(addr); ok {
+		t.Fatal("connection above per-IP cap was accepted")
+	}
+	app.releasePeer(key1)
+	if _, ok := app.reservePeer(addr); !ok {
+		t.Fatal("released capacity was not reusable")
+	}
+}
+
+func TestSecureTLSRequiresTLS13(t *testing.T) {
+	app := New(WithSecureByDefault(true))
+	if _, err := app.prepareTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}); err == nil {
+		t.Fatal("secure app accepted TLS 1.2")
+	}
+	cfg, err := app.prepareTLSConfig(&tls.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("MinVersion = %x, want TLS 1.3", cfg.MinVersion)
+	}
+}
+
+func TestOutboundClientRejectsImplicitInsecureTLS(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected insecure TLS configuration to panic")
+		}
+	}()
+	_ = NewClient(ClientConfig{TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+}
+
+func TestOutboundClientInsecureTLSRequiresExplicitOptOut(t *testing.T) {
+	client := NewClient(ClientConfig{
+		TLSConfig:        &tls.Config{InsecureSkipVerify: true},
+		AllowInsecureTLS: true,
+	})
+	t.Cleanup(func() { _ = client.Close() })
+	if client.cfg.TLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("MinVersion = %x, want TLS 1.2", client.cfg.TLSConfig.MinVersion)
 	}
 }

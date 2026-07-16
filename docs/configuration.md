@@ -13,6 +13,7 @@ type Config struct {
     TLSHandshakeTimeout  time.Duration            // Default: 10s
     HTTP2IdleTimeout     time.Duration            // Default: 120s
     MaxConnections       int                      // Default: 10,000
+	MaxConnectionsPerIP  int                      // Default: 100 in production/secure profiles
     ReadBufferSize       int                      // Default: 16384 (16KB)
     MaxRequestBodySize   int                      // Default: 4194304 (4MB)
     MaxHeaderListSize    int                      // Default: 65536 (64KB)
@@ -56,6 +57,7 @@ type Config struct {
 | `MaxHeaderListSize` | 64KB | Maximum total header size |
 | `MaxHeaderCount` | 64 | Maximum number of headers |
 | `MaxRequestLineSize` | 8KB | Maximum request line length |
+| `MaxConnectionsPerIP` | 100 in production/secure profiles | Maximum simultaneous TCP connections from one socket peer |
 
 ### HTTP/2
 

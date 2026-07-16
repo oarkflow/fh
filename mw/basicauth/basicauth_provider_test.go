@@ -1,6 +1,19 @@
 package basicauth
 
-import "testing"
+import (
+	"context"
+	"crypto/tls"
+	"testing"
+
+	"github.com/oarkflow/fh"
+)
+
+type tlsTestCtx struct {
+	fh.Ctx
+	ctx context.Context
+}
+
+func (c *tlsTestCtx) Context() context.Context { return c.ctx }
 
 func TestUsersProviderStorage(t *testing.T) {
 	hash, err := HashPassword("secret")
@@ -43,5 +56,12 @@ func TestNewFromPlainUsers(t *testing.T) {
 	}
 	if mw == nil {
 		t.Fatal("nil middleware")
+	}
+}
+
+func TestRequireTLSRecognizesNativeTLSState(t *testing.T) {
+	ctx := &tlsTestCtx{ctx: fh.WithTLSState(context.Background(), tls.ConnectionState{Version: tls.VersionTLS13})}
+	if !isHTTPS(ctx, nil) {
+		t.Fatal("native TLS state was not recognized")
 	}
 }

@@ -2,20 +2,26 @@ package slowloris
 
 import (
 	"runtime"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/oarkflow/fh"
 )
 
 type Config struct {
-	MaxGoroutines int
-	MaxHeapBytes  uint64
-	Reject        func(fh.Ctx) error
-	Skip          func(fh.Ctx) bool
+	MaxGoroutines  int
+	MaxHeapBytes   uint64
+	SampleInterval time.Duration
+	Reject         func(fh.Ctx) error
+	Skip           func(fh.Ctx) bool
 }
 
 func New(cfg Config) fh.HandlerFunc {
 	cfg = normalize(cfg)
+	var sampleMu sync.Mutex
+	var sampledAt time.Time
+	var heapAlloc uint64
 	return func(c fh.Ctx) error {
 		if cfg.Skip != nil && cfg.Skip(c) {
 			return c.Next()
@@ -26,9 +32,16 @@ func New(cfg Config) fh.HandlerFunc {
 		}
 
 		if cfg.MaxHeapBytes > 0 {
-			var ms runtime.MemStats
-			runtime.ReadMemStats(&ms)
-			if ms.HeapAlloc > cfg.MaxHeapBytes {
+			sampleMu.Lock()
+			if time.Since(sampledAt) >= cfg.SampleInterval {
+				var ms runtime.MemStats
+				runtime.ReadMemStats(&ms)
+				heapAlloc = ms.HeapAlloc
+				sampledAt = time.Now()
+			}
+			currentHeap := heapAlloc
+			sampleMu.Unlock()
+			if currentHeap > cfg.MaxHeapBytes {
 				return cfg.Reject(c)
 			}
 		}
@@ -43,6 +56,9 @@ func normalize(cfg Config) Config {
 	}
 	if cfg.MaxHeapBytes <= 0 {
 		cfg.MaxHeapBytes = 512 << 20
+	}
+	if cfg.SampleInterval <= 0 {
+		cfg.SampleInterval = 500 * time.Millisecond
 	}
 	if cfg.Reject == nil {
 		cfg.Reject = func(c fh.Ctx) error {
@@ -60,5 +76,6 @@ func ActiveConnections() int64 {
 
 func TrackConn() func() {
 	activeConns.Add(1)
-	return func() { activeConns.Add(-1) }
+	var once sync.Once
+	return func() { once.Do(func() { activeConns.Add(-1) }) }
 }

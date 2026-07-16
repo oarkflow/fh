@@ -2,6 +2,7 @@ package ipthrottle
 
 import (
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,70 +23,40 @@ type Config struct {
 
 func New(cfg Config) fh.HandlerFunc {
 	cfg = normalize(cfg)
-	stop := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				limitersMu.Lock()
-				now := time.Now()
-				for k, l := range limiters {
-					l.mu.Lock()
-					if now.Sub(l.lastClean) > 5*time.Minute {
-						delete(limiters, k)
-					}
-					l.mu.Unlock()
-				}
-				limitersMu.Unlock()
-			case <-stop:
-				return
-			}
-		}
-	}()
+	state := &throttleState{limiters: make(map[string]*ipLimiter)}
 
 	return func(c fh.Ctx) error {
 		key := cfg.KeyFunc(c)
 
-		gConns := globalConns.Add(1)
-		defer globalConns.Add(-1)
+		gConns := state.active.Add(1)
+		defer state.active.Add(-1)
 
 		if cfg.GlobalMax > 0 && int(gConns) > cfg.GlobalMax {
 			return cfg.Reject(c, key, int(gConns))
 		}
 
 		ip := extractIP(key)
-
-		limitersMu.Lock()
-		if cfg.MaxIPs > 0 && len(limiters) >= cfg.MaxIPs {
-			oldestKey := ""
-			oldestTime := time.Now()
-			for k, l := range limiters {
-				l.mu.Lock()
-				if l.lastClean.Before(oldestTime) {
-					oldestTime = l.lastClean
-					oldestKey = k
-				}
-				l.mu.Unlock()
-			}
-			if oldestKey != "" {
-				delete(limiters, oldestKey)
-			}
-		}
-		l, ok := limiters[ip]
+		now := time.Now()
+		state.mu.Lock()
+		l, ok := state.limiters[ip]
 		if !ok {
-			l = &ipLimiter{lastClean: time.Now()}
-			limiters[ip] = l
+			state.sweepExpired(now, cfg.Window)
+			if cfg.MaxIPs > 0 && len(state.limiters) >= cfg.MaxIPs {
+				state.mu.Unlock()
+				return cfg.Reject(c, key, 0)
+			}
+			l = &ipLimiter{windowStart: now}
+			state.limiters[ip] = l
 		}
-		l.mu.Lock()
-		cleanupExpired(l, cfg.Window)
-		count := l.count
+		if now.Sub(l.windowStart) >= cfg.Window {
+			l.count = 0
+			l.windowStart = now
+		}
 		l.count++
-		l.mu.Unlock()
-		limitersMu.Unlock()
+		count := l.count
+		state.mu.Unlock()
 
-		if cfg.MaxPerIP > 0 && count >= cfg.MaxPerIP {
+		if cfg.MaxPerIP > 0 && count > cfg.MaxPerIP {
 			return cfg.Reject(c, key, count)
 		}
 
@@ -111,8 +82,9 @@ func normalize(cfg Config) Config {
 	}
 	if cfg.Reject == nil {
 		cfg.Reject = func(c fh.Ctx, _ string, _ int) error {
-			c.Set("Retry-After", "1")
-			return c.Status(fh.StatusServiceUnavailable).SendString("Service Unavailable")
+			seconds := max(1, int((cfg.Window+time.Second-1)/time.Second))
+			c.Set("Retry-After", strconv.Itoa(seconds))
+			return c.Status(fh.StatusTooManyRequests).SendString("Too Many Requests")
 		}
 	}
 	return cfg
@@ -126,43 +98,30 @@ func extractIP(addr string) string {
 	return host
 }
 
-func splitComma(s string) []string {
-	var parts []string
-	for len(s) > 0 {
-		idx := -1
-		for i := 0; i < len(s); i++ {
-			if s[i] == ',' {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			parts = append(parts, s)
-			break
-		}
-		parts = append(parts, s[:idx])
-		s = s[idx+1:]
-	}
-	return parts
-}
-
-var globalConns atomic.Int64
-
 type ipLimiter struct {
-	mu        sync.Mutex
-	count     int
-	lastClean time.Time
+	count       int
+	windowStart time.Time
 }
 
-var (
-	limitersMu sync.Mutex
-	limiters   = make(map[string]*ipLimiter)
-)
+type throttleState struct {
+	mu        sync.Mutex
+	active    atomic.Int64
+	limiters  map[string]*ipLimiter
+	lastSweep time.Time
+}
 
-func cleanupExpired(l *ipLimiter, window time.Duration) {
-	now := time.Now()
-	if now.Sub(l.lastClean) > window {
-		l.count = 0
-		l.lastClean = now
+func (s *throttleState) sweepExpired(now time.Time, window time.Duration) {
+	interval := window
+	if interval > time.Minute {
+		interval = time.Minute
 	}
+	if !s.lastSweep.IsZero() && now.Sub(s.lastSweep) < interval {
+		return
+	}
+	for key, limiter := range s.limiters {
+		if now.Sub(limiter.windowStart) >= window {
+			delete(s.limiters, key)
+		}
+	}
+	s.lastSweep = now
 }

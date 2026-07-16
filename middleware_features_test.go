@@ -136,11 +136,12 @@ func TestCSRFMiddleware(t *testing.T) {
 		t.Fatalf("token = %d %q", code, token)
 	}
 	cookie := headers.Get("Set-Cookie")
-	code, _, _ = request(t, addr, "POST", "/change", "", map[string]string{"Cookie": cookie, "X-CSRF-Token": "wrong"})
+	origin := "http://" + addr
+	code, _, _ = request(t, addr, "POST", "/change", "", map[string]string{"Cookie": cookie, "Origin": origin, "X-CSRF-Token": "wrong"})
 	if code != 403 {
 		t.Fatalf("invalid token status = %d", code)
 	}
-	code, body, _ := request(t, addr, "POST", "/change", "", map[string]string{"Cookie": cookie, "X-CSRF-Token": token})
+	code, body, _ := request(t, addr, "POST", "/change", "", map[string]string{"Cookie": cookie, "Origin": origin, "X-CSRF-Token": token})
 	if code != 200 || body != "changed" {
 		t.Fatalf("valid token = %d %q", code, body)
 	}

@@ -92,7 +92,7 @@ func TestSecureByDefaultResolvesFailClosedBaseline(t *testing.T) {
 	if app.cfg.ReadHeaderTimeout != 5*time.Second || app.cfg.ReadTimeout != 10*time.Second || app.cfg.WriteTimeout != 30*time.Second || app.cfg.IdleTimeout != 60*time.Second {
 		t.Fatalf("timeouts were not bounded: %#v", app.cfg)
 	}
-	if app.cfg.ReadBufferSize != 16<<10 || app.cfg.MaxConnections != 10_000 {
+	if app.cfg.ReadBufferSize != 16<<10 || app.cfg.MaxConnections != 10_000 || app.cfg.MaxConnectionsPerIP != 100 {
 		t.Fatalf("connection resources were not bounded: %#v", app.cfg)
 	}
 	if app.cfg.MaxRequestBodySize != 4<<20 || app.cfg.MaxHeaderListSize != 32<<10 || app.cfg.MaxHeaderCount != 64 || app.cfg.MaxRequestLineSize != 8<<10 || app.cfg.MaxConcurrentStreams != 128 {
@@ -105,16 +105,17 @@ func TestSecureByDefaultResolvesFailClosedBaseline(t *testing.T) {
 
 func TestSecureByDefaultPreservesStricterLimits(t *testing.T) {
 	app := NewWithConfig(Config{
-		SecureByDefault:    true,
-		MaxRequestBodySize: 1024,
-		MaxHeaderListSize:  2048,
-		MaxHeaderCount:     12,
-		MaxRequestLineSize: 1024,
-		ReadBufferSize:     4096,
-		MaxConnections:     100,
-		ReadTimeout:        time.Second,
+		SecureByDefault:     true,
+		MaxRequestBodySize:  1024,
+		MaxHeaderListSize:   2048,
+		MaxHeaderCount:      12,
+		MaxRequestLineSize:  1024,
+		ReadBufferSize:      4096,
+		MaxConnections:      100,
+		MaxConnectionsPerIP: 10,
+		ReadTimeout:         time.Second,
 	})
-	if app.cfg.MaxRequestBodySize != 1024 || app.cfg.MaxHeaderListSize != 2048 || app.cfg.MaxHeaderCount != 12 || app.cfg.MaxRequestLineSize != 1024 || app.cfg.ReadBufferSize != 4096 || app.cfg.MaxConnections != 100 || app.cfg.ReadTimeout != time.Second {
+	if app.cfg.MaxRequestBodySize != 1024 || app.cfg.MaxHeaderListSize != 2048 || app.cfg.MaxHeaderCount != 12 || app.cfg.MaxRequestLineSize != 1024 || app.cfg.ReadBufferSize != 4096 || app.cfg.MaxConnections != 100 || app.cfg.MaxConnectionsPerIP != 10 || app.cfg.ReadTimeout != time.Second {
 		t.Fatalf("stricter caller limits were changed: %#v", app.cfg)
 	}
 }

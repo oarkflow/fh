@@ -1,6 +1,7 @@
 package timestamp
 
 import (
+	"errors"
 	"strconv"
 	"sync"
 	"time"
@@ -9,19 +10,24 @@ import (
 )
 
 type Config struct {
-	Header   string
-	MaxSkew  time.Duration
-	MaxSize  int
-	Store    ReplayStore
-	KeyFunc  func(fh.Ctx) string
-	Reject   func(fh.Ctx, string) error
-	Skip     func(fh.Ctx) bool
-	Required bool
+	Header         string
+	NonceHeader    string
+	MaxSkew        time.Duration
+	MaxSize        int
+	MaxNonceLength int
+	Store          ReplayStore
+	KeyFunc        func(fh.Ctx) string
+	Reject         func(fh.Ctx, string) error
+	Skip           func(fh.Ctx) bool
+	Required       bool
+	RequireNonce   bool
 }
 
 type ReplayStore interface {
 	Seen(key string, ttl time.Duration) (bool, error)
 }
+
+var ErrReplayStoreFull = errors.New("timestamp: replay store capacity exhausted")
 
 func New(cfg Config) (fh.HandlerFunc, func()) {
 	cfg = normalize(cfg)
@@ -52,6 +58,13 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 		}
 
 		if ts != "" {
+			nonce := c.Get(cfg.NonceHeader)
+			if nonce == "" && cfg.RequireNonce {
+				return cfg.Reject(c, "missing request nonce")
+			}
+			if len(nonce) > cfg.MaxNonceLength {
+				return cfg.Reject(c, "request nonce too long")
+			}
 			timestamp, err := strconv.ParseInt(ts, 10, 64)
 			if err != nil {
 				return cfg.Reject(c, "invalid timestamp format")
@@ -67,8 +80,14 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 				return cfg.Reject(c, "request timestamp outside acceptable window")
 			}
 
-			key := cfg.KeyFunc(c) + ":" + ts
-			seen, err := cfg.Store.Seen(key, cfg.MaxSkew)
+			key := cfg.KeyFunc(c) + ":" + ts + ":" + nonce
+			// A future timestamp remains acceptable until timestamp+MaxSkew.
+			// Retain its replay marker for that entire interval.
+			ttl := time.Until(reqTime.Add(cfg.MaxSkew))
+			if ttl <= 0 {
+				return cfg.Reject(c, "request timestamp outside acceptable window")
+			}
+			seen, err := cfg.Store.Seen(key, ttl)
 			if err != nil {
 				return err
 			}
@@ -80,7 +99,8 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 		return c.Next()
 	}
 
-	shutdown := func() { close(stop) }
+	var stopOnce sync.Once
+	shutdown := func() { stopOnce.Do(func() { close(stop) }) }
 	return handler, shutdown
 }
 
@@ -88,11 +108,17 @@ func normalize(cfg Config) Config {
 	if cfg.Header == "" {
 		cfg.Header = "X-Request-Timestamp"
 	}
+	if cfg.NonceHeader == "" {
+		cfg.NonceHeader = "X-Request-Nonce"
+	}
 	if cfg.MaxSkew <= 0 {
 		cfg.MaxSkew = 5 * time.Minute
 	}
 	if cfg.MaxSize <= 0 {
 		cfg.MaxSize = 100000
+	}
+	if cfg.MaxNonceLength <= 0 {
+		cfg.MaxNonceLength = 128
 	}
 	if cfg.Store == nil {
 		cfg.Store = NewMemoryStore(cfg.MaxSize)
@@ -130,16 +156,15 @@ func (s *MemoryStore) Seen(key string, ttl time.Duration) (bool, error) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if exp, ok := s.m[key]; ok && exp.After(now) {
+		return true, nil
+	}
 
 	if len(s.m) >= s.maxSize {
 		s.evictExpired(now)
 		if len(s.m) >= s.maxSize {
-			s.evictOldest(now)
+			return false, ErrReplayStoreFull
 		}
-	}
-
-	if exp, ok := s.m[key]; ok && exp.After(now) {
-		return true, nil
 	}
 
 	s.m[key] = now.Add(ttl)
@@ -158,19 +183,5 @@ func (s *MemoryStore) evictExpired(now time.Time) {
 		if exp.Before(now) {
 			delete(s.m, k)
 		}
-	}
-}
-
-func (s *MemoryStore) evictOldest(now time.Time) {
-	oldestKey := ""
-	oldestTime := now
-	for k, exp := range s.m {
-		if exp.Before(oldestTime) {
-			oldestTime = exp
-			oldestKey = k
-		}
-	}
-	if oldestKey != "" {
-		delete(s.m, oldestKey)
 	}
 }

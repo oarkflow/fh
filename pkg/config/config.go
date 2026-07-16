@@ -30,6 +30,7 @@ type Server struct {
 	TLSHandshakeTimeout string `json:"tls_handshake_timeout"`
 	HTTP2IdleTimeout    string `json:"http2_idle_timeout"`
 	MaxConnections      int    `json:"max_connections"`
+	MaxConnectionsPerIP int    `json:"max_connections_per_ip"`
 	MaxRequestBodySize  int    `json:"max_request_body_size"`
 	MaxHeaderListSize   int    `json:"max_header_list_size"`
 	MaxHeaderCount      int    `json:"max_header_count"`
@@ -156,6 +157,14 @@ func ApplyEnv(c Config, prefix string) (Config, error) {
 			c.Server.MaxConnections = n
 		}
 	}
+	if v := os.Getenv(key("MAX_CONNECTIONS_PER_IP")); v != "" {
+		n, err := parseInt(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("FH_MAX_CONNECTIONS_PER_IP: %w", err))
+		} else {
+			c.Server.MaxConnectionsPerIP = n
+		}
+	}
 	if v := os.Getenv(key("MAX_REQUEST_BODY_SIZE")); v != "" {
 		n, err := parseInt(v)
 		if err != nil {
@@ -230,8 +239,8 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	if c.Server.MaxHeaderCount < 0 || c.Server.MaxConnections < 0 || c.Server.MaxRequestBodySize < 0 {
-		return fmt.Errorf("config: numeric limits must be >= 0 (MaxHeaderCount=%d, MaxConnections=%d, MaxRequestBodySize=%d)", c.Server.MaxHeaderCount, c.Server.MaxConnections, c.Server.MaxRequestBodySize)
+	if c.Server.MaxHeaderCount < 0 || c.Server.MaxConnections < 0 || c.Server.MaxConnectionsPerIP < 0 || c.Server.MaxRequestBodySize < 0 {
+		return fmt.Errorf("config: numeric limits must be >= 0 (MaxHeaderCount=%d, MaxConnections=%d, MaxConnectionsPerIP=%d, MaxRequestBodySize=%d)", c.Server.MaxHeaderCount, c.Server.MaxConnections, c.Server.MaxConnectionsPerIP, c.Server.MaxRequestBodySize)
 	}
 	return nil
 }
@@ -287,6 +296,7 @@ func (c Config) AppConfig() (fh.Config, error) {
 		out.ReadHeaderTimeout = 5 * time.Second
 	}
 	out.MaxConnections = c.Server.MaxConnections
+	out.MaxConnectionsPerIP = c.Server.MaxConnectionsPerIP
 	out.SecureByDefault = c.Server.SecureByDefault
 	out.MaxRequestBodySize = c.Server.MaxRequestBodySize
 	out.MaxHeaderListSize = c.Server.MaxHeaderListSize

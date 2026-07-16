@@ -87,6 +87,10 @@ type Config struct {
 	// HTTP2IdleTimeout bounds the interval between HTTP/2 frames.
 	HTTP2IdleTimeout time.Duration
 	MaxConnections   int
+	// MaxConnectionsPerIP limits simultaneously open TCP connections from one
+	// socket peer. It is enforced before TLS handshakes and HTTP parsing. Zero
+	// disables the per-peer limit; SecureByDefault caps it at 100.
+	MaxConnectionsPerIP int
 	// DisablePanicRecovery removes the application-level panic recovery defer from
 	// every request. It is useful for trusted benchmark/edge deployments that use
 	// process supervision or explicit recover middleware. Leave false for robust
@@ -127,8 +131,8 @@ type Config struct {
 	DisableH2C bool
 	// HSTSPreload enables the HSTS preload directive when SecureByDefault is active.
 	// Submit the domain to hstspreload.org after enabling.
-	HSTSPreload  bool
-	ErrorHandler ErrorHandler
+	HSTSPreload      bool
+	ErrorHandler     ErrorHandler
 	NotFoundHandler  NotFoundHandler
 	MethodNotAllowed MethodNotAllowedHandler
 	OptionsHandler   OptionsHandler
@@ -209,6 +213,9 @@ func WithShutdownTimeout(d time.Duration) Option {
 }
 func WithMaxConnections(n int) Option {
 	return func(c *Config) { c.MaxConnections = n }
+}
+func WithMaxConnectionsPerIP(n int) Option {
+	return func(c *Config) { c.MaxConnectionsPerIP = n }
 }
 func WithReadBufferSize(n int) Option {
 	return func(c *Config) { c.ReadBufferSize = n }
@@ -362,35 +369,36 @@ var ErrRewrite = errors.New("fh: reroute rewritten request")
 
 // App is the top-level application object. Create with New().
 type App struct {
-	cfg           Config
-	router        *Router
-	hooks         Hooks
-	logger        Logger
-	middleware    []HandlerFunc
-	sem           chan struct{}
-	listener      net.Listener
-	activeConn    sync.WaitGroup
-	closed        atomic.Bool
-	draining      atomic.Bool
-	connMu        sync.Mutex
-	conns         map[net.Conn]*connState
-	shutdownOnce  sync.Once
-	started       atomic.Bool
-	buildMu       sync.Mutex
-	groups        []*Group
-	lastRoute     namedRoute
-	errorCounts   sync.Map // error code -> *atomic.Uint64
-	routeMetaMu   sync.RWMutex
-	routeMeta     []RouteInfo
-	healthMu      sync.RWMutex
-	healthChecks  []registeredHealthCheck
-	openapi       OpenAPIConfig
-	hasMiddleware bool
-	reliability   *Reliability
-	audit         AuditSink
-	staticRoots   []*os.Root
-	drainingCh    chan struct{} // closed when draining starts, signals all connection contexts
-	fastHTTP1     bool          // trusted ModeFast: omit graceful activity bookkeeping
+	cfg             Config
+	router          *Router
+	hooks           Hooks
+	logger          Logger
+	middleware      []HandlerFunc
+	sem             chan struct{}
+	listener        net.Listener
+	activeConn      sync.WaitGroup
+	closed          atomic.Bool
+	draining        atomic.Bool
+	connMu          sync.Mutex
+	conns           map[net.Conn]*connState
+	connectionsByIP map[string]int
+	shutdownOnce    sync.Once
+	started         atomic.Bool
+	buildMu         sync.Mutex
+	groups          []*Group
+	lastRoute       namedRoute
+	errorCounts     sync.Map // error code -> *atomic.Uint64
+	routeMetaMu     sync.RWMutex
+	routeMeta       []RouteInfo
+	healthMu        sync.RWMutex
+	healthChecks    []registeredHealthCheck
+	openapi         OpenAPIConfig
+	hasMiddleware   bool
+	reliability     *Reliability
+	audit           AuditSink
+	staticRoots     []*os.Root
+	drainingCh      chan struct{} // closed when draining starts, signals all connection contexts
+	fastHTTP1       bool          // trusted ModeFast: omit graceful activity bookkeeping
 }
 
 type connState struct {
@@ -515,12 +523,13 @@ func buildApp(cfg Config) *App {
 	}
 
 	app := &App{
-		cfg:        cfg,
-		router:     newRouter(),
-		logger:     logger,
-		conns:      make(map[net.Conn]*connState),
-		drainingCh: make(chan struct{}),
-		fastHTTP1:  cfg.Mode == ModeFast,
+		cfg:             cfg,
+		router:          newRouter(),
+		logger:          logger,
+		conns:           make(map[net.Conn]*connState),
+		connectionsByIP: make(map[string]int),
+		drainingCh:      make(chan struct{}),
+		fastHTTP1:       cfg.Mode == ModeFast,
 	}
 
 	if cfg.Audit.Enabled {
@@ -750,13 +759,29 @@ func (a *App) ListenTLS(addr, certFile, keyFile string) error {
 
 // ServeTLS wraps ln with TLS and advertises HTTP/2 through ALPN when enabled.
 func (a *App) ServeTLS(ln net.Listener, config *tls.Config) error {
-	if err := validateTLSConfig(config); err != nil {
+	cfg, err := a.prepareTLSConfig(config)
+	if err != nil {
 		return err
 	}
+	return a.Serve(tls.NewListener(ln, cfg))
+}
+
+func (a *App) prepareTLSConfig(config *tls.Config) (*tls.Config, error) {
 	if config == nil {
-		return errors.New("nil TLS config")
+		return nil, errors.New("nil TLS config")
 	}
 	cfg := config.Clone()
+	if a.cfg.SecureByDefault {
+		if cfg.MinVersion == 0 {
+			cfg.MinVersion = tls.VersionTLS13
+		}
+		if cfg.MinVersion < tls.VersionTLS13 {
+			return nil, errors.New("fh: SecureByDefault requires TLS 1.3 or newer")
+		}
+	}
+	if err := validateTLSConfig(cfg); err != nil {
+		return nil, err
+	}
 	if len(cfg.NextProtos) == 0 {
 		if a.cfg.DisableHTTP2 {
 			cfg.NextProtos = []string{"http/1.1"}
@@ -764,7 +789,7 @@ func (a *App) ServeTLS(ln net.Listener, config *tls.Config) error {
 			cfg.NextProtos = []string{"h2", "http/1.1"}
 		}
 	}
-	return a.Serve(tls.NewListener(ln, cfg))
+	return cfg, nil
 }
 
 // ListenWithGracefulShutdown starts the server and blocks until SIGINT or
@@ -876,16 +901,26 @@ func (a *App) Serve(ln net.Listener) error {
 			select {
 			case a.sem <- struct{}{}:
 			default:
-				_ = writeAll(conn, serverError503)
+				// Drop overload traffic without spending CPU on a TLS handshake
+				// or amplifying it with a response.
 				_ = conn.Close()
 				continue
 			}
+		}
+		peerIP, reserved := a.reservePeer(conn.RemoteAddr())
+		if !reserved {
+			_ = conn.Close()
+			if a.sem != nil {
+				<-a.sem
+			}
+			continue
 		}
 
 		a.connMu.Lock()
 		if a.draining.Load() {
 			a.connMu.Unlock()
 			_ = conn.Close()
+			a.releasePeer(peerIP)
 			if a.sem != nil {
 				<-a.sem
 			}
@@ -894,7 +929,7 @@ func (a *App) Serve(ln net.Listener) error {
 		a.activeConn.Add(1)
 		a.conns[conn] = &connState{writeBuf: make([]byte, 0, 4096)}
 		a.connMu.Unlock()
-		go a.serveConn(conn)
+		go a.serveConn(conn, peerIP)
 	}
 
 	a.activeConn.Wait()
@@ -906,6 +941,50 @@ func (a *App) assertMutable() {
 	if a.started.Load() {
 		panic(ErrAppAlreadyStarted)
 	}
+}
+
+func peerIPKey(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	if tcp, ok := addr.(*net.TCPAddr); ok && tcp.IP != nil {
+		return tcp.IP.String()
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return strings.Trim(host, "[]")
+}
+
+func (a *App) reservePeer(addr net.Addr) (string, bool) {
+	if a.cfg.MaxConnectionsPerIP <= 0 {
+		return "", true
+	}
+	key := peerIPKey(addr)
+	if key == "" {
+		return "", true
+	}
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	if a.connectionsByIP[key] >= a.cfg.MaxConnectionsPerIP {
+		return key, false
+	}
+	a.connectionsByIP[key]++
+	return key, true
+}
+
+func (a *App) releasePeer(key string) {
+	if key == "" {
+		return
+	}
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	if a.connectionsByIP[key] <= 1 {
+		delete(a.connectionsByIP, key)
+		return
+	}
+	a.connectionsByIP[key]--
 }
 
 func (a *App) Shutdown() error {
@@ -1025,7 +1104,7 @@ func (a *App) setH2Conn(conn net.Conn, h2c *h2Conn) {
 
 // ── Connection handler ─────────────────────────────────────────────────────
 
-func (a *App) serveConn(conn net.Conn) {
+func (a *App) serveConn(conn net.Conn, peerIP string) {
 	defer func() {
 		if r := recover(); r != nil {
 			args := []any{"panic", "connection hook panic"}
@@ -1055,6 +1134,7 @@ func (a *App) serveConn(conn net.Conn) {
 		if a.sem != nil {
 			<-a.sem
 		}
+		a.releasePeer(peerIP)
 		a.activeConn.Done()
 	}()
 
@@ -1874,6 +1954,5 @@ var serverError408 = []byte("HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r
 var serverError413 = []byte("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError417 = []byte("HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError431 = []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError503 = []byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError505 = []byte("HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var plainTextCT = []byte("text/plain; charset=utf-8")

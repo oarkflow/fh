@@ -16,7 +16,7 @@ import (
 
 func main() {
 	app := fh.New()
-	app.Use(csrf.New(csrf.Config{}))
+app.Use(csrf.New(csrf.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
 		return c.String(fh.StatusOK, "ok")
@@ -34,5 +34,8 @@ Run after session/cookie middleware and before handlers for POST/PUT/PATCH/DELET
 
 ## Production considerations
 
-Use SameSite cookies and HTTPS. APIs using bearer tokens generally do not need CSRF, but browser cookie flows do.
-
+The default cookie is `Secure` and unsafe requests must include a valid
+`Origin` or `Referer` plus the token. `AllowInsecureCookie` and
+`AllowMissingOrigin` are explicit compatibility opt-outs and should not be used
+on public browser-session routes. Use SameSite cookies and HTTPS. APIs using
+bearer tokens generally do not need CSRF, but browser cookie flows do.

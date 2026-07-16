@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/csv"
@@ -136,9 +137,16 @@ type Config struct {
 	// middleware runs.
 	RequireTLS bool
 
-	// TrustProxyHeaders allows X-Forwarded-Proto / X-Forwarded-Ssl checks.
-	// Enable only if your app is behind a trusted reverse proxy.
+	// TrustProxyHeaders is retained for source compatibility. Forwarded headers
+	// are never trusted directly because the immediate peer is not available to
+	// this middleware after identity normalization.
+	// Deprecated: use TLSCheck for a trusted-edge assertion.
 	TrustProxyHeaders bool
+
+	// TLSCheck may assert that a request arrived through a trusted TLS-terminating
+	// edge. Native fh TLS state is checked first. The callback must only consume
+	// server-validated state, never raw client forwarding headers.
+	TLSCheck func(fh.Ctx) bool
 
 	UnauthorizedHandler UnauthorizedHandler
 	OnAuthenticated     AuthenticatedHandler
@@ -214,7 +222,7 @@ func NewWithConfig(config Config) fh.HandlerFunc {
 	cfg := normalizeConfig(config)
 
 	return func(ctx fh.Ctx) error {
-		if cfg.RequireTLS && !isHTTPS(ctx, cfg.TrustProxyHeaders) {
+		if cfg.RequireTLS && !isHTTPS(ctx, cfg.TLSCheck) {
 			return cfg.UnauthorizedHandler(ctx, cfg.Realm)
 		}
 
@@ -372,20 +380,11 @@ func equalFoldASCII(a, b string) bool {
 	return true
 }
 
-func isHTTPS(ctx fh.Ctx, trustProxy bool) bool {
-	// This keeps compatibility with custom fh-like contexts.
-	// If your Ctx exposes TLS state directly, you can customize this logic.
-
-	if trustProxy {
-		if strings.EqualFold(ctx.Get("X-Forwarded-Proto"), "https") {
-			return true
-		}
-		if strings.EqualFold(ctx.Get("X-Forwarded-Ssl"), "on") {
-			return true
-		}
+func isHTTPS(ctx fh.Ctx, trustedEdgeCheck func(fh.Ctx) bool) bool {
+	if state, ok := fh.RequestTLSState(ctx); ok && state.Version >= tls.VersionTLS12 {
+		return true
 	}
-
-	return false
+	return trustedEdgeCheck != nil && trustedEdgeCheck(ctx)
 }
 
 // -----------------------------------------------------------------------------

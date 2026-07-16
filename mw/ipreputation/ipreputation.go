@@ -42,8 +42,12 @@ type Config struct {
 	OnSuspicious        func(fh.Ctx, *Score) error
 	Whitelist           []string
 	Blacklist           []string
-	TrustProxy          bool
-	Skip                func(fh.Ctx) bool
+	// TrustProxy is retained for compatibility. Forwarding headers are never
+	// parsed here; install mw/realip with explicit TrustedProxies first and this
+	// middleware will consume the validated Ctx.IP value.
+	// Deprecated: use mw/realip.
+	TrustProxy bool
+	Skip       func(fh.Ctx) bool
 }
 
 func New(cfg Config) (fh.HandlerFunc, func()) {
@@ -98,7 +102,8 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 		return err
 	}
 
-	shutdown := func() { close(stop) }
+	var stopOnce sync.Once
+	shutdown := func() { stopOnce.Do(func() { close(stop) }) }
 	return handler, shutdown
 }
 
@@ -122,24 +127,7 @@ func normalize(cfg Config) Config {
 		cfg.Store = NewMemoryStore(cfg.MaxEntries)
 	}
 	if cfg.KeyFunc == nil {
-		cfg.KeyFunc = func(c fh.Ctx) string {
-			if cfg.TrustProxy {
-				if xff := c.Get("X-Forwarded-For"); xff != "" {
-					parts := splitComma(xff)
-					for i := len(parts) - 1; i >= 0; i-- {
-						if ip := net.ParseIP(parts[i]); ip != nil {
-							return ip.String()
-						}
-					}
-				}
-				if xri := c.Get("X-Real-IP"); xri != "" {
-					if ip := net.ParseIP(xri); ip != nil {
-						return ip.String()
-					}
-				}
-			}
-			return c.IP()
-		}
+		cfg.KeyFunc = func(c fh.Ctx) string { return c.IP() }
 	}
 	if cfg.OnBlocked == nil {
 		cfg.OnBlocked = func(c fh.Ctx, _ *Score) error {
@@ -147,9 +135,7 @@ func normalize(cfg Config) Config {
 		}
 	}
 	if cfg.OnSuspicious == nil {
-		cfg.OnSuspicious = func(c fh.Ctx, _ *Score) error {
-			return c.Next()
-		}
+		cfg.OnSuspicious = func(fh.Ctx, *Score) error { return nil }
 	}
 	return cfg
 }
@@ -160,26 +146,6 @@ func extractIP(addr string) string {
 		return addr
 	}
 	return host
-}
-
-func splitComma(s string) []string {
-	var parts []string
-	for len(s) > 0 {
-		idx := -1
-		for i := 0; i < len(s); i++ {
-			if s[i] == ',' {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			parts = append(parts, s)
-			break
-		}
-		parts = append(parts, s[:idx])
-		s = s[idx+1:]
-	}
-	return parts
 }
 
 func recordScore(store ReputationStore, ip string, status int) {
@@ -234,12 +200,19 @@ func (s *MemoryStore) Get(ip string) (*Score, bool) {
 	if !ok {
 		return nil, false
 	}
-	return sc, true
+	clone := *sc
+	clone.Reasons = append([]string(nil), sc.Reasons...)
+	return &clone, true
 }
 
 func (s *MemoryStore) Set(ip string, score *Score) {
+	if score == nil {
+		return
+	}
+	clone := *score
+	clone.Reasons = append([]string(nil), score.Reasons...)
 	s.mu.Lock()
-	s.scores[ip] = score
+	s.scores[ip] = &clone
 	s.evict()
 	s.mu.Unlock()
 }

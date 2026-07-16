@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -12,33 +13,48 @@ type Store interface {
 }
 
 type MemoryStore struct {
-	mu sync.Mutex
-	m  map[string]time.Time
+	mu         sync.Mutex
+	m          map[string]time.Time
+	maxEntries int
 }
 
-func NewMemoryStore() *MemoryStore { return &MemoryStore{m: map[string]time.Time{}} }
+var ErrStoreFull = errors.New("replay: store capacity exhausted")
+
+func NewMemoryStore(maxEntries ...int) *MemoryStore {
+	maxSize := 100000
+	if len(maxEntries) > 0 && maxEntries[0] > 0 {
+		maxSize = maxEntries[0]
+	}
+	return &MemoryStore{m: make(map[string]time.Time, min(maxSize, 1024)), maxEntries: maxSize}
+}
 func (s *MemoryStore) Seen(key string, ttl time.Duration) (bool, error) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k, exp := range s.m {
-		if exp.Before(now) {
-			delete(s.m, k)
-		}
-	}
 	if exp, ok := s.m[key]; ok && exp.After(now) {
 		return true, nil
+	}
+	if len(s.m) >= s.maxEntries {
+		for k, exp := range s.m {
+			if !exp.After(now) {
+				delete(s.m, k)
+			}
+		}
+		if len(s.m) >= s.maxEntries {
+			return false, ErrStoreFull
+		}
 	}
 	s.m[key] = now.Add(ttl)
 	return false, nil
 }
 
 type Config struct {
-	Header string
-	TTL    time.Duration
-	Store  Store
-	Key    func(fh.Ctx) string
-	Next   func(fh.Ctx) bool
+	Header     string
+	TTL        time.Duration
+	MaxEntries int
+	Store      Store
+	Key        func(fh.Ctx) string
+	Next       func(fh.Ctx) bool
 }
 
 func New(config Config) fh.HandlerFunc {
@@ -49,7 +65,7 @@ func New(config Config) fh.HandlerFunc {
 		config.TTL = 5 * time.Minute
 	}
 	if config.Store == nil {
-		config.Store = NewMemoryStore()
+		config.Store = NewMemoryStore(config.MaxEntries)
 	}
 	return func(c fh.Ctx) error {
 		if config.Next != nil && config.Next(c) {
