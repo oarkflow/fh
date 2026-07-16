@@ -42,11 +42,11 @@ type Router struct {
 	// Cached common-method pointers remove two map lookups from the request hot
 	// path. The generic maps remain authoritative for custom methods, URL
 	// generation, Allowed(), and build-time validation.
-	treeGET, treePOST, treePUT, treeDELETE, treePATCH, treeHEAD, treeOPTIONS, treeCONNECT, treeTRACE, treeQUERY                                                                                                                    *node
-	staticGET, staticPOST, staticPUT, staticDELETE, staticPATCH, staticHEAD, staticOPTIONS, staticCONNECT, staticTRACE, staticQUERY                                                                                                  map[string]HandlerFunc
-	paramGET, paramPOST, paramPUT, paramDELETE, paramPATCH, paramHEAD, paramOPTIONS, paramCONNECT, paramTRACE, paramQUERY                                                                                                           []paramShortcut
-	staticShortcutGET, staticShortcutPOST, staticShortcutPUT, staticShortcutDELETE, staticShortcutPATCH, staticShortcutHEAD, staticShortcutOPTIONS, staticShortcutCONNECT, staticShortcutTRACE, staticShortcutQUERY                  []staticShortcut
-	prebuiltGET, prebuiltPOST, prebuiltPUT, prebuiltDELETE, prebuiltPATCH, prebuiltHEAD, prebuiltOPTIONS, prebuiltCONNECT, prebuiltTRACE, prebuiltQUERY                                                                            []prebuiltResponse
+	treeGET, treePOST, treePUT, treeDELETE, treePATCH, treeHEAD, treeOPTIONS, treeCONNECT, treeTRACE, treeQUERY                                                                                                     *node
+	staticGET, staticPOST, staticPUT, staticDELETE, staticPATCH, staticHEAD, staticOPTIONS, staticCONNECT, staticTRACE, staticQUERY                                                                                 map[string]HandlerFunc
+	paramGET, paramPOST, paramPUT, paramDELETE, paramPATCH, paramHEAD, paramOPTIONS, paramCONNECT, paramTRACE, paramQUERY                                                                                           []paramShortcut
+	staticShortcutGET, staticShortcutPOST, staticShortcutPUT, staticShortcutDELETE, staticShortcutPATCH, staticShortcutHEAD, staticShortcutOPTIONS, staticShortcutCONNECT, staticShortcutTRACE, staticShortcutQUERY []staticShortcut
+	prebuiltGET, prebuiltPOST, prebuiltPUT, prebuiltDELETE, prebuiltPATCH, prebuiltHEAD, prebuiltOPTIONS, prebuiltCONNECT, prebuiltTRACE, prebuiltQUERY                                                             []prebuiltResponse
 
 	hasPrebuilt bool
 
@@ -68,8 +68,7 @@ var (
 type node struct {
 	static map[string]*node
 
-	param     *node
-	paramName string
+	param *node
 
 	wild     *node
 	wildName string

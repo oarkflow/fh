@@ -196,7 +196,6 @@ type DefaultCtx struct {
 	localOverflow map[string]any
 	localsMu      sync.Mutex
 
-	readBuf  *[]byte
 	writeBuf *[]byte
 	// writeBufPooled distinguishes the general pool used by standalone/H2
 	// contexts from the HTTP/1 connection-owned buffer. A keep-alive connection

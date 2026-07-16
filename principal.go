@@ -480,13 +480,6 @@ func extractAny(c Ctx, ex Extractor[any]) (any, bool, error) {
 	return ex(c)
 }
 
-func extractMap(c Ctx, ex Extractor[map[string]any]) (map[string]any, bool, error) {
-	if ex == nil {
-		return nil, false, nil
-	}
-	return ex(c)
-}
-
 func splitTrim(s, sep string) []string {
 	if s == "" {
 		return nil
@@ -505,9 +498,7 @@ func splitTrim(s, sep string) []string {
 func cleanStrings(values []string) []string {
 	out := values[:0]
 	for _, value := range values {
-		for _, part := range splitTrim(value, ",") {
-			out = append(out, part)
-		}
+		out = append(out, splitTrim(value, ",")...)
 	}
 	return out
 }

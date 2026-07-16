@@ -627,8 +627,28 @@ func TestStaticStripSlash(t *testing.T) {
 	conn.Write([]byte("GET /static HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
 	conn.(*net.TCPConn).CloseWrite()
 	resp, _ := io.ReadAll(conn)
-	if strings.Contains(string(resp), "301") {
-		t.Fatal("expected no redirect with StripSlash")
+	statusLine := strings.SplitN(string(resp), "\r\n", 2)[0]
+	if strings.Contains(statusLine, " 301 ") {
+		t.Fatalf("expected no redirect with StripSlash, got %q", statusLine)
+	}
+}
+
+func TestStaticRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("outside-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	app := fh.New()
+	app.Static("/static", root)
+	addr := testServer(t, app)
+	code, body := doRequest(t, addr, "GET", "/static/escape.txt", "", nil)
+	if code == 200 || strings.Contains(body, "outside-secret") {
+		t.Fatalf("static root symlink escaped confinement: status=%d body=%q", code, body)
 	}
 }
 

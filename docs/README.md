@@ -2,7 +2,7 @@
 
 **fh** is a standalone, zero-dependency Go web framework that implements HTTP/1.1, HTTP/2, and WebSocket protocols entirely from scratch using only the Go standard library. It is not a wrapper around `net/http` or `fasthttp` — it has its own TCP server, HTTP parser, trie-based router, HTTP/2 framing engine, HPACK encoder/decoder, and WebSocket implementation.
 
-**Module:** `github.com/oarkflow/fh` · **Go:** 1.23.2+
+**Module:** `github.com/oarkflow/fh` · **Go:** 1.26.5+
 
 See the [root README](../README.md) for a quick tour. This folder is the full reference.
 

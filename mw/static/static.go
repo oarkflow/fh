@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -41,28 +42,29 @@ func New(root string, config ...Config) fh.HandlerFunc {
 		}
 	}
 	root = filepath.Clean(cfg.Root)
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		panic(fmt.Errorf("static: open root %q: %w", root, err))
+	}
 	return func(c fh.Ctx) error {
 		rel := strings.TrimPrefix(c.Param("*"), "/")
 		if rel == "" {
 			rel = strings.TrimPrefix(c.Path(), cfg.Prefix)
 			rel = strings.TrimPrefix(rel, "/")
 		}
-		full := filepath.Join(root, strings.TrimPrefix(filepath.Clean("/"+rel), "/"))
-		if full != root && !strings.HasPrefix(full, root+string(filepath.Separator)) {
-			return c.SendStatus(fh.StatusForbidden)
-		}
-		info, err := os.Stat(full)
+		name := cleanRootName(rel)
+		info, err := rootFS.Stat(name)
 		if err != nil && cfg.SPAFallback != "" {
-			full = filepath.Join(root, cfg.SPAFallback)
-			info, err = os.Stat(full)
+			name = cleanRootName(cfg.SPAFallback)
+			info, err = rootFS.Stat(name)
 		}
 		if err != nil {
 			return c.SendStatus(fh.StatusNotFound)
 		}
 		if info.IsDir() {
-			index := filepath.Join(full, cfg.Index)
-			if candidate, statErr := os.Stat(index); statErr == nil {
-				full, info = index, candidate
+			index := path.Join(name, cfg.Index)
+			if candidate, statErr := rootFS.Stat(index); statErr == nil {
+				name, info = index, candidate
 			} else if !cfg.Browse {
 				return c.SendStatus(fh.StatusForbidden)
 			}
@@ -70,11 +72,11 @@ func New(root string, config ...Config) fh.HandlerFunc {
 		if info.IsDir() {
 			return c.SendStatus(fh.StatusForbidden)
 		}
-		body, err := os.ReadFile(full)
+		body, err := rootFS.ReadFile(name)
 		if err != nil {
 			return err
 		}
-		if contentType := mime.TypeByExtension(filepath.Ext(full)); contentType != "" {
+		if contentType := mime.TypeByExtension(path.Ext(name)); contentType != "" {
 			c.Type(contentType)
 		}
 		if cfg.CacheControl != "" {
@@ -88,7 +90,7 @@ func New(root string, config ...Config) fh.HandlerFunc {
 			c.Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
 		}
 		if cfg.ETag {
-			sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", full, info.Size(), info.ModTime().UnixNano())))
+			sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", name, info.Size(), info.ModTime().UnixNano())))
 			etag := "\"" + hex.EncodeToString(sum[:8]) + "\""
 			c.Set("ETag", etag)
 			if c.Get("If-None-Match") == etag {
@@ -96,10 +98,18 @@ func New(root string, config ...Config) fh.HandlerFunc {
 			}
 		}
 		if cfg.Download {
-			c.Set("Content-Disposition", "attachment; filename=\""+sanitizeFilename(filepath.Base(full))+"\"")
+			c.Set("Content-Disposition", "attachment; filename=\""+sanitizeFilename(path.Base(name))+"\"")
 		}
 		return c.SendBytes(body)
 	}
+}
+
+func cleanRootName(name string) string {
+	name = filepath.ToSlash(strings.TrimPrefix(filepath.Clean("/"+name), string(filepath.Separator)))
+	if name == "" {
+		return "."
+	}
+	return name
 }
 
 // sanitizeFilename strips characters from a filename that could break

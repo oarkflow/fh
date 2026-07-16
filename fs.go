@@ -70,7 +70,12 @@ func (a *App) Static(prefix, root string, config ...StaticConfig) *App {
 	if len(config) > 0 {
 		cfg = config[0]
 	}
-	a.addStatic(prefix, os.DirFS(root), cfg)
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		panic(fmt.Errorf("fh: open static root %q: %w", root, err))
+	}
+	a.staticRoots = append(a.staticRoots, rootFS)
+	a.addStatic(prefix, rootFS.FS(), cfg)
 	return a
 }
 
@@ -119,7 +124,12 @@ func (g *Group) Static(prefix, root string, config ...StaticConfig) *Group {
 	if len(config) > 0 {
 		cfg = config[0]
 	}
-	g.addStatic(prefix, os.DirFS(root), cfg)
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		panic(fmt.Errorf("fh: open static root %q: %w", root, err))
+	}
+	g.app.staticRoots = append(g.app.staticRoots, rootFS)
+	g.addStatic(prefix, rootFS.FS(), cfg)
 	return g
 }
 
@@ -195,6 +205,9 @@ func (s *staticFS) servePath(c Ctx, upath string) error {
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return c.Status(404).SendString("404 Not Found")
+		}
+		if errors.Is(err, fs.ErrPermission) {
+			return c.Status(403).SendString("Forbidden")
 		}
 		return c.Status(500).SendString("Internal Server Error")
 	}

@@ -91,7 +91,7 @@ func FuzzValidCookieValue(f *testing.F) {
 	f.Add(string([]byte{0x20}))
 
 	f.Fuzz(func(t *testing.T, data string) {
-		validCookieValue(data)
+		_ = validCookieValue(data)
 	})
 }
 
@@ -180,7 +180,7 @@ func FuzzValidCookieDomain(f *testing.F) {
 	f.Add("example.com:8080")
 
 	f.Fuzz(func(t *testing.T, data string) {
-		validCookieDomain(data)
+		_ = validCookieDomain(data)
 	})
 }
 

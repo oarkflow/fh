@@ -616,8 +616,6 @@ func (e JSONEngineFuncSet) Valid(data []byte) bool {
 type fallbackJSONEncoder struct {
 	w      io.Writer
 	engine JSONEngine
-	prefix string
-	indent string
 }
 
 func (e fallbackJSONEncoder) Encode(v any) error {

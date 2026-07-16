@@ -166,14 +166,14 @@ type LifecycleState string
 
 const (
 	LifecycleReceived    LifecycleState = "received"
-	LifecycleValidated                  = "validated"
-	LifecycleAuthorized                 = "authorized"
-	LifecycleAccepted                   = "accepted"
-	LifecycleQueued                     = "queued"
-	LifecycleProcessing                 = "processing"
-	LifecycleCompleted                  = "completed"
-	LifecycleFailed                     = "failed"
-	LifecycleCompensated                = "compensated"
+	LifecycleValidated   LifecycleState = "validated"
+	LifecycleAuthorized  LifecycleState = "authorized"
+	LifecycleAccepted    LifecycleState = "accepted"
+	LifecycleQueued      LifecycleState = "queued"
+	LifecycleProcessing  LifecycleState = "processing"
+	LifecycleCompleted   LifecycleState = "completed"
+	LifecycleFailed      LifecycleState = "failed"
+	LifecycleCompensated LifecycleState = "compensated"
 )
 
 type RequestLifecycle struct {

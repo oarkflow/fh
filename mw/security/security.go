@@ -94,50 +94,6 @@ func New(config ...Config) fh.HandlerFunc {
 		return ctx.Next()
 	}
 }
-func merge(base, o Config) Config {
-	if o.ContentSecurityPolicy != "" {
-		base.ContentSecurityPolicy = o.ContentSecurityPolicy
-	}
-	if o.ContentSecurityPolicyReportOnly != "" {
-		base.ContentSecurityPolicyReportOnly = o.ContentSecurityPolicyReportOnly
-	}
-	if o.CSPNonce {
-		base.CSPNonce = true
-	}
-	if o.CSPNonceDirectives != nil {
-		base.CSPNonceDirectives = o.CSPNonceDirectives
-	}
-	if o.HSTSMaxAge != 0 {
-		base.HSTSMaxAge = o.HSTSMaxAge
-	}
-	base.HSTSIncludeSubDomains = o.HSTSIncludeSubDomains || base.HSTSIncludeSubDomains
-	base.HSTSPreload = o.HSTSPreload
-	if o.FrameDeny {
-		base.FrameDeny = true
-	}
-	if o.ContentTypeNosniff {
-		base.ContentTypeNosniff = true
-	}
-	if o.XSSProtection != "" {
-		base.XSSProtection = o.XSSProtection
-	}
-	if o.CrossOriginOpenerPolicy != "" {
-		base.CrossOriginOpenerPolicy = o.CrossOriginOpenerPolicy
-	}
-	if o.CrossOriginResourcePolicy != "" {
-		base.CrossOriginResourcePolicy = o.CrossOriginResourcePolicy
-	}
-	if o.CrossOriginEmbedderPolicy != "" {
-		base.CrossOriginEmbedderPolicy = o.CrossOriginEmbedderPolicy
-	}
-	if o.ReferrerPolicy != "" {
-		base.ReferrerPolicy = o.ReferrerPolicy
-	}
-	if o.PermissionsPolicy != "" {
-		base.PermissionsPolicy = o.PermissionsPolicy
-	}
-	return base
-}
 func newNonce() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {

@@ -100,6 +100,12 @@ func TestH2HeaderFragmentPaddingAndPriority(t *testing.T) {
 	})
 }
 
+func TestH2ContinuationIgnoresEndStreamBit(t *testing.T) {
+	if got := continuationFlags(h2FlagEndStream | h2FlagEndHeaders); got != h2FlagEndHeaders {
+		t.Fatalf("continuation flags = %#x, want only END_HEADERS", got)
+	}
+}
+
 func TestH2ValidateRequestFields(t *testing.T) {
 	t.Run("valid get", func(t *testing.T) {
 		s := &h2Stream{}
@@ -184,6 +190,56 @@ func TestH2ValidateRequestFields(t *testing.T) {
 			t.Fatalf("cookie = %q", cookie)
 		}
 	})
+
+	for _, path := range []string{"/has space", "/fragment#part", "/tab\there"} {
+		t.Run("invalid path "+path, func(t *testing.T) {
+			s := &h2Stream{}
+			err := validateRequestFields(s, []hpack.HeaderField{
+				{Name: ":method", Value: "GET"},
+				{Name: ":scheme", Value: "https"},
+				{Name: ":authority", Value: "example.com"},
+				{Name: ":path", Value: path},
+			})
+			if err == nil {
+				t.Fatalf("accepted invalid HTTP/2 path %q", path)
+			}
+		})
+	}
+}
+
+func TestH2RequestContextSplitsPathAndQuery(t *testing.T) {
+	h := newTestH2Conn(t)
+	streamCtx, cancel := h.newStreamContext()
+	defer cancel()
+	s := &h2Stream{
+		id: 1, method: "GET", path: "/search?q=go%20server&empty=", authority: "example.test",
+		ctx: streamCtx, cancel: cancel,
+	}
+	ctx := h.acquireRequestCtx(s)
+	defer releaseCtx(ctx)
+	if got := ctx.Path(); got != "/search" {
+		t.Fatalf("Path() = %q, want /search", got)
+	}
+	if got := ctx.Query("q"); got != "go server" {
+		t.Fatalf("Query(q) = %q, want %q", got, "go server")
+	}
+	if got := string(ctx.RequestHeader().QueryString); got != "q=go%20server&empty=" {
+		t.Fatalf("QueryString = %q", got)
+	}
+}
+
+func TestH2HandlerTimeoutStartsAtDispatch(t *testing.T) {
+	h := newTestH2Conn(t)
+	h.app.cfg.HandlerTimeout = 10 * time.Millisecond
+	ctx, cancel := h.newStreamContext()
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("handler deadline started before the request body completed")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("pre-dispatch stream context expired: %v", err)
+	}
 }
 
 func TestH2ValidateRequestTrailers(t *testing.T) {

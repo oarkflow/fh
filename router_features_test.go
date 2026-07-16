@@ -146,7 +146,7 @@ type typedGetRes struct {
 func TestGetTyped(t *testing.T) {
 	app := fh.New()
 	app.GetTyped("/users/:id", func(c fh.Ctx, req typedGetReq) (typedGetRes, error) {
-		return typedGetRes{ID: req.ID, Name: req.Name}, nil
+		return typedGetRes(req), nil
 	})
 	addr := testServer(t, app)
 

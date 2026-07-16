@@ -772,15 +772,16 @@ func BenchmarkStringBuilder(b *testing.B) {
 func BenchmarkSyncPool(b *testing.B) {
 	var pool = sync.Pool{
 		New: func() any {
-			return make([]byte, 4096)
+			buf := make([]byte, 4096)
+			return &buf
 		},
 	}
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			buf := pool.Get().([]byte)
-			_ = buf[:0]
+			buf := pool.Get().(*[]byte)
+			_ = (*buf)[:0]
 			pool.Put(buf)
 		}
 	})

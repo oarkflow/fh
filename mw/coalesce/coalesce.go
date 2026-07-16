@@ -18,8 +18,6 @@ import (
 	"github.com/oarkflow/fh"
 )
 
-type key struct{}
-
 // entry represents an in-flight request being coalesced.
 type entry struct {
 	once       sync.Once

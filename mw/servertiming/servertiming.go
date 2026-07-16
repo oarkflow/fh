@@ -29,8 +29,6 @@ import (
 	"github.com/oarkflow/fh"
 )
 
-type key struct{}
-
 // Metric represents a single Server-Timing metric.
 type Metric struct {
 	Name   string
@@ -44,7 +42,7 @@ type Metric struct {
 type Timings struct {
 	started time.Time
 	metrics []Metric
-_spans   map[string]time.Time
+	_spans  map[string]time.Time
 	mu      sync.Mutex
 }
 

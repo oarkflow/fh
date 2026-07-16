@@ -22,6 +22,12 @@ application input-schema policies remain explicit middleware because safe
 values depend on the deployment. Serve public traffic with `ServeTLS` or TLS at
 a trusted edge; the flag cannot provision certificates.
 
+When reliability/idempotency is enabled, fh places it after global, group, and
+route middleware and immediately before the final endpoint handler. Identity
+middleware should populate `fh.Principal` before calling `Next`; idempotency
+keys are then scoped to that authenticated principal. Replayed response
+metadata never includes `Set-Cookie`.
+
 The secure profile also disables h2c. Cleartext prior-knowledge and upgrade
 HTTP/2 can be controlled independently with `WithDisableH2C`, without disabling
 HTTP/2 negotiated through TLS ALPN.
@@ -30,6 +36,10 @@ HTTP/1 request lines and fields require CRLF framing, control bytes are rejected
 absolute-form authority must agree with `Host`, and only the transfer coding the
 server actually decodes (`chunked`) is accepted. HTTP/1 and HTTP/2 both enforce
 configured header-list, header-count, body-size, and absolute body-time limits.
+
+`App.Static` and `Group.Static` use an OS-backed rooted filesystem. Symlinks may
+resolve within the configured root but cannot escape it. `StaticFS` trusts the
+confinement semantics of the caller-supplied `fs.FS` implementation.
 
 For endpoints that may receive large bodies, configure `WithRequestHeadHandler`
 to perform header-only authentication, admission control, or rate limiting before

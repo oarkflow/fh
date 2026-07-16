@@ -325,13 +325,6 @@ func (b *atomicBool) Store(v bool) {
 	}
 }
 
-// init initializes push state on HTTP/2 connections.
-func (h *h2Conn) initPushState() {
-	if h.pushState == nil {
-		h.pushState = newPushState(h.peerMaxConcurrentStreams.Load())
-	}
-}
-
 // h2Conn push-related fields are defined in http2.go:
 // - pushState *h2PushState
 // - peerEnablePush atomicBool

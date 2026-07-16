@@ -54,7 +54,7 @@ func New(cfg Config) fh.HandlerFunc {
 	if err != nil {
 		panic(err)
 	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy := &httputil.ReverseProxy{}
 	dialer := &net.Dialer{Timeout: cfg.Timeout, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
 		Proxy:       http.ProxyFromEnvironment,
@@ -65,24 +65,30 @@ func New(cfg Config) fh.HandlerFunc {
 		transport.ResponseHeaderTimeout = cfg.Timeout
 	}
 	proxy.Transport = transport
-	direct := proxy.Director
-	proxy.Director = func(r *http.Request) {
-		direct(r)
+	proxy.Rewrite = func(r *httputil.ProxyRequest) {
+		// Rewrite the inbound path before SetURL so a path configured on the
+		// target URL is retained exactly once.
+		path := r.In.URL.Path
 		if cfg.StripPrefix != "" {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, cfg.StripPrefix)
-			if r.URL.Path == "" {
-				r.URL.Path = "/"
+			path = strings.TrimPrefix(path, cfg.StripPrefix)
+			if path == "" {
+				path = "/"
 			}
 		}
 		if cfg.AddPrefix != "" {
-			r.URL.Path = cfg.AddPrefix + r.URL.Path
+			path = cfg.AddPrefix + path
 		}
+		r.Out.URL.Path = path
+		r.Out.URL.RawPath = ""
+		r.SetURL(target)
+		// Preserve NewSingleHostReverseProxy's historical Host behavior.
+		r.Out.Host = r.In.Host
 		if cfg.Director != nil {
-			cfg.Director(r)
+			cfg.Director(r.Out)
 		}
 	}
 	return func(c fh.Ctx) error {
-		req, err := request(c, target)
+		req, err := request(c)
 		if err != nil {
 			return err
 		}
@@ -174,8 +180,8 @@ func Gateway(routes map[string]Config) fh.HandlerFunc {
 	}
 }
 
-func request(c fh.Ctx, target *url.URL) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(c.Context(), c.Method(), target.String()+c.OriginalURL(), io.NopCloser(bytes.NewReader(c.Body())))
+func request(c fh.Ctx) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(c.Context(), c.Method(), c.OriginalURL(), io.NopCloser(bytes.NewReader(c.Body())))
 	if err != nil {
 		return nil, err
 	}
@@ -194,6 +200,7 @@ func request(c fh.Ctx, target *url.URL) (*http.Request, error) {
 			req.Header.Add(key, value)
 		}
 	}
+	req.Host = c.Get(fh.HeaderHostStr)
 	req.RemoteAddr = c.IP()
 	return req, nil
 }

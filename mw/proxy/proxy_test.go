@@ -2,13 +2,66 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh"
 )
+
+func TestProxyRewritePreservesTargetBasePath(t *testing.T) {
+	paths := make(chan string, 1)
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths <- r.URL.RequestURI()
+		_, _ = w.Write([]byte("upstream reached"))
+	}))
+	upstreamListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream.Listener = upstreamListener
+	upstream.Start()
+	defer upstream.Close()
+
+	app := fh.New()
+	app.All("/*", New(Config{
+		Target:           upstream.URL + "/base",
+		StripPrefix:      "/api",
+		AddPrefix:        "/v1",
+		DisableSSRFGuard: true,
+	}))
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = app.Serve(ln) }()
+	t.Cleanup(func() { _ = app.ShutdownWithTimeout(time.Second) })
+
+	resp, err := http.Get("http://" + ln.Addr().String() + "/api/users?active=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || string(body) != "upstream reached" {
+		t.Fatalf("unexpected proxy response: status=%d body=%q", resp.StatusCode, body)
+	}
+	select {
+	case got := <-paths:
+		if got != "/base/v1/users?active=true" {
+			t.Fatalf("unexpected upstream URI: %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream request was not observed")
+	}
+}
 
 func TestSSRFGuardBlocksMetadataEndpointByDefault(t *testing.T) {
 	denyNets, err := parseCIDRs(Config{})

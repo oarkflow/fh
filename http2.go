@@ -158,11 +158,10 @@ type h2Stream struct {
 }
 
 type h2Response struct {
-	conn      *h2Conn
-	stream    *h2Stream
-	ended     atomic.Bool
-	trailers  []Header
-	trailerMu sync.Mutex
+	conn     *h2Conn
+	stream   *h2Stream
+	ended    atomic.Bool
+	trailers []Header
 }
 
 func newH2Conn(app *App, conn net.Conn) *h2Conn {
@@ -220,10 +219,8 @@ func maxH2RequestBodySize(app *App) int {
 
 func (h *h2Conn) newStreamContext() (context.Context, context.CancelFunc) {
 	// Derive from the connection-level context so that stream contexts are
-	// cancelled when the TCP connection closes or when the server drains.
-	if h.app.cfg.HandlerTimeout > 0 {
-		return context.WithTimeout(h.ctx, h.app.cfg.HandlerTimeout)
-	}
+	// cancelled when the TCP connection closes or when the server drains. The
+	// handler timeout starts at dispatch, after the request body has arrived.
 	return context.WithCancel(h.ctx)
 }
 
@@ -562,7 +559,9 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 		if len(block) > maxH2HeaderListSize(h.app) {
 			return h2ConnError{h2CompressionError}
 		}
-		f.flags |= next.flags & (h2FlagEndHeaders | h2FlagEndStream)
+		// CONTINUATION defines only END_HEADERS. Unknown flag bits, including the
+		// bit position used by END_STREAM on HEADERS, must be ignored.
+		f.flags |= continuationFlags(next.flags)
 	}
 	fields, err := h.dec.DecodeFull(block)
 	if err != nil {
@@ -693,6 +692,8 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 	}
 	return nil
 }
+
+func continuationFlags(flags uint8) uint8 { return flags & h2FlagEndHeaders }
 
 func headerFragment(f h2Frame) ([]byte, error) {
 	p := f.payload
@@ -885,7 +886,14 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 	go func() {
 		defer func() { <-h.streamSem }()
 		ctx := h.acquireRequestCtx(s)
+		cancelHandler := func() {}
+		if h.app.cfg.HandlerTimeout > 0 {
+			var handlerCtx context.Context
+			handlerCtx, cancelHandler = context.WithTimeout(s.ctx, h.app.cfg.HandlerTimeout)
+			ctx.SetContext(handlerCtx)
+		}
 		defer func() {
+			cancelHandler()
 			if r := recover(); r != nil {
 				releaseCtx(ctx)
 			}
@@ -910,6 +918,14 @@ func (h *h2Conn) acquireRequestCtx(s *h2Stream) *DefaultCtx {
 	ctx.Header.URI = s2b(s.path)
 	ctx.Header.RequestTarget = ctx.Header.URI
 	ctx.Header.Path = ctx.Header.URI
+	if queryAt := bytes.IndexByte(ctx.Header.URI, '?'); queryAt >= 0 {
+		ctx.Header.Path = ctx.Header.URI[:queryAt]
+		if queryAt+1 < len(ctx.Header.URI) {
+			ctx.Header.QueryString = ctx.Header.URI[queryAt+1:]
+		} else {
+			ctx.Header.QueryString = ctx.Header.URI[:0]
+		}
+	}
 	ctx.Header.Proto = []byte("HTTP/2.0")
 	ctx.Header.Host = s2b(s.authority)
 	ctx.originalURI = append(ctx.originalURI[:0], ctx.Header.URI...)
@@ -937,7 +953,14 @@ func (h *h2Conn) acquireRequestCtx(s *h2Stream) *DefaultCtx {
 
 func (h *h2Conn) runRequestHeadHandler(s *h2Stream) bool {
 	ctx := h.acquireRequestCtx(s)
+	cancelHead := func() {}
+	if h.app.cfg.HandlerTimeout > 0 {
+		var headCtx context.Context
+		headCtx, cancelHead = context.WithTimeout(s.ctx, h.app.cfg.HandlerTimeout)
+		ctx.SetContext(headCtx)
+	}
 	accepted := h.app.runRequestHeadHandler(ctx)
+	cancelHead()
 	releaseCtx(ctx)
 	if !accepted {
 		h.mu.Lock()
@@ -1061,6 +1084,13 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 	}
 	if s.method != "CONNECT" && s.path != "*" && s.path[0] != '/' {
 		return fmt.Errorf("h2: invalid path %q", s.path)
+	}
+	if s.method != "CONNECT" && s.path != "*" {
+		for i := 0; i < len(s.path); i++ {
+			if s.path[i] <= 0x20 || s.path[i] == 0x7f || s.path[i] == '#' {
+				return fmt.Errorf("h2: invalid path %q", s.path)
+			}
+		}
 	}
 	if s.path == "*" && s.method != "OPTIONS" {
 		return fmt.Errorf("h2: asterisk path %q requires OPTIONS method", s.path)

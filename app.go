@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/signal"
 	"runtime/debug"
 	"strings"
@@ -123,8 +124,11 @@ type Config struct {
 	DisableHTTP2                bool
 	// DisableH2C rejects cleartext HTTP/2 prior knowledge and HTTP/1.1 h2c
 	// upgrades while retaining HTTP/2 over TLS/ALPN.
-	DisableH2C       bool
-	ErrorHandler     ErrorHandler
+	DisableH2C bool
+	// HSTSPreload enables the HSTS preload directive when SecureByDefault is active.
+	// Submit the domain to hstspreload.org after enabling.
+	HSTSPreload  bool
+	ErrorHandler ErrorHandler
 	NotFoundHandler  NotFoundHandler
 	MethodNotAllowed MethodNotAllowedHandler
 	OptionsHandler   OptionsHandler
@@ -384,6 +388,7 @@ type App struct {
 	hasMiddleware bool
 	reliability   *Reliability
 	audit         AuditSink
+	staticRoots   []*os.Root
 	drainingCh    chan struct{} // closed when draining starts, signals all connection contexts
 	fastHTTP1     bool          // trusted ModeFast: omit graceful activity bookkeeping
 }
@@ -536,7 +541,6 @@ func buildApp(cfg Config) *App {
 			panic(err)
 		}
 		app.reliability = reliability
-		app.middleware = append(app.middleware, reliability.Middleware())
 	}
 
 	if hm := defaultHardeningMiddleware(cfg); hm != nil {
@@ -561,7 +565,7 @@ func buildApp(cfg Config) *App {
 	}
 
 	app.router.UnsafeParams = !cfg.SafeParams
-	app.hasMiddleware = len(app.middleware) > 0
+	app.hasMiddleware = len(app.middleware) > 0 || app.reliability != nil
 
 	if cfg.MaxConnections > 0 {
 		app.sem = make(chan struct{}, cfg.MaxConnections)
@@ -585,7 +589,7 @@ func (a *App) Add(method, path string, handlers ...HandlerFunc) *App {
 		}
 	}
 	routeHandler := a.chain(handlers)
-	if len(a.middleware) == 0 && len(handlers) == 1 {
+	if len(a.middleware) == 0 && a.reliability == nil && len(handlers) == 1 {
 		if pre := prebuiltResponseForHandler(handlers[0]); pre != nil {
 			a.router.registerPrebuiltResponse(method, path, pre)
 		}
@@ -741,7 +745,7 @@ func (a *App) ListenTLS(addr, certFile, keyFile string) error {
 	if err != nil {
 		return err
 	}
-	return a.ServeTLS(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	return a.ServeTLS(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})
 }
 
 // ServeTLS wraps ln with TLS and advertises HTTP/2 through ALPN when enabled.
@@ -787,7 +791,7 @@ func (a *App) ListenTLSWithGracefulShutdown(addr, certFile, keyFile string) erro
 	if err != nil {
 		return err
 	}
-	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}
 	return a.serveWithSignal(ln, func(listener net.Listener) error { return a.ServeTLS(listener, tlsConfig) })
 }
 
@@ -985,6 +989,11 @@ func (a *App) closeAllConnections() {
 
 func (a *App) runShutdownHooks() {
 	a.shutdownOnce.Do(func() {
+		for _, root := range a.staticRoots {
+			if err := root.Close(); err != nil {
+				a.logger.Error("static root shutdown error", "error", err)
+			}
+		}
 		if a.audit != nil {
 			if closer, ok := a.audit.(AuditSinkCloser); ok {
 				if err := closer.Close(); err != nil {
@@ -1224,6 +1233,16 @@ func (a *App) serveConn(conn net.Conn) {
 			return
 		}
 		if ctx.Header.UnsupportedTransferEncoding {
+			releaseCtx(ctx)
+			_ = writeAll(conn, serverError400)
+			return
+		}
+		if ctx.Header.Chunked && ctx.Header.HasContentLength {
+			releaseCtx(ctx)
+			_ = writeAll(conn, serverError400)
+			return
+		}
+		if ctx.Header.HasContentLength && ctx.Header.ContentLength < 0 {
 			releaseCtx(ctx)
 			_ = writeAll(conn, serverError400)
 			return
@@ -1603,13 +1622,27 @@ func (a *App) dispatchCore(ctx *DefaultCtx) {
 // chain combines global middleware + route-specific handlers into one HandlerFunc.
 // For the common case (no middleware, single handler), returns handler directly — zero alloc.
 func (a *App) chain(handlers []HandlerFunc) HandlerFunc {
-	if len(a.middleware) == 0 && len(handlers) == 1 {
+	if len(a.middleware) == 0 && a.reliability == nil && len(handlers) == 1 {
 		return handlers[0]
 	}
 
-	all := make([]HandlerFunc, 0, len(a.middleware)+len(handlers))
+	extra := 0
+	if a.reliability != nil && len(handlers) > 0 {
+		extra = 1
+	}
+	all := make([]HandlerFunc, 0, len(a.middleware)+len(handlers)+extra)
 	all = append(all, a.middleware...)
-	all = append(all, handlers...)
+	// Reliability needs the authenticated principal and normalized client IP,
+	// but must still run before the endpoint performs business work. Treat the
+	// final route handler as the endpoint and place reliability after all global
+	// and route-level middleware.
+	if a.reliability != nil && len(handlers) > 0 {
+		all = append(all, handlers[:len(handlers)-1]...)
+		all = append(all, a.reliability.Middleware())
+		all = append(all, handlers[len(handlers)-1])
+	} else {
+		all = append(all, handlers...)
+	}
 
 	return func(ctx Ctx) error {
 		dc, ok := ctx.(*DefaultCtx)
@@ -1841,7 +1874,6 @@ var serverError408 = []byte("HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r
 var serverError413 = []byte("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError417 = []byte("HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError431 = []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError501 = []byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError503 = []byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError505 = []byte("HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var plainTextCT = []byte("text/plain; charset=utf-8")

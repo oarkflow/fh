@@ -10,14 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	mrand "math/rand"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"runtime/debug"
 	"syscall"
 	"time"
 )
@@ -377,7 +376,7 @@ func isUnsafeMethod(m []byte) bool {
 	return bytesEqualFold(m, MethodPOSTBytes) || bytesEqualFold(m, MethodPUTBytes) || bytesEqualFold(m, MethodPATCHBytes) || bytesEqualFold(m, MethodDELETEBytes)
 }
 func setReplayHeader(c Ctx, k, v string) {
-	if strings.EqualFold(k, HeaderContentLength) || strings.EqualFold(k, HeaderConnection) || strings.EqualFold(k, HeaderTransferEncoding) || strings.EqualFold(k, HeaderDate) || strings.EqualFold(k, "Trailer") {
+	if strings.EqualFold(k, HeaderContentLength) || strings.EqualFold(k, HeaderConnection) || strings.EqualFold(k, HeaderTransferEncoding) || strings.EqualFold(k, HeaderDate) || strings.EqualFold(k, HeaderSetCookie) || strings.EqualFold(k, "Trailer") {
 		return
 	}
 	if strings.EqualFold(k, HeaderContentType) {
@@ -409,12 +408,18 @@ func validExternalID(s string) bool {
 	}
 	return true
 }
-var fallbackRand = mrand.New(mrand.NewSource(time.Now().UnixNano()))
+
+var fallbackRandMu sync.Mutex
 
 func newRequestID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		fallbackRand.Read(b)
+		// crypto/rand failure must not introduce a data race in concurrent request
+		// handling. The fallback is only a uniqueness aid for correlation IDs.
+		fallbackRandMu.Lock()
+		sum := sha256.Sum256([]byte(strconv.FormatInt(time.Now().UnixNano(), 10)))
+		copy(b, sum[:len(b)])
+		fallbackRandMu.Unlock()
 	}
 	return fmt.Sprintf("req_%x", b)
 }
@@ -622,7 +627,7 @@ func cleanReplayHeaders(in map[string][]string) map[string][]string {
 	}
 	out := make(map[string][]string, len(in))
 	for k, v := range in {
-		if strings.EqualFold(k, HeaderContentLength) || strings.EqualFold(k, HeaderConnection) || strings.EqualFold(k, HeaderTransferEncoding) || strings.EqualFold(k, HeaderDate) {
+		if strings.EqualFold(k, HeaderContentLength) || strings.EqualFold(k, HeaderConnection) || strings.EqualFold(k, HeaderTransferEncoding) || strings.EqualFold(k, HeaderDate) || strings.EqualFold(k, HeaderSetCookie) {
 			continue
 		}
 		out[k] = append([]string(nil), v...)

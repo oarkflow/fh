@@ -24,8 +24,12 @@ func defaultHardeningMiddleware(cfg Config) HandlerFunc {
 		{"Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=(), usb=()"},
 	}
 	if cfg.SecureByDefault {
+		hsts := "max-age=31536000; includeSubDomains"
+		if cfg.HSTSPreload {
+			hsts += "; preload"
+		}
 		headers = append(headers,
-			[2]string{"Strict-Transport-Security", "max-age=31536000; includeSubDomains"},
+			[2]string{"Strict-Transport-Security", hsts},
 			[2]string{"Cross-Origin-Opener-Policy", "same-origin"},
 			[2]string{"Cross-Origin-Resource-Policy", "same-origin"},
 		)

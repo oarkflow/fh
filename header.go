@@ -14,12 +14,10 @@ import (
 // Used internally for zero-allocation comparisons. String variants (Str suffix)
 // are available for user-facing APIs like ctx.Set().
 var (
-	slashBytes    = []byte("/")
-	strHTTP11     = []byte("HTTP/1.1")
-	strHTTP10     = []byte("HTTP/1.0")
-	strCRLF       = []byte("\r\n")
-	strColonSpace = []byte(": ")
-	strHeaderEnd  = []byte("\r\n\r\n")
+	slashBytes   = []byte("/")
+	strHTTP11    = []byte("HTTP/1.1")
+	strHTTP10    = []byte("HTTP/1.0")
+	strHeaderEnd = []byte("\r\n\r\n")
 )
 
 // String variants of header/method constants for user-facing APIs.
@@ -642,7 +640,7 @@ func validHostField(host []byte) bool {
 		rest := host[close+1:]
 		return len(rest) == 0 || len(rest) > 1 && rest[0] == ':' && validPort(rest[1:])
 	}
-	if bytes.IndexAny(host, "[]") >= 0 || bytes.Count(host, []byte{':'}) > 1 {
+	if bytes.ContainsAny(host, "[]") || bytes.Count(host, []byte{':'}) > 1 {
 		return false
 	}
 	if colon := bytes.LastIndexByte(host, ':'); colon >= 0 {
@@ -1053,18 +1051,6 @@ func parseTransferCoding(val []byte) (chunked bool, ok bool) {
 		return true, true
 	}
 	return false, true
-}
-
-// parseIntDecimal parses a decimal integer from bytes without allocation.
-func parseIntDecimal(b []byte) int {
-	n := 0
-	for _, c := range b {
-		if c < '0' || c > '9' {
-			break
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n
 }
 
 func BytesEqualFold(a, b []byte) bool {

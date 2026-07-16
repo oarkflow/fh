@@ -1,7 +1,6 @@
 package scheduler
 
 import (
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,33 +42,22 @@ type Config struct {
 	OnShed func(fh.Ctx) error
 }
 
-// entry is a queued request.
-type entry struct {
-	ctx     fh.Ctx
-	priority Priority
-	enqueued time.Time
-	next     *entry
-}
-
 // Scheduler is a priority-aware request scheduler.
 type Scheduler struct {
-	cfg        Config
-	inFlight   [5]atomic.Int64
-	queues     [5]*entry
-	queueLens  [5]atomic.Int64
-	mu         [5]sync.Mutex
-	totalInFl  atomic.Int64
-	rejected   atomic.Int64
-	admitted   atomic.Int64
-	shed       atomic.Int64
+	cfg       Config
+	inFlight  [5]atomic.Int64
+	totalInFl atomic.Int64
+	rejected  atomic.Int64
+	admitted  atomic.Int64
+	shed      atomic.Int64
 }
 
 // New creates a priority scheduler.
 func New(cfg ...Config) *Scheduler {
 	c := Config{
-		MaxConcurrent:  1024,
-		QueueTimeout:   5 * time.Second,
-		QueueSize:      1000,
+		MaxConcurrent:   1024,
+		QueueTimeout:    5 * time.Second,
+		QueueSize:       1000,
 		DefaultPriority: PriorityNormal,
 	}
 	if len(cfg) > 0 {
@@ -97,11 +85,7 @@ func New(cfg ...Config) *Scheduler {
 		}
 	}
 
-	s := &Scheduler{cfg: c}
-	for i := 0; i < 5; i++ {
-		s.queues[i] = &entry{}
-	}
-	return s
+	return &Scheduler{cfg: c}
 }
 
 // Handler returns middleware that schedules requests by priority.

@@ -31,7 +31,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 go get github.com/oarkflow/fh
 ```
 
-Requires Go 1.23.2 or later.
+Requires Go 1.26.5 or later.
 
 ## Quick Start
 

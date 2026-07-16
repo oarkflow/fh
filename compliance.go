@@ -61,6 +61,11 @@ type ComplianceConfig struct {
 	// FailOnCritical panics at app construction when ValidateSecurity finds a
 	// critical production issue. This is useful in CI and strict deployments.
 	FailOnCritical bool `json:"fail_on_critical,omitempty"`
+
+	// SecurityContact is the contact email/address for the security.txt endpoint.
+	SecurityContact string `json:"security_contact,omitempty"`
+	// SecurityPolicyURL is the URL of the security policy for security.txt.
+	SecurityPolicyURL string `json:"security_policy_url,omitempty"`
 }
 
 // ComplianceControl maps an fh runtime capability to an external control family.
@@ -455,6 +460,19 @@ func (a *App) EnableComplianceEndpoints(prefix string, middleware ...HandlerFunc
 	a.Get(prefix+"/compliance/controls", withHandlers(middleware, func(c Ctx) error { return c.JSON(a.ComplianceControls()) })...)
 	a.Get(prefix+"/compliance/findings", withHandlers(middleware, func(c Ctx) error { return c.JSON(a.ValidateSecurity()) })...)
 	a.Get(prefix+"/config/safe", withHandlers(middleware, func(c Ctx) error { return c.JSON(a.SafeConfig()) })...)
+	contact := a.cfg.Compliance.SecurityContact
+	if contact == "" {
+		contact = "security@example.com"
+	}
+	policyURL := a.cfg.Compliance.SecurityPolicyURL
+	if policyURL == "" {
+		policyURL = "https://example.com/security-policy"
+	}
+	a.Get(prefix+"/.well-known/security.txt", withHandlers(middleware, func(c Ctx) error {
+		c.Set("Content-Type", "text/plain; charset=utf-8")
+		c.Set("Cache-Control", "no-store")
+		return c.SendString("Contact: " + contact + "\nExpires: " + time.Now().Add(365*24*time.Hour).Format(time.RFC3339) + "\nPreferred-Languages: en\nPolicy: " + policyURL + "\n")
+	})...)
 	return a
 }
 

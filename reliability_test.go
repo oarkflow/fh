@@ -45,6 +45,56 @@ func TestIdempotencyIdentityScopesDifferentCallers(t *testing.T) {
 	}
 }
 
+type captureIdempotencyRepository struct {
+	key string
+}
+
+func (r *captureIdempotencyRepository) Begin(key, reqHash, method, path string) (IdempotencyDecision, *IdempotencyRecord, error) {
+	r.key = key
+	return IdempotencyNew, nil, nil
+}
+func (*captureIdempotencyRepository) Complete(string, string, int, string, map[string][]string, []byte) error {
+	return nil
+}
+func (*captureIdempotencyRepository) Close() error { return nil }
+
+func TestReliabilityRunsAfterRouteAuthentication(t *testing.T) {
+	repo := &captureIdempotencyRepository{}
+	app := New(WithReliability(ReliabilityConfig{
+		Enabled:               true,
+		DataDir:               t.TempDir(),
+		IdempotencyEnabled:    true,
+		IdempotencyRepository: repo,
+	}))
+	auth := func(c Ctx) error {
+		SetPrincipal(c, Principal{ID: "user-42", Type: "user"})
+		return c.Next()
+	}
+	app.Post("/orders", auth, func(c Ctx) error {
+		return c.Status(StatusCreated).SendString("created")
+	})
+	resp := pipeRequest(t, app, "POST /orders HTTP/1.1\r\nHost: local\r\nIdempotency-Key: order-1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	if !strings.Contains(resp, "201 Created") {
+		t.Fatalf("unexpected response: %s", resp)
+	}
+	if repo.key != "principal:user:user-42\x00order-1" {
+		t.Fatalf("idempotency scope = %q, want authenticated principal scope", repo.key)
+	}
+}
+
+func TestIdempotencyReplayHeadersExcludeCookies(t *testing.T) {
+	clean := cleanReplayHeaders(map[string][]string{
+		"Set-Cookie": {"session=secret; Secure; HttpOnly"},
+		"X-Result":   {"created"},
+	})
+	if _, ok := clean["Set-Cookie"]; ok {
+		t.Fatal("Set-Cookie was persisted for replay")
+	}
+	if got := clean["X-Result"]; len(got) != 1 || got[0] != "created" {
+		t.Fatalf("safe response header was lost: %#v", clean)
+	}
+}
+
 func TestIdempotencyStoreReplayAndConflict(t *testing.T) {
 	store, err := OpenIdempotencyStore(filepath.Join(t.TempDir(), "idem.jsonl"), time.Hour)
 	if err != nil {
