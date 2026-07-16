@@ -12,17 +12,39 @@ import (
 type RejectHandler func(fh.Ctx, string, int) error
 
 type Config struct {
-	MaxPerIP   int
-	GlobalMax  int
-	MaxIPs     int
-	Window     time.Duration
-	KeyFunc    func(fh.Ctx) string
-	Reject     RejectHandler
-	TrustProxy bool
+	MaxPerIP  int
+	GlobalMax int
+	MaxIPs    int
+	Window    time.Duration
+	KeyFunc   func(fh.Ctx) string
+	Reject    RejectHandler
 }
 
 func New(cfg Config) fh.HandlerFunc {
 	cfg = normalize(cfg)
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				limitersMu.Lock()
+				now := time.Now()
+				for k, l := range limiters {
+					l.mu.Lock()
+					if now.Sub(l.lastClean) > 5*time.Minute {
+						delete(limiters, k)
+					}
+					l.mu.Unlock()
+				}
+				limitersMu.Unlock()
+			case <-stop:
+				return
+			}
+		}
+	}()
+
 	return func(c fh.Ctx) error {
 		key := cfg.KeyFunc(c)
 
@@ -40,10 +62,12 @@ func New(cfg Config) fh.HandlerFunc {
 			oldestKey := ""
 			oldestTime := time.Now()
 			for k, l := range limiters {
+				l.mu.Lock()
 				if l.lastClean.Before(oldestTime) {
 					oldestTime = l.lastClean
 					oldestKey = k
 				}
+				l.mu.Unlock()
 			}
 			if oldestKey != "" {
 				delete(limiters, oldestKey)
@@ -83,24 +107,7 @@ func normalize(cfg Config) Config {
 		cfg.Window = time.Minute
 	}
 	if cfg.KeyFunc == nil {
-		cfg.KeyFunc = func(c fh.Ctx) string {
-			if cfg.TrustProxy {
-				if xff := c.Get("X-Forwarded-For"); xff != "" {
-					parts := splitComma(xff)
-					for i := len(parts) - 1; i >= 0; i-- {
-						if ip := net.ParseIP(parts[i]); ip != nil {
-							return ip.String()
-						}
-					}
-				}
-				if xri := c.Get("X-Real-IP"); xri != "" {
-					if ip := net.ParseIP(xri); ip != nil {
-						return ip.String()
-					}
-				}
-			}
-			return c.IP()
-		}
+		cfg.KeyFunc = func(c fh.Ctx) string { return c.IP() }
 	}
 	if cfg.Reject == nil {
 		cfg.Reject = func(c fh.Ctx, _ string, _ int) error {
@@ -158,20 +165,4 @@ func cleanupExpired(l *ipLimiter, window time.Duration) {
 		l.count = 0
 		l.lastClean = now
 	}
-}
-
-func init() {
-	go func() {
-		for {
-			time.Sleep(time.Minute)
-			limitersMu.Lock()
-			now := time.Now()
-			for k, l := range limiters {
-				if now.Sub(l.lastClean) > 5*time.Minute {
-					delete(limiters, k)
-				}
-			}
-			limitersMu.Unlock()
-		}
-	}()
 }

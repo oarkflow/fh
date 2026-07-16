@@ -452,6 +452,7 @@ func (a *App) EnableComplianceEndpoints(prefix string, middleware ...HandlerFunc
 	if len(middleware) == 0 {
 		middleware = a.cfg.Compliance.EndpointAuth
 	}
+	a.cfg.Compliance.EndpointAuth = middleware
 	if prefix == "" {
 		prefix = "/_fh"
 	}

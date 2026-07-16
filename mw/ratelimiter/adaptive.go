@@ -21,6 +21,22 @@ type AdaptiveConfig struct {
 }
 
 func NewAdaptive(cfg AdaptiveConfig) (fh.HandlerFunc, func()) {
+	if cfg.BaseConfig.Store == nil {
+		cfg.BaseConfig.Store = NewMemoryStore(256)
+	}
+	if cfg.BaseConfig.Max <= 0 {
+		cfg.BaseConfig.Max = 100
+	}
+	if cfg.BaseConfig.Window <= 0 {
+		cfg.BaseConfig.Window = time.Minute
+	}
+	if cfg.BaseConfig.KeyFunc == nil {
+		cfg.BaseConfig.KeyFunc = func(ctx fh.Ctx) string { return ctx.IP() }
+	}
+	if cfg.BaseConfig.LimitReached == nil {
+		cfg.BaseConfig.LimitReached = DefaultLimitReachedHandler
+	}
+
 	if cfg.HighWaterMark <= 0 {
 		cfg.HighWaterMark = 1000
 	}
@@ -35,6 +51,9 @@ func NewAdaptive(cfg AdaptiveConfig) (fh.HandlerFunc, func()) {
 	}
 	if cfg.MaxLimit <= 0 {
 		cfg.MaxLimit = cfg.BaseConfig.Max * 10
+	}
+	if cfg.MaxLimit < cfg.MinLimit {
+		cfg.MaxLimit = cfg.MinLimit
 	}
 	if cfg.CheckInterval <= 0 {
 		cfg.CheckInterval = time.Second
@@ -70,6 +89,9 @@ func NewAdaptive(cfg AdaptiveConfig) (fh.HandlerFunc, func()) {
 			}
 		}
 	}()
+
+	var shutdownOnce sync.Once
+	shutdown := func() { shutdownOnce.Do(func() { close(stop) }) }
 
 	middleware := func(ctx fh.Ctx) error {
 		if cfg.BaseConfig.Skip != nil && cfg.BaseConfig.Skip(ctx) {
@@ -107,7 +129,6 @@ func NewAdaptive(cfg AdaptiveConfig) (fh.HandlerFunc, func()) {
 		return ctx.Next()
 	}
 
-	shutdown := func() { close(stop) }
 	return middleware, shutdown
 }
 
@@ -125,9 +146,16 @@ type LoadAwareLimiter struct {
 	sendHeaders bool
 	reached     LimitReachedHandler
 	stop        chan struct{}
+	once        sync.Once
 }
 
 func NewLoadAware(baseCfg Config, highWater int64) *LoadAwareLimiter {
+	if baseCfg.Store == nil {
+		baseCfg.Store = NewMemoryStore(256)
+	}
+	if baseCfg.Max <= 0 {
+		baseCfg.Max = 100
+	}
 	l := &LoadAwareLimiter{
 		baseLimit:   baseCfg.Max,
 		highWater:   highWater,
@@ -141,6 +169,9 @@ func NewLoadAware(baseCfg Config, highWater int64) *LoadAwareLimiter {
 		sendHeaders: baseCfg.SendHeaders,
 		reached:     baseCfg.LimitReached,
 		stop:        make(chan struct{}),
+	}
+	if l.minLimit < 1 {
+		l.minLimit = 1
 	}
 	go l.adjustLoop()
 	return l
@@ -223,5 +254,5 @@ func (l *LoadAwareLimiter) SetBaseLimit(limit int) {
 }
 
 func (l *LoadAwareLimiter) Stop() {
-	close(l.stop)
+	l.once.Do(func() { close(l.stop) })
 }

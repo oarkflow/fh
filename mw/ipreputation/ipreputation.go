@@ -3,6 +3,7 @@ package ipreputation
 import (
 	"math"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -58,7 +59,7 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 
 	stop := make(chan struct{})
 	if ms, ok := cfg.Store.(*MemoryStore); ok {
-		go ms.startDecay(cfg.DecayRate, cfg.BlockDuration, stop)
+		go ms.startDecay(cfg.DecayRate, cfg.BlockDuration, cfg.BlockThreshold, stop)
 	}
 
 	handler := func(c fh.Ctx) error {
@@ -267,35 +268,27 @@ func (s *MemoryStore) evict() {
 	if len(s.scores) <= s.maxSize {
 		return
 	}
-	// Remove bottom 10% by score.
 	type entry struct {
 		ip    string
 		value float64
 	}
-	entries := make([]entry, 0, len(s.scores)/2)
+	entries := make([]entry, 0, len(s.scores)/4)
 	for ip, sc := range s.scores {
 		entries = append(entries, entry{ip, sc.Value})
 	}
-	// Partial sort: find the 10% threshold.
-	threshold := len(entries) / 10
-	if threshold < 1 {
-		threshold = 1
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].value < entries[j].value
+	})
+	removeCount := len(entries) / 10
+	if removeCount < 1 {
+		removeCount = 1
 	}
-	for i := 0; i < threshold; i++ {
-		minIdx := i
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].value < entries[minIdx].value {
-				minIdx = j
-			}
-		}
-		entries[i], entries[minIdx] = entries[minIdx], entries[i]
-	}
-	for i := 0; i < threshold; i++ {
+	for i := 0; i < removeCount && i < len(entries); i++ {
 		delete(s.scores, entries[i].ip)
 	}
 }
 
-func (s *MemoryStore) startDecay(rate float64, blockDuration time.Duration, stop <-chan struct{}) {
+func (s *MemoryStore) startDecay(rate float64, blockDuration time.Duration, blockThreshold float64, stop <-chan struct{}) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
@@ -308,7 +301,7 @@ func (s *MemoryStore) startDecay(rate float64, blockDuration time.Duration, stop
 					delete(s.scores, ip)
 					continue
 				}
-				if now.Sub(sc.UpdatedAt) > blockDuration && sc.Value >= 80 {
+				if now.Sub(sc.UpdatedAt) > blockDuration && sc.Value >= blockThreshold {
 					continue
 				}
 				sc.Value *= rate

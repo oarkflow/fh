@@ -5,9 +5,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -128,6 +130,7 @@ type OCSPStapler struct {
 
 	ticker *time.Ticker
 	stop   chan struct{}
+	done   chan struct{}
 	once   sync.Once
 }
 
@@ -137,6 +140,7 @@ func NewOCSPStapler(certFile, keyFile, caFile string) (*OCSPStapler, error) {
 	s := &OCSPStapler{
 		caFile: caFile,
 		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
 	}
 	if err := s.loadCerts(certFile, keyFile); err != nil {
 		return nil, err
@@ -163,8 +167,21 @@ func (s *OCSPStapler) loadCerts(certFile, keyFile string) error {
 	}
 	caCertPEM, err := tls.LoadX509KeyPair(s.caFile, s.caFile)
 	if err != nil {
-		// Try loading as a single PEM file.
-		return err
+		// caFile may be a PEM bundle without a private key.
+		// Fall back to parsing it as a raw PEM certificate.
+		pemData, readErr := os.ReadFile(s.caFile)
+		if readErr != nil {
+			return err
+		}
+		block, _ := pemDecode(pemData)
+		if block == nil {
+			return err
+		}
+		s.issuerCert, err = x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return err
+		}
+		return nil
 	}
 	if len(caCertPEM.Certificate) == 0 {
 		return errors.New("fh: empty CA certificate chain")
@@ -177,6 +194,7 @@ func (s *OCSPStapler) loadCerts(certFile, keyFile string) error {
 }
 
 func (s *OCSPStapler) loop() {
+	defer close(s.done)
 	for {
 		select {
 		case <-s.ticker.C:
@@ -223,18 +241,13 @@ func buildOCSPRequest(leaf, issuer *x509.Certificate) ([]byte, error) {
 }
 
 func fetchOCSPResponse(url string, req []byte) ([]byte, error) {
-	httpReq, err := http.NewRequest("POST", url, io.NopCloser(
-		io.Reader(nil),
-	))
+	httpReq, err := http.NewRequest("POST", url, &readerFromBytes{data: req})
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/ocsp-request")
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	httpReq.Body = io.NopCloser(
-		&readerFromBytes{data: req},
-	)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -308,11 +321,10 @@ func (s *OCSPStapler) Staple() []byte {
 	return out
 }
 
-// Stop halts the background refresh goroutine.
+// Stop halts the background refresh goroutine and waits for it to exit.
 func (s *OCSPStapler) Stop() {
-	s.once.Do(func() {
-		close(s.stop)
-	})
+	s.once.Do(func() { close(s.stop) })
+	<-s.done
 }
 
 // CertificateReloader atomically swaps a PEM certificate/key pair.
@@ -351,4 +363,18 @@ func (r *CertificateReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certifi
 		return nil, errors.New("fh: no TLS certificate loaded")
 	}
 	return cert, nil
+}
+
+func pemDecode(data []byte) (*pem.Block, []byte) {
+	var block *pem.Block
+	rest := data
+	for {
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return nil, nil
+		}
+		if block.Type == "CERTIFICATE" {
+			return block, rest
+		}
+	}
 }

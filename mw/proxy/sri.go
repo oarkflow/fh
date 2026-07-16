@@ -5,7 +5,6 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"errors"
-	"hash"
 	"io"
 	"net/http"
 	"strings"
@@ -14,6 +13,7 @@ import (
 )
 
 var ErrIntegrityMismatch = errors.New("proxy: subresource integrity check failed")
+var ErrBodyTooLarge = errors.New("proxy: response body exceeds SRI verification limit")
 
 type SRIConfig struct {
 	Required    bool
@@ -29,15 +29,13 @@ func VerifyIntegrity(resp *http.Response, expectedHash string, maxBody int64) er
 		maxBody = 10 << 20
 	}
 
-	h := sha256.New()
-	limited := io.LimitReader(resp.Body, maxBody+1)
-	n, err := io.Copy(h, limited)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	resp.Body.Close()
 	if err != nil {
 		return err
 	}
-	if n > maxBody {
-		resp.Body.Close()
-		return errors.New("proxy: response body exceeds SRI verification limit")
+	if int64(len(body)) > maxBody {
+		return ErrBodyTooLarge
 	}
 
 	algorithms := strings.Split(expectedHash, " ")
@@ -57,15 +55,14 @@ func VerifyIntegrity(resp *http.Response, expectedHash string, maxBody int64) er
 		var actual []byte
 		switch algo {
 		case "sha256":
-			actual = h.(hash.Hash).Sum(nil)
+			h := sha256.Sum256(body)
+			actual = h[:]
 		case "sha384":
-			h384 := sha512.New384()
-			h384.Write(h.(hash.Hash).Sum(nil))
-			actual = h384.Sum(nil)
+			h := sha512.Sum384(body)
+			actual = h[:]
 		case "sha512":
-			h512 := sha512.New()
-			h512.Write(h.(hash.Hash).Sum(nil))
-			actual = h512.Sum(nil)
+			h := sha512.Sum512(body)
+			actual = h[:]
 		default:
 			continue
 		}

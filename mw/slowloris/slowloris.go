@@ -8,10 +8,10 @@ import (
 )
 
 type Config struct {
-	MaxGoroutines  int
-	MaxHeapBytes   uint64
-	Reject         func(fh.Ctx) error
-	Skip           func(fh.Ctx) bool
+	MaxGoroutines int
+	MaxHeapBytes  uint64
+	Reject        func(fh.Ctx) error
+	Skip          func(fh.Ctx) bool
 }
 
 func New(cfg Config) fh.HandlerFunc {
