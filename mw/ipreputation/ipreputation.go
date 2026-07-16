@@ -42,12 +42,7 @@ type Config struct {
 	OnSuspicious        func(fh.Ctx, *Score) error
 	Whitelist           []string
 	Blacklist           []string
-	// TrustProxy is retained for compatibility. Forwarding headers are never
-	// parsed here; install mw/realip with explicit TrustedProxies first and this
-	// middleware will consume the validated Ctx.IP value.
-	// Deprecated: use mw/realip.
-	TrustProxy bool
-	Skip       func(fh.Ctx) bool
+	Skip                func(fh.Ctx) bool
 }
 
 func New(cfg Config) (fh.HandlerFunc, func()) {

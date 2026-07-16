@@ -32,12 +32,6 @@ type ServerTLSOptions struct {
 	MinVersion                uint16
 	NextProtos                []string
 	CurvePreferences          []tls.CurveID
-	// EnablePadding is retained for source compatibility. Go's server-side TLS
-	// API does not provide ClientHello or record-padding control, so this field
-	// is deprecated and has no effect.
-	// Deprecated: terminate TLS at an anti-DDoS edge when fingerprint privacy is
-	// a requirement.
-	EnablePadding bool
 }
 
 // NewServerTLSConfig returns a validated, server-side TLS configuration.

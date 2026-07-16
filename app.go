@@ -113,19 +113,15 @@ type Config struct {
 	SendKeepAliveHeader bool
 	// ServerHeader, when non-empty, is sent as the Server response header.
 	// Empty by default (no Server header sent) for security.
-	ServerHeader string
-	// StrictHeaderValueValidation is retained for configuration compatibility.
-	// RFC-invalid control bytes are now rejected unconditionally because allowing
-	// them creates unsafe parser differentials.
-	StrictHeaderValueValidation bool
-	ReadBufferSize              int
-	MaxRequestBodySize          int
-	MaxHeaderListSize           int
-	MaxHeaderCount              int
-	MaxRequestLineSize          int
-	MaxConcurrentStreams        uint32
-	DisableKeepAlive            bool
-	DisableHTTP2                bool
+	ServerHeader         string
+	ReadBufferSize       int
+	MaxRequestBodySize   int
+	MaxHeaderListSize    int
+	MaxHeaderCount       int
+	MaxRequestLineSize   int
+	MaxConcurrentStreams uint32
+	DisableKeepAlive     bool
+	DisableHTTP2         bool
 	// DisableH2C rejects cleartext HTTP/2 prior knowledge and HTTP/1.1 h2c
 	// upgrades while retaining HTTP/2 over TLS/ALPN.
 	DisableH2C bool
@@ -249,9 +245,6 @@ func WithSendDateHeader(enabled bool) Option {
 }
 func WithSendKeepAliveHeader(enabled bool) Option {
 	return func(c *Config) { c.SendKeepAliveHeader = enabled }
-}
-func WithStrictHeaderValueValidation(enabled bool) Option {
-	return func(c *Config) { c.StrictHeaderValueValidation = enabled }
 }
 
 // WithSecureByDefault enables the fail-closed framework security baseline.
@@ -1306,7 +1299,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			return
 		}
 
-		_, err = parseHeadersLimit(accumulated[consumed:headEnd+4], &ctx.Header, a.cfg.MaxHeaderCount, a.cfg.StrictHeaderValueValidation)
+		_, err = parseHeadersLimit(accumulated[consumed:headEnd+4], &ctx.Header, a.cfg.MaxHeaderCount)
 		if err != nil {
 			releaseCtx(ctx)
 			_ = writeAll(conn, serverError400)

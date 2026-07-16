@@ -79,10 +79,6 @@ type Config struct {
 	// the response.
 	OnReject func(fh.Ctx, Snapshot) error
 
-	// OnOpen is retained for source compatibility. It is a rejection handler,
-	// not a transition hook. Prefer OnReject for new code.
-	OnOpen func(fh.Ctx) error
-
 	// OnStateChange is called synchronously after a transition and never while
 	// an internal lock is held. Callback panics are recovered and counted.
 	OnStateChange func(Transition)
@@ -328,9 +324,6 @@ func (b *Breaker) reject(c fh.Ctx) error {
 	snapshot := b.Snapshot()
 	if b.cfg.OnReject != nil {
 		return b.cfg.OnReject(c, snapshot)
-	}
-	if b.cfg.OnOpen != nil {
-		return b.cfg.OnOpen(c)
 	}
 	return fh.NewHTTPError(
 		fh.StatusServiceUnavailable,

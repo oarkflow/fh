@@ -224,7 +224,6 @@ func applyComplianceDefaults(cfg *Config) {
 	}
 	if cfg.Mode == ModeStrict || cfg.Mode == ModeEnterprise || cfg.Compliance.Strict || cfg.Compliance.Profile == ComplianceSecurityStrict || cfg.Compliance.Profile == ComplianceFinancial || cfg.Compliance.Profile == ComplianceHealthcare || cfg.Compliance.Profile == ComplianceGovernment {
 		cfg.Compliance.Strict = true
-		cfg.StrictHeaderValueValidation = true
 		cfg.SendDateHeader = true
 		if cfg.Reliability.IdempotencyTTL == 0 {
 			cfg.Reliability.IdempotencyTTL = 24 * time.Hour
@@ -255,7 +254,6 @@ func applySecureDefaults(cfg *Config) {
 	cfg.ErrorOptions.ExposeStackTrace = false
 	cfg.ErrorOptions.ExposeCauses = false
 	cfg.DisablePanicRecovery = false
-	cfg.StrictHeaderValueValidation = true
 	cfg.SendDateHeader = true
 	cfg.ServerHeader = ""
 	cfg.DisableH2C = true

@@ -344,7 +344,7 @@ func BenchmarkFullRequestJSON(b *testing.B) {
 		ctx.reset()
 		conn.Reset()
 		consumed, _ := parseRequestLine(req, &ctx.Header, 8192)
-		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64, false)
+		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64)
 		handler := app.router.FindBytes([]byte("GET"), []byte("/json"), &ctx.params)
 		if handler != nil {
 			_ = handler(ctx)
@@ -370,7 +370,7 @@ func BenchmarkFullRequestPlaintext(b *testing.B) {
 		ctx.reset()
 		conn.Reset()
 		consumed, _ := parseRequestLine(req, &ctx.Header, 8192)
-		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64, false)
+		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64)
 		handler := app.router.FindBytes([]byte("GET"), []byte("/plaintext"), &ctx.params)
 		if handler != nil {
 			_ = handler(ctx)
@@ -400,7 +400,7 @@ func BenchmarkFullRequestEcho(b *testing.B) {
 		ctx.reset()
 		conn.Reset()
 		consumed, _ := parseRequestLine(req, &ctx.Header, 8192)
-		_, _ = parseHeadersLimit(req[consumed:bytes.Index(req, []byte("\r\n\r\n"))+4], &ctx.Header, 64, false)
+		_, _ = parseHeadersLimit(req[consumed:bytes.Index(req, []byte("\r\n\r\n"))+4], &ctx.Header, 64)
 		ctx.body = body
 		handler := app.router.FindBytes([]byte("POST"), []byte("/echo"), &ctx.params)
 		if handler != nil {
@@ -491,7 +491,7 @@ func BenchmarkMiddlewareChainNoMiddleware(b *testing.B) {
 		ctx.reset()
 		conn.Reset()
 		consumed, _ := parseRequestLine(req, &ctx.Header, 8192)
-		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64, false)
+		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64)
 		handler := app.router.FindBytes([]byte("GET"), []byte("/test"), &ctx.params)
 		if handler != nil {
 			_ = handler(ctx)
@@ -519,7 +519,7 @@ func BenchmarkMiddlewareChain3Middleware(b *testing.B) {
 		ctx.reset()
 		conn.Reset()
 		consumed, _ := parseRequestLine(req, &ctx.Header, 8192)
-		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64, false)
+		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64)
 		handler := app.router.FindBytes([]byte("GET"), []byte("/test"), &ctx.params)
 		if handler != nil {
 			_ = handler(ctx)
@@ -590,7 +590,7 @@ func BenchmarkPrebuiltResponse(b *testing.B) {
 		ctx.reset()
 		conn.Reset()
 		consumed, _ := parseRequestLine(req, &ctx.Header, 8192)
-		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64, false)
+		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64)
 		handler := app.router.FindBytes([]byte("GET"), []byte("/hello"), &ctx.params)
 		if handler != nil {
 			_ = handler(ctx)

@@ -34,7 +34,7 @@ func TestHTTP1HeaderLimitUsesConfiguredLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := []byte("Host: example.com\r\nA: 1\r\nB: 2\r\n\r\n")
-	if _, err := parseHeadersWithLimitStrict(head, &h, 2, true); err == nil {
+	if _, err := parseHeadersWithLimit(head, &h, 2); err == nil {
 		t.Fatal("expected configured header-count limit to reject request")
 	}
 }

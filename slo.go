@@ -601,19 +601,3 @@ func (t *SLOTracker) checkSLO(rs *routeSLO, now time.Time) {
 func meetsLatencyTarget(target time.Duration, observedMs float64) bool {
 	return target <= 0 || observedMs <= float64(target.Microseconds())/1000.0
 }
-
-// SLOMiddleware creates middleware that records every request against a single
-// fixed route pattern, regardless of the request path.
-//
-// Deprecated: use SLOTracker.Handler, which matches request paths against all
-// registered patterns (static, :param, wildcard, and regex).
-func SLOMiddleware(tracker *SLOTracker, route string) HandlerFunc {
-	return func(c Ctx) error {
-		start := time.Now()
-		err := c.Next()
-		latency := time.Since(start)
-		failed := err != nil || c.StatusCode() >= 500
-		tracker.RecordRequest(route, latency, failed)
-		return err
-	}
-}

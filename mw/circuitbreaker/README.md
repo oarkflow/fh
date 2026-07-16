@@ -95,8 +95,6 @@ OnReject: func(c fh.Ctx, snapshot circuitbreaker.Snapshot) error {
 },
 ```
 
-`OnOpen` remains supported for compatibility, but it is a rejection callback rather than a state-transition callback.
-
 ## Metrics
 
 Export `breaker.Snapshot()` through the application's metrics integration. Useful fields include state, generation, accepted/rejected counts, failures, transitions, panics, rolling counts, and half-open probe counts.

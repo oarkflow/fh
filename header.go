@@ -497,11 +497,6 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 }
 
 func parseHeadersWithLimit(src []byte, h *RequestHeader, maxCount int) (int, error) {
-	return parseHeadersWithLimitStrict(src, h, maxCount, true)
-}
-
-func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, strictValueValidation bool) (int, error) {
-	_ = strictValueValidation // retained for source compatibility; RFC field-value validation is unconditional.
 	if maxCount <= 0 {
 		maxCount = maxHeaders
 	}

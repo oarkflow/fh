@@ -513,12 +513,12 @@ func AtomicJob(c Ctx, opt AtomicJobOptions) (*AtomicJobResult, error) {
 }
 
 // parseHeadersLimit is app-configurable while preserving parseHeaders for tests.
-func parseHeadersLimit(src []byte, h *RequestHeader, maxCount int, strictValueValidation bool) (int, error) {
+func parseHeadersLimit(src []byte, h *RequestHeader, maxCount int) (int, error) {
 	if maxCount <= 0 {
 		maxCount = maxHeaders
 	}
 	if maxCount > maxServerHeaderCount {
 		maxCount = maxServerHeaderCount
 	}
-	return parseHeadersWithLimitStrict(src, h, maxCount, strictValueValidation)
+	return parseHeadersWithLimit(src, h, maxCount)
 }

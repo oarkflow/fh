@@ -28,12 +28,6 @@ type Config struct {
 
 	KeyFunc KeyFunc
 
-	// TrustProxyHeaders is retained for source compatibility and has no effect.
-	// Install mw/realip with explicit TrustedProxies before this middleware;
-	// allowlisting then consumes the validated Ctx.IP value.
-	// Deprecated: use mw/realip.
-	TrustProxyHeaders bool
-
 	Forbidden ForbiddenHandler
 }
 

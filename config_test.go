@@ -56,28 +56,27 @@ func TestNewWithConfigPreservesOverrides(t *testing.T) {
 
 func TestSecureByDefaultResolvesFailClosedBaseline(t *testing.T) {
 	app := NewWithConfig(Config{
-		SecureByDefault:             true,
-		Mode:                        ModeFast,
-		Environment:                 EnvDevelopment,
-		Debug:                       true,
-		ErrorOptions:                ErrorOptions{Environment: EnvDevelopment, ExposeDebug: true, ExposeStackTrace: true, ExposeCauses: true},
-		DisablePanicRecovery:        true,
-		StrictHeaderValueValidation: false,
-		ServerHeader:                "leaky-version",
-		ReadHeaderTimeout:           time.Minute,
-		ReadTimeout:                 time.Minute,
-		WriteTimeout:                time.Minute,
-		IdleTimeout:                 time.Hour,
-		ReadBufferSize:              1 << 20,
-		MaxConnections:              100_000,
-		MaxRequestBodySize:          64 << 20,
-		MaxHeaderListSize:           1 << 20,
-		MaxHeaderCount:              1000,
-		MaxRequestLineSize:          64 << 10,
-		MaxConcurrentStreams:        1000,
+		SecureByDefault:      true,
+		Mode:                 ModeFast,
+		Environment:          EnvDevelopment,
+		Debug:                true,
+		ErrorOptions:         ErrorOptions{Environment: EnvDevelopment, ExposeDebug: true, ExposeStackTrace: true, ExposeCauses: true},
+		DisablePanicRecovery: true,
+		ServerHeader:         "leaky-version",
+		ReadHeaderTimeout:    time.Minute,
+		ReadTimeout:          time.Minute,
+		WriteTimeout:         time.Minute,
+		IdleTimeout:          time.Hour,
+		ReadBufferSize:       1 << 20,
+		MaxConnections:       100_000,
+		MaxRequestBodySize:   64 << 20,
+		MaxHeaderListSize:    1 << 20,
+		MaxHeaderCount:       1000,
+		MaxRequestLineSize:   64 << 10,
+		MaxConcurrentStreams: 1000,
 	})
 
-	if app.cfg.Mode != ModeStrict || app.cfg.Debug || app.cfg.DisablePanicRecovery || !app.cfg.StrictHeaderValueValidation {
+	if app.cfg.Mode != ModeStrict || app.cfg.Debug || app.cfg.DisablePanicRecovery {
 		t.Fatalf("secure baseline was weakened: %#v", app.cfg)
 	}
 	if app.cfg.Environment != EnvProduction || app.cfg.ErrorOptions.Environment != EnvProduction || app.cfg.ErrorOptions.ExposeDebug || app.cfg.ErrorOptions.ExposeStackTrace || app.cfg.ErrorOptions.ExposeCauses {
