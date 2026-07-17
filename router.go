@@ -107,6 +107,11 @@ type prebuiltResponse struct {
 	resp []byte
 }
 
+// Linear matching beats a hash lookup for very small route tables, but its
+// cost grows with every route. Keep the shortcut adaptive so applications with
+// large route tables retain O(path segments) trie/map lookup behavior.
+const maxLinearRouteShortcuts = 8
+
 func newRouter() *Router {
 	return NewRouter()
 }
@@ -382,17 +387,24 @@ func (r *Router) findNoLock(method string, path []byte, params *[]Param) Handler
 }
 
 func (r *Router) findNoLockBytesCore(shortcuts []staticShortcut, static map[string]HandlerFunc, paramsShortcuts []paramShortcut, root *node, path []byte, params *[]Param) HandlerFunc {
-	if h := matchStaticShortcuts(shortcuts, path, params); h != nil {
-		return h
-	}
-	if h := matchParamShortcuts(paramsShortcuts, path, params, r.UnsafeParams); h != nil {
-		return h
+	if len(shortcuts) <= maxLinearRouteShortcuts {
+		if h := matchStaticShortcuts(shortcuts, path, params); h != nil {
+			return h
+		}
 	}
 	if static != nil {
 		if h := static[b2s(path)]; h != nil {
 			if params != nil {
 				*params = (*params)[:0]
 			}
+			return h
+		}
+	}
+
+	// Exact static routes must always win, including when a large route table
+	// disables its bounded linear shortcut.
+	if len(paramsShortcuts) <= maxLinearRouteShortcuts {
+		if h := matchParamShortcuts(paramsShortcuts, path, params, r.UnsafeParams); h != nil {
 			return h
 		}
 	}
@@ -436,18 +448,22 @@ func (r *Router) findNoLockCanonical(method string, path []byte, params *[]Param
 		*params = (*params)[:0]
 	}
 
-	root := r.trees[method]
-
-	// HEAD falls back to GET if HEAD is not explicitly registered.
-	if root == nil && method == "HEAD" {
-		root = r.trees["GET"]
+	if root := r.trees[method]; root != nil {
+		if h := match(root, cleanLookupPath(path), params, r.UnsafeParams); h != nil {
+			return h
+		}
 	}
 
-	if root == nil {
-		return nil
+	// HEAD falls back per path, not merely when the entire HEAD tree is absent.
+	// An unrelated explicit HEAD route must not disable GET fallback.
+	if method == "HEAD" {
+		*params = (*params)[:0]
+		if root := r.trees["GET"]; root != nil {
+			return match(root, cleanLookupPath(path), params, r.UnsafeParams)
+		}
 	}
 
-	return match(root, cleanLookupPath(path), params, r.UnsafeParams)
+	return nil
 }
 
 // Allowed returns methods that match path in deterministic order.
@@ -480,7 +496,7 @@ func (r *Router) allowedNoLock(path []byte) []string {
 		"QUERY",
 	}
 
-	lookupPath := cleanLookupPath(path)
+	lookupPath := cleanLookupPath(routeLookupPath(path))
 
 	allowed := make([]string, 0, 8)
 	seen := make(map[string]struct{}, len(r.trees)+2)
@@ -768,6 +784,11 @@ func matchParamShortcuts(routes []paramShortcut, path []byte, params *[]Param, u
 			continue
 		}
 		value := path[len(r.prefix):]
+		if indexByte(value, '?') >= 0 {
+			// Let the trie resolve query-bearing targets so static precedence is
+			// preserved without scanning every ordinary lookup for a query.
+			return nil
+		}
 		if indexByte(value, '/') >= 0 {
 			continue
 		}
@@ -1002,7 +1023,7 @@ func match(n *node, path []byte, params *[]Param, unsafeParams bool) HandlerFunc
 		mark := len(*params)
 
 		*params = append(*params, Param{
-			Value: paramValue(path, unsafeParams),
+			Value: paramValue(routeLookupPath(path), unsafeParams),
 		})
 
 		if h := endpointHandler(n.wild.handler, params); h != nil {
@@ -1073,13 +1094,29 @@ func cleanLookupPath(path []byte) []byte {
 	for len(path) > 0 && path[0] == '/' {
 		path = path[1:]
 	}
+	if len(path) > 0 && path[0] == '?' {
+		return nil
+	}
 
+	return path
+}
+
+// routeLookupPath removes the query component without allocating. Public Router
+// lookups therefore behave like HTTP routing and like RoutePattern.Match even
+// when callers pass a request-target rather than a pre-parsed path.
+func routeLookupPath(path []byte) []byte {
+	if i := indexByte(path, '?'); i >= 0 {
+		return path[:i]
+	}
 	return path
 }
 
 func nextSegment(path []byte) (seg, rest []byte) {
 	for i := 0; i < len(path); i++ {
-		if path[i] == '/' {
+		switch path[i] {
+		case '?':
+			return path[:i], nil
+		case '/':
 			seg = path[:i]
 			rest = path[i+1:]
 

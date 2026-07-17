@@ -91,6 +91,50 @@ func BenchmarkRouterWildcard(b *testing.B) {
 	}
 }
 
+func BenchmarkRouterLookupHighCardinality(b *testing.B) {
+	for _, routeCount := range []int{16, 256, 4096} {
+		b.Run(fmt.Sprintf("Static/%d", routeCount), func(b *testing.B) {
+			r := NewRouter()
+			paths := make([][]byte, routeCount)
+			for i := range paths {
+				path := fmt.Sprintf("/static/%d", i)
+				paths[i] = []byte(path)
+				r.Add("GET", path, func(Ctx) error { return nil })
+			}
+			r.Freeze()
+			method := []byte("GET")
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if r.FindBytes(method, paths[i%routeCount], nil) == nil {
+					b.Fatal("route not found")
+				}
+			}
+		})
+
+		b.Run(fmt.Sprintf("Param/%d", routeCount), func(b *testing.B) {
+			r := NewRouter()
+			paths := make([][]byte, routeCount)
+			for i := range paths {
+				pattern := fmt.Sprintf("/resource-%d/:id", i)
+				paths[i] = []byte(fmt.Sprintf("/resource-%d/42", i))
+				r.Add("GET", pattern, func(Ctx) error { return nil })
+			}
+			r.UnsafeParams = true
+			r.Freeze()
+			method := []byte("GET")
+			params := make([]Param, 0, 1)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if r.FindBytes(method, paths[i%routeCount], &params) == nil {
+					b.Fatal("route not found")
+				}
+			}
+		})
+	}
+}
+
 // ── Header parsing benchmarks ──────────────────────────────────────────────
 
 func BenchmarkHeaderPeek(b *testing.B) {

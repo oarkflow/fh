@@ -1,8 +1,10 @@
 # Routing
 
-## Radix Tree Router
+## Adaptive Trie Router
 
-fh uses a compressed trie (radix tree) for routing with O(n) insert/lookup where n is the number of path segments.
+fh uses an adaptive segment trie for routing with O(n) insert/lookup where n is the number of path segments. Tiny route tables use a bounded linear fast path; larger tables automatically use hash/trie lookup so matching cost does not grow linearly with the total route count.
+
+The request hot path uses byte slices, supports zero-allocation matching in fast mode, and becomes lock-free after the router is frozen. Static segments take precedence over named parameters, and named parameters take precedence over wildcards.
 
 ### Basic Routes
 
@@ -23,22 +25,24 @@ app.Query("/search", searchHandler)
 ### Named Parameters (`:param`)
 
 ```go
-app.Get("/users/:id", func(c *fh.Ctx) error {
+app.Get("/users/:id", func(c fh.Ctx) error {
     id := c.Params("id")
     return c.SendString("User: " + id)
 })
 
-app.Get("/users/:id/posts/:postId", func(c *fh.Ctx) error {
+app.Get("/users/:id/posts/:postId", func(c fh.Ctx) error {
     id := c.Params("id")
     postId := c.Params("postId")
     return c.JSON(map[string]string{"user": id, "post": postId})
 })
 ```
 
+Query strings are not part of route matching. For example, `/users/42?expand=team` matches `/users/:id` and captures `id=42`.
+
 ### Wildcard Parameters (`*wild`)
 
 ```go
-app.Get("/files/*path", func(c *fh.Ctx) error {
+app.Get("/files/*path", func(c fh.Ctx) error {
     path := c.Params("path")
     return c.SendFile(path)
 })
@@ -61,7 +65,7 @@ app.All("/webhook", webhookHandler)
 app.Add("PURGE", "/cache", purgeHandler)
 
 // QUERY method (RFC 9485) — safe, idempotent, body-bearing method for search
-app.Query("/search", func(c *fh.Ctx) error {
+app.Query("/search", func(c fh.Ctx) error {
     var q SearchRequest
     c.BodyParser(&q)
     return c.JSON(search(q))
@@ -82,12 +86,11 @@ app.Post("/users", createUser).Name("user.create")
 ### Reverse URL Generation
 
 ```go
-// Pass params as ...any (key, value, key, value, ...)
-url, err := app.URL("user.profile", "id", "42")
+url, err := app.URL("user.profile", map[string]string{"id": "42"})
 // url = "/users/42"
 
 // Redirect to named route
-c.RedirectTo("user.profile", "id", "42")
+c.RedirectTo("user.profile", map[string]string{"id": "42"})
 ```
 
 ---
@@ -131,7 +134,7 @@ Groups provide all the same HTTP method registration methods as the App: `Get`, 
 
 ## HEAD Fallback to GET
 
-If no handler is explicitly registered for HEAD on a path, the framework automatically falls back to the GET handler registered for that path and strips the response body. This ensures HEAD requests always return the correct headers.
+If no handler is explicitly registered for HEAD on a path, the framework automatically falls back to the GET handler registered for that same path and strips the response body. Other explicit HEAD routes do not disable this per-path fallback. This ensures HEAD requests always return the correct headers.
 
 ---
 
@@ -184,7 +187,7 @@ app.Router().Freeze()
 Routes can have multiple handlers. They execute in order using `ctx.Next()`.
 
 ```go
-func middleware(c *fh.Ctx) error {
+func middleware(c fh.Ctx) error {
     c.Locals("start", time.Now())
     err := c.Next() // call next handler
     elapsed := time.Since(c.Locals("start").(time.Time))
@@ -192,7 +195,7 @@ func middleware(c *fh.Ctx) error {
     return err
 }
 
-func handler(c *fh.Ctx) error {
+func handler(c fh.Ctx) error {
     return c.JSON(map[string]string{"status": "ok"})
 }
 
