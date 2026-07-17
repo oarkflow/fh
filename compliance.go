@@ -126,6 +126,8 @@ type SafeConfig struct {
 	ComplianceEnabled     bool              `json:"compliance_enabled"`
 	ComplianceProfile     ComplianceProfile `json:"compliance_profile,omitempty"`
 	SecurityEventEndpoint bool              `json:"security_event_endpoint"`
+	KernelEnabled         bool              `json:"kernel_enabled"`
+	KernelBackend         KernelBackend     `json:"kernel_backend,omitempty"`
 }
 
 func applyComplianceDefaults(cfg *Config) {
@@ -337,6 +339,8 @@ func (a *App) SafeConfig() SafeConfig {
 		ComplianceEnabled:     a.cfg.Compliance.Enabled,
 		ComplianceProfile:     a.cfg.Compliance.Profile,
 		SecurityEventEndpoint: a.cfg.Compliance.ExposeEndpoints,
+		KernelEnabled:         a.cfg.Kernel.Enabled,
+		KernelBackend:         a.cfg.Kernel.Backend,
 	}
 }
 

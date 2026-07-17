@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -968,18 +967,6 @@ type FileQueueStorage struct {
 	events   *os.File
 }
 
-func claimFile(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("fh: file already claimed: %w", err)
-	}
-	return f, nil
-}
-
 func OpenFileQueueStorage(cfg FileQueueStorageConfig) (*FileQueueStorage, error) {
 	if cfg.Dir == "" {
 		cfg.Dir = ".fh-reliability/queue"
@@ -1054,11 +1041,10 @@ func (s *FileQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJob,
 	for _, item := range candidates {
 		pending := filepath.Join(s.dir, "pending", item.name)
 		processing := filepath.Join(s.dir, "processing", item.name)
-		f, err := claimFile(pending)
-		if err != nil {
-			continue
-		}
-		f.Close()
+		// Rename is the claim operation. Filesystem rename is atomic within the
+		// queue directory, so exactly one process can move this pending job.
+		// This avoids the close-before-rename race of advisory file locks and
+		// works consistently on Unix, Windows, AIX and Plan 9.
 		if os.Rename(pending, processing) == nil {
 			_ = s.appendEvent("claimed", "processing", item.job, "")
 			return item.job, nil

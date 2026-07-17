@@ -141,6 +141,19 @@ func (a *App) startupBannerData(ln net.Listener) StartupBannerData {
 		addr = ln.Addr().String()
 	}
 	url := startupURL(scheme, addr)
+	extra := make([]StartupBannerLine, 0, len(cfg.ExtraLines)+4)
+	kernel := a.KernelRuntimeInfo()
+	if kernel.Enabled {
+		extra = append(extra,
+			StartupBannerLine{Key: "Transport", Value: string(kernel.Backend)},
+			StartupBannerLine{Key: "Reactors", Value: strconv.Itoa(kernel.Reactors)},
+			StartupBannerLine{Key: "ReusePort", Value: enabledDisabled(kernel.ReusePort)},
+		)
+		if kernel.XDPAttached {
+			extra = append(extra, StartupBannerLine{Key: "XDP", Value: kernel.XDPInterface})
+		}
+	}
+	extra = append(extra, cfg.ExtraLines...)
 	return StartupBannerData{
 		Name:      name,
 		Version:   strings.TrimSpace(cfg.Version),
@@ -153,7 +166,7 @@ func (a *App) startupBannerData(ln net.Listener) StartupBannerData {
 		GoVersion: runtime.Version(),
 		Mode:      a.cfg.Mode,
 		HTTP2:     !a.cfg.DisableHTTP2,
-		Extra:     append([]StartupBannerLine(nil), cfg.ExtraLines...),
+		Extra:     extra,
 	}
 }
 

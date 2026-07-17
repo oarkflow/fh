@@ -7,6 +7,12 @@ WASM_DIST := $(WASM_DIR)/dist
 WASM_EXAMPLE_DIR := examples/secure_wasm/wasm
 WASM_EXEC_SRC := $(firstword $(wildcard $(GOROOT)/lib/wasm/wasm_exec.js $(GOROOT)/misc/wasm/wasm_exec.js))
 WASM_BINARY := $(WASM_DIST)/securefetch.wasm
+XDP_SOURCE ?= kernel/xdp/fh_xdp.c
+XDP_OBJECT ?= kernel/xdp/fh_xdp.o
+XDP_INTERFACE ?= eth0
+XDP_MODE ?= native
+XDP_PORTS ?= 80,443
+XDP_PIN ?= /sys/fs/bpf/fh/$(XDP_INTERFACE)
 
 WASM_TRUST_VALUES := $(strip $(WASM_TRUSTED_ORIGIN)$(WASM_TRUSTED_TRANSPORT_KEY)$(WASM_TRUSTED_TRANSPORT_KEY_ID)$(WASM_TRUSTED_RESPONSE_KEY)$(WASM_TRUSTED_RESPONSE_KEY_ID))
 WASM_TRUST_LDFLAGS :=
@@ -29,7 +35,7 @@ endif
 WASM_TRUST_LDFLAGS := -X main.embeddedTrustedOrigin=$(WASM_TRUSTED_ORIGIN) -X main.embeddedTransportPublicKey=$(WASM_TRUSTED_TRANSPORT_KEY) -X main.embeddedTransportKeyID=$(WASM_TRUSTED_TRANSPORT_KEY_ID) -X main.embeddedResponseSigningPublicKey=$(WASM_TRUSTED_RESPONSE_KEY) -X main.embeddedResponseSigningKeyID=$(WASM_TRUSTED_RESPONSE_KEY_ID)
 endif
 
-.PHONY: all test secure-test wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-clean clean
+.PHONY: all test secure-test kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-clean clean
 
 all: test wasm
 
@@ -38,6 +44,21 @@ test:
 
 secure-test:
 	$(GO) test ./pkg/securetransport ./mw/securetransport
+
+kernel-test:
+	CGO_ENABLED=0 $(GO) test ./kernel . -run 'TestKernel|TestIOUring|TestPortKey|TestNormalizeKernel' -count=1
+
+kernel-probe:
+	$(GO) run ./cmd/fh-kernelctl probe
+
+xdp-build:
+	$(GO) run ./cmd/fh-kernelctl build-xdp -source $(XDP_SOURCE) -output $(XDP_OBJECT)
+
+xdp-attach: xdp-build
+	$(GO) run ./cmd/fh-kernelctl attach-xdp -interface $(XDP_INTERFACE) -mode $(XDP_MODE) -object $(XDP_OBJECT) -pin $(XDP_PIN) -ports $(XDP_PORTS)
+
+xdp-detach:
+	$(GO) run ./cmd/fh-kernelctl detach-xdp -interface $(XDP_INTERFACE) -mode $(XDP_MODE)
 
 wasm: wasm-example
 

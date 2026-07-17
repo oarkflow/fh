@@ -49,6 +49,7 @@ See the [root README](../README.md) for a quick tour. This folder is the full re
 | Document | Description |
 |---|---|
 | [Performance](performance.md) | Hot-path configuration and zero-allocation response APIs |
+| [Linux Kernel Transport](kernel-transport.md) | epoll/io_uring reactors, SO_REUSEPORT steering, XDP operations and deployment |
 | [Performance Profiles](performance_profiles.md) | Fast / Production / Enterprise runtime profiles |
 
 ---

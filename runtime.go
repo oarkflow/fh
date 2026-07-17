@@ -15,6 +15,7 @@ type RuntimeInfo struct {
 	Queue      QueueStats          `json:"queue,omitempty"`
 	Config     SafeConfig          `json:"config"`
 	Health     []HealthCheckResult `json:"health,omitempty"`
+	Kernel     KernelRuntimeInfo   `json:"kernel"`
 }
 
 func (a *App) RuntimeInfo() RuntimeInfo {
@@ -27,7 +28,7 @@ func (a *App) RuntimeInfo() RuntimeInfo {
 		}
 	}
 	_, checks := a.HealthStatus(context.Background())
-	return RuntimeInfo{Time: time.Now().UTC(), GoVersion: runtime.Version(), Goroutines: runtime.NumGoroutine(), Draining: a != nil && a.IsDraining(), Routes: len(a.Routes()), Queue: q, Config: a.SafeConfig(), Health: checks}
+	return RuntimeInfo{Time: time.Now().UTC(), GoVersion: runtime.Version(), Goroutines: runtime.NumGoroutine(), Draining: a != nil && a.IsDraining(), Routes: len(a.Routes()), Queue: q, Config: a.SafeConfig(), Health: checks, Kernel: a.KernelRuntimeInfo()}
 }
 
 func (a *App) IsDraining() bool { return a != nil && a.draining.Load() }

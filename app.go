@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/oarkflow/fh/kernel"
 )
 
 type Map map[string]any
@@ -54,6 +56,9 @@ type Hooks struct {
 
 // Config holds server configuration.
 type Config struct {
+	// Kernel enables Linux epoll/io_uring accept reactors, SO_REUSEPORT CPU steering,
+	// socket tuning and optional XDP packet admission. Portable serving remains the fallback.
+	Kernel KernelConfig
 	// SecureByDefault enables the framework's fail-closed protocol and response
 	// baseline. It is resolved once while the app is built, so disabled servers
 	// pay no request-path cost. Application-specific authentication,
@@ -392,6 +397,10 @@ type App struct {
 	staticRoots     []*os.Root
 	drainingCh      chan struct{} // closed when draining starts, signals all connection contexts
 	fastHTTP1       bool          // trusted ModeFast: omit graceful activity bookkeeping
+	kernelMu        sync.RWMutex
+	kernelRuntime   KernelRuntimeInfo
+	kernelCloser    interface{ Close() error }
+	kernelCounters  kernelCounters
 }
 
 type connState struct {
@@ -476,6 +485,9 @@ func applyConfigDefaults(cfg *Config) {
 // handlers and initializes the app struct together with the reliability
 // subsystem when enabled.
 func buildApp(cfg Config) *App {
+	if err := kernel.NormalizeConfig(&cfg.Kernel); err != nil {
+		panic(err)
+	}
 	applySecureDefaults(&cfg)
 	applyComplianceDefaults(&cfg)
 	if cfg.MaxHeaderCount > maxServerHeaderCount {
@@ -730,6 +742,9 @@ func (a *App) OnError(fn func(error)) *App {
 // ── Listen ─────────────────────────────────────────────────────────────────
 
 func (a *App) Listen(addr string) error {
+	if a.cfg.Kernel.Enabled {
+		return a.listenKernel(addr, nil)
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -743,11 +758,18 @@ func (a *App) ListenTLS(addr, certFile, keyFile string) error {
 	if err != nil {
 		return err
 	}
+	tlsConfig, err := a.prepareTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})
+	if err != nil {
+		return err
+	}
+	if a.cfg.Kernel.Enabled {
+		return a.listenKernel(addr, tlsConfig)
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	return a.ServeTLS(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})
+	return a.Serve(tls.NewListener(ln, tlsConfig))
 }
 
 // ServeTLS wraps ln with TLS and advertises HTTP/2 through ALPN when enabled.
@@ -790,6 +812,9 @@ func (a *App) prepareTLSConfig(config *tls.Config) (*tls.Config, error) {
 // is configured, the server will force-close remaining connections after that
 // duration. Use OnShutdown to register cleanup hooks.
 func (a *App) ListenWithGracefulShutdown(addr string) error {
+	if a.cfg.Kernel.Enabled {
+		return a.runWithSignal(func() error { return a.listenKernel(addr, nil) })
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -805,16 +830,25 @@ func (a *App) ListenTLSWithGracefulShutdown(addr, certFile, keyFile string) erro
 	if err != nil {
 		return err
 	}
+	tlsConfig, err := a.prepareTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})
+	if err != nil {
+		return err
+	}
+	if a.cfg.Kernel.Enabled {
+		return a.runWithSignal(func() error { return a.listenKernel(addr, tlsConfig) })
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}
-	return a.serveWithSignal(ln, func(listener net.Listener) error { return a.ServeTLS(listener, tlsConfig) })
+	return a.runWithSignal(func() error { return a.Serve(tls.NewListener(ln, tlsConfig)) })
 }
 
 func (a *App) serveWithSignal(ln net.Listener, serve func(net.Listener) error) error {
+	return a.runWithSignal(func() error { return serve(ln) })
+}
 
+func (a *App) runWithSignal(serve func() error) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -827,8 +861,7 @@ func (a *App) serveWithSignal(ln net.Listener, serve func(net.Listener) error) e
 			a.logger.Error("graceful shutdown error", "error", err)
 		}
 	}()
-
-	return serve(ln)
+	return serve()
 }
 
 // effectiveShutdownTimeout returns the configured shutdown timeout or a default
@@ -842,36 +875,14 @@ func (a *App) effectiveShutdownTimeout() time.Duration {
 }
 
 func (a *App) Serve(ln net.Listener) error {
-	a.buildMu.Lock()
-	if !a.started.CompareAndSwap(false, true) {
-		a.buildMu.Unlock()
-		return ErrAppAlreadyStarted
+	if ln == nil {
+		return errors.New("fh: nil listener")
 	}
-	a.buildMu.Unlock()
-	a.connMu.Lock()
-	a.listener = ln
-	a.connMu.Unlock()
-	a.closed.Store(false)
-	a.draining.Store(false)
-	if a.reliability != nil {
-		if err := a.reliability.Start(); err != nil {
-			_ = ln.Close()
-			return err
-		}
+	if err := a.startServing(ln); err != nil {
+		return err
 	}
-	// Freeze routes once the server starts. This removes router RWMutex
-	// traffic from every request while preserving build-time safety.
-	a.router.Freeze()
-
-	for _, fn := range a.hooks.onListen {
-		if err := fn(); err != nil {
-			_ = ln.Close()
-			return err
-		}
-	}
-
 	a.printStartupBanner(ln)
-	a.logger.Info("listening", "addr", ln.Addr())
+	a.logger.Info("listening", "addr", ln.Addr(), "transport", "standard")
 
 	var acceptErr error
 	for {
@@ -889,45 +900,11 @@ func (a *App) Serve(ln net.Listener) error {
 			_ = a.beginShutdown()
 			break
 		}
-
-		if a.sem != nil {
-			select {
-			case a.sem <- struct{}{}:
-			default:
-				// Drop overload traffic without spending CPU on a TLS handshake
-				// or amplifying it with a response.
-				_ = conn.Close()
-				continue
-			}
-		}
-		peerIP, reserved := a.reservePeer(conn.RemoteAddr())
-		if !reserved {
-			_ = conn.Close()
-			if a.sem != nil {
-				<-a.sem
-			}
-			continue
-		}
-
-		a.connMu.Lock()
-		if a.draining.Load() {
-			a.connMu.Unlock()
-			_ = conn.Close()
-			a.releasePeer(peerIP)
-			if a.sem != nil {
-				<-a.sem
-			}
-			continue
-		}
-		a.activeConn.Add(1)
-		a.conns[conn] = &connState{writeBuf: make([]byte, 0, 4096)}
-		a.connMu.Unlock()
-		go a.serveConn(conn, peerIP)
+		a.acceptConnection(conn)
 	}
 
-	a.activeConn.Wait()
-	a.runShutdownHooks()
-	return acceptErr
+	a.finishServing()
+	return normalizeServeError(acceptErr, a.closed.Load())
 }
 
 func (a *App) assertMutable() {
@@ -1032,6 +1009,14 @@ func (a *App) beginShutdown() error {
 	if listener != nil {
 		err = listener.Close()
 	}
+	a.kernelMu.RLock()
+	kernelCloser := a.kernelCloser
+	a.kernelMu.RUnlock()
+	if kernelCloser != nil {
+		if closeErr := kernelCloser.Close(); err == nil {
+			err = closeErr
+		}
+	}
 	var h2conns []*h2Conn
 	a.connMu.Lock()
 	for conn, state := range a.conns {
@@ -1128,6 +1113,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			<-a.sem
 		}
 		a.releasePeer(peerIP)
+		a.kernelCounters.active.Add(^uint64(0))
 		a.activeConn.Done()
 	}()
 

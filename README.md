@@ -24,6 +24,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 - **Pool-based zero-allocation** — `sync.Pool` for contexts, byte buffers, HPACK decoders
 - **Hardened TLS/mTLS** — TLS 1.3 config builder, verified peer state in request contexts, atomic certificate reload
 - **Outbound HTTP client** — connection pooling, retries, circuit breaker, SSRF protection (`fh.NewClient`)
+- **Linux kernel-assisted transport** — raw sockets, sharded epoll or io_uring, SO_REUSEPORT CPU steering, socket tuning, and optional XDP admission with safe fallback
 
 ## Installation
 
@@ -50,6 +51,56 @@ func main() {
     app.Listen(":8080")
 }
 ```
+
+## Cross-platform kernel-assisted transport
+
+`fh` keeps protocol parsing, TLS, routing, middleware, reliability and handlers in memory-safe Go while using the native kernel network facility on each supported server OS:
+
+- Linux: raw nonblocking sockets with sharded `epoll`; opt-in probed `io_uring`; optional `SO_REUSEPORT` BPF steering and XDP admission.
+- macOS and BSD: raw nonblocking sockets with sharded `kqueue` accept reactors.
+- Windows: IOCP/overlapped networking through Go's native network poller.
+- Solaris/illumos: event ports through Go's native network poller.
+- AIX: pollset through Go's native network poller.
+- Other server-capable targets: functional native listener backend.
+
+The balanced production profile does not automatically select the newer custom
+`io_uring` path. Use the throughput profile or explicitly request `io_uring`
+after benchmarking and canary testing it on the deployment kernel.
+
+```go
+kernel := fh.ProductionKernelConfig()
+kernel.Required = true
+
+app := fh.NewProduction(fh.WithKernel(kernel))
+if err := app.ValidateKernelProduction(); err != nil {
+    log.Fatal(err)
+}
+app.Get("/", func(c fh.Ctx) error { return c.SendString("kernel-assisted") })
+log.Fatal(app.ListenWithGracefulShutdown(":8080"))
+```
+
+For an aggressive throughput candidate:
+
+```go
+kernel := fh.HighPerformanceKernelConfig()
+// On Linux this permits probed io_uring auto-selection. Benchmark it against
+// ProductionKernelConfig before deployment.
+```
+
+Inspect `app.KernelRuntimeInfo()` and `app.KernelReadiness()` at runtime. They
+report the backend that actually started, fallbacks, connection admission,
+socket-option failures and deployment warnings. Readiness always requires a
+workload benchmark because no static configuration is universally fastest.
+
+Probe Linux capabilities without changing the host:
+
+```bash
+go run ./cmd/fh-kernelctl probe
+```
+
+Optional XDP support is Linux-only and never attached unless explicitly enabled.
+See [kernel-assisted transport](docs/kernel-transport.md) and the
+[complete example](examples/kernel_server).
 
 ## Routing
 
