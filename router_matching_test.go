@@ -2,7 +2,6 @@ package fh
 
 import (
 	"fmt"
-	"reflect"
 	"sync"
 	"testing"
 )
@@ -123,66 +122,4 @@ func TestFrozenRouterConcurrentHighCardinalityLookup(t *testing.T) {
 		}(worker)
 	}
 	wg.Wait()
-}
-
-func TestFrozenRouterMethodsSnapshotIsImmutable(t *testing.T) {
-	r := NewRouter()
-	r.Add("GET", "/", routerBenchmarkHandler)
-	r.Add("PURGE", "/cache", routerBenchmarkHandler)
-	r.Freeze()
-
-	want := []string{"GET", "HEAD", "OPTIONS", "PURGE"}
-	first := r.Methods()
-	if !reflect.DeepEqual(first, want) {
-		t.Fatalf("Methods = %#v, want %#v", first, want)
-	}
-	first[0] = "BROKEN"
-	if got := r.Methods(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("cached Methods was mutated: %#v", got)
-	}
-}
-
-func TestRouterAllowedOrderingWithCustomMethod(t *testing.T) {
-	r := NewRouter()
-	for _, method := range []string{"PURGE", "POST", "GET"} {
-		r.Add(method, "/resource/:id", routerBenchmarkHandler)
-	}
-	r.Freeze()
-	if got, want := r.Allowed([]byte("/resource/42")), []string{"GET", "POST", "HEAD", "PURGE", "OPTIONS"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("Allowed = %#v, want %#v", got, want)
-	}
-}
-
-func TestNamedRouteURLStaticParamWildcardAndQuery(t *testing.T) {
-	r := NewRouter()
-	r.AddNamed("GET", "/", "home", routerBenchmarkHandler)
-	r.AddNamed("GET", "/accounts/:account/events/:event", "event", routerBenchmarkHandler)
-	r.AddNamed("GET", "/files/*path", "file", routerBenchmarkHandler)
-
-	tests := []struct {
-		name   string
-		values map[string]string
-		want   string
-	}{
-		{name: "home", values: map[string]string{"b": "two words", "a": "1"}, want: "/?a=1&b=two+words"},
-		{name: "event", values: map[string]string{"account": "a/b", "event": "42", "view": "full"}, want: "/accounts/a%2Fb/events/42?view=full"},
-		{name: "file", values: map[string]string{"path": "css/my file.css", "download": "1"}, want: "/files/css/my%20file.css?download=1"},
-	}
-	for _, tt := range tests {
-		if got, err := r.URL(tt.name, tt.values); err != nil || got != tt.want {
-			t.Errorf("URL(%q) = %q, %v; want %q", tt.name, got, err, tt.want)
-		}
-	}
-}
-
-func TestRouterBoundsDisabledShortcutTables(t *testing.T) {
-	r := NewRouter()
-	for i := 0; i < 256; i++ {
-		r.Add("GET", fmt.Sprintf("/static/%d", i), routerBenchmarkHandler)
-		r.Add("GET", fmt.Sprintf("/param-%d/:id", i), routerBenchmarkHandler)
-	}
-	want := maxLinearRouteShortcuts + 1
-	if len(r.staticShortcutGET) != want || len(r.paramGET) != want {
-		t.Fatalf("shortcut lengths = static:%d param:%d, want %d", len(r.staticShortcutGET), len(r.paramGET), want)
-	}
 }

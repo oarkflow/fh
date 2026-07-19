@@ -3,7 +3,6 @@ package fh
 import (
 	"errors"
 	"fmt"
-	"math/bits"
 	"net/url"
 	"reflect"
 	"sort"
@@ -54,11 +53,6 @@ type Router struct {
 	named      map[string]namedRoute
 	routeNames map[string]string
 	routes     map[string]struct{}
-
-	// Built once by Freeze. Canonical methods fit in a bitset; only custom
-	// methods require cache storage. Methods always returns a fresh slice.
-	frozenMethodBits    uint16
-	frozenCustomMethods []string
 }
 
 type namedRoute struct {
@@ -147,8 +141,7 @@ func CompileRoutePattern(pattern string) *RoutePattern {
 }
 
 // Match matches path and appends captured values to params. Query strings are
-// ignored. Captures are immutable substrings of the input string, so they stay
-// valid after Match returns without requiring per-parameter allocations.
+// ignored. The returned parameter strings are safe copies.
 func (p *RoutePattern) Match(path string, params *[]Param) bool {
 	if p == nil || p.root == nil {
 		return false
@@ -162,9 +155,7 @@ func (p *RoutePattern) Match(path string, params *[]Param) bool {
 	} else {
 		*params = (*params)[:0]
 	}
-	// path is an immutable string, unlike Router.FindBytes' reusable request
-	// buffer, so zero-copy capture values are safe here.
-	return match(p.root, cleanLookupPath(s2b(path)), params, true) != nil
+	return match(p.root, cleanLookupPath(s2b(path)), params, false) != nil
 }
 
 // AddNamed registers a route and gives it a name for reverse URL generation.
@@ -216,106 +207,45 @@ func (r *Router) URL(name string, values ...map[string]string) (string, error) {
 	if len(values) > 0 {
 		params = values[0]
 	}
-
-	var result strings.Builder
-	result.Grow(len(route.path) + 32)
-	if route.path == "*" {
-		if _, found := params["*"]; !found {
-			return "", fmt.Errorf("%w %q for route %q", ErrRouteParamMissing, "*", name)
-		}
-		result.WriteByte('*')
-	} else {
-		for start := 0; start < len(route.path); {
-			if route.path[start] == '/' {
-				result.WriteByte('/')
-				start++
-				continue
-			}
-			end := start
-			for end < len(route.path) && route.path[end] != '/' {
-				end++
-			}
-			segment := route.path[start:end]
-			if segment[0] != ':' && segment[0] != '*' {
-				result.WriteString(segment)
-				start = end
-				continue
-			}
-			key := segment[1:]
-			if key == "" {
-				key = "*"
-			}
-			value, found := params[key]
-			if !found {
-				return "", fmt.Errorf("%w %q for route %q", ErrRouteParamMissing, key, name)
-			}
-			if segment[0] == '*' {
-				writeEscapedWildcard(&result, value)
-			} else {
-				result.WriteString(url.PathEscape(value))
-			}
-			start = end
-		}
-	}
-
-	var queryKeys []string
-	for key := range params {
-		if !routeUsesParam(route.path, key) {
-			queryKeys = append(queryKeys, key)
-		}
-	}
-	sort.Strings(queryKeys)
-	for i, key := range queryKeys {
-		if i == 0 {
-			result.WriteByte('?')
-		} else {
-			result.WriteByte('&')
-		}
-		result.WriteString(url.QueryEscape(key))
-		result.WriteByte('=')
-		result.WriteString(url.QueryEscape(params[key]))
-	}
-	return result.String(), nil
-}
-
-func writeEscapedWildcard(result *strings.Builder, value string) {
-	for start := 0; start <= len(value); {
-		end := start
-		for end < len(value) && value[end] != '/' {
-			end++
-		}
-		result.WriteString(url.PathEscape(value[start:end]))
-		if end == len(value) {
-			return
-		}
-		result.WriteByte('/')
-		start = end + 1
-	}
-}
-
-func routeUsesParam(path, key string) bool {
-	for start := 0; start < len(path); {
-		if path[start] == '/' {
-			start++
+	used := make(map[string]struct{})
+	segments := splitRouteSegments(route.path)
+	for i, segment := range segments {
+		if segment == "" || (segment[0] != ':' && segment[0] != '*') {
 			continue
 		}
-		end := start
-		for end < len(path) && path[end] != '/' {
-			end++
+		key := segment[1:]
+		if key == "" {
+			key = "*"
 		}
-		segment := path[start:end]
-		if len(segment) > 0 && (segment[0] == ':' || segment[0] == '*') {
-			name := segment[1:]
-			if name == "" {
-				name = "*"
-			}
-			if name == key {
-				return true
-			}
+		value, found := params[key]
+		if !found {
+			return "", fmt.Errorf("%w %q for route %q", ErrRouteParamMissing, key, name)
 		}
-		start = end
+		used[key] = struct{}{}
+		if segment[0] == '*' {
+			parts := strings.Split(value, "/")
+			for j := range parts {
+				parts[j] = url.PathEscape(parts[j])
+			}
+			segments[i] = strings.Join(parts, "/")
+		} else {
+			segments[i] = url.PathEscape(value)
+		}
 	}
-	return false
+	path := "/" + strings.Join(segments, "/")
+	if route.path == "*" {
+		path = "*"
+	}
+	query := make(url.Values)
+	for key, value := range params {
+		if _, ok := used[key]; !ok {
+			query.Set(key, value)
+		}
+	}
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return path, nil
 }
 
 // Freeze makes the router read-only.
@@ -326,7 +256,6 @@ func (r *Router) Freeze() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.cacheMethodsNoLock()
 	r.frozen.Store(true)
 }
 
@@ -554,7 +483,7 @@ func (r *Router) Allowed(path []byte) []string {
 }
 
 func (r *Router) allowedNoLock(path []byte) []string {
-	canonical := [...]string{
+	canonical := []string{
 		"GET",
 		"HEAD",
 		"POST",
@@ -570,26 +499,32 @@ func (r *Router) allowedNoLock(path []byte) []string {
 	lookupPath := cleanLookupPath(routeLookupPath(path))
 
 	allowed := make([]string, 0, 8)
-	var seen uint16
+	seen := make(map[string]struct{}, len(r.trees)+2)
 
-	add := func(index int, method string, root *node) {
+	var tmp []Param
+
+	add := func(method string, root *node) {
 		if root == nil {
 			return
 		}
 
-		if matchesPath(root, lookupPath) && seen&(1<<index) == 0 {
-			seen |= 1 << index
-			allowed = append(allowed, method)
+		tmp = tmp[:0]
+
+		if match(root, lookupPath, &tmp, r.UnsafeParams) != nil {
+			if _, ok := seen[method]; !ok {
+				seen[method] = struct{}{}
+				allowed = append(allowed, method)
+			}
 		}
 	}
 
-	for i, method := range canonical {
-		add(i, method, r.trees[method])
+	for _, method := range canonical {
+		add(method, r.trees[method])
 	}
 
-	if seen&1 != 0 {
-		if seen&(1<<1) == 0 {
-			seen |= 1 << 1
+	if _, hasGET := seen["GET"]; hasGET {
+		if _, hasHEAD := seen["HEAD"]; !hasHEAD {
+			seen["HEAD"] = struct{}{}
 			allowed = append(allowed, "HEAD")
 		}
 	}
@@ -597,11 +532,14 @@ func (r *Router) allowedNoLock(path []byte) []string {
 	extra := make([]string, 0)
 
 	for method, root := range r.trees {
-		if canonicalRouteMethod(method) {
+		if _, ok := seen[method]; ok {
 			continue
 		}
 
-		if matchesPath(root, lookupPath) {
+		tmp = tmp[:0]
+
+		if match(root, lookupPath, &tmp, r.UnsafeParams) != nil {
+			seen[method] = struct{}{}
 			extra = append(extra, method)
 		}
 	}
@@ -610,7 +548,7 @@ func (r *Router) allowedNoLock(path []byte) []string {
 	allowed = append(allowed, extra...)
 
 	if len(allowed) > 0 {
-		if seen&(1<<7) == 0 {
+		if _, hasOPTIONS := seen["OPTIONS"]; !hasOPTIONS {
 			allowed = append(allowed, "OPTIONS")
 		}
 	}
@@ -620,90 +558,17 @@ func (r *Router) allowedNoLock(path []byte) []string {
 
 func (r *Router) Methods() []string {
 	if r.frozen.Load() {
-		return r.frozenMethodsCopy()
+		return r.methodsNoLock()
 	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.buildMethodsNoLock(nil)
+	return r.methodsNoLock()
 }
 
-func (r *Router) cacheMethodsNoLock() {
-	r.frozenMethodBits = 0
-	r.frozenCustomMethods = r.frozenCustomMethods[:0]
-	for method := range r.trees {
-		if index := sortedCanonicalMethodIndex(method); index >= 0 {
-			r.frozenMethodBits |= 1 << index
-		} else {
-			r.frozenCustomMethods = append(r.frozenCustomMethods, method)
-		}
-	}
-	// GET implies HEAD, and OPTIONS is always advertised.
-	if r.frozenMethodBits&(1<<2) != 0 {
-		r.frozenMethodBits |= 1 << 3
-	}
-	r.frozenMethodBits |= 1 << 4
-	sort.Strings(r.frozenCustomMethods)
-}
-
-var sortedCanonicalMethods = [...]string{
-	"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE",
-}
-
-func (r *Router) frozenMethodsCopy() []string {
-	methods := make([]string, 0, bits.OnesCount16(r.frozenMethodBits)+len(r.frozenCustomMethods))
-	canonicalIndex, customIndex := 0, 0
-	for canonicalIndex < len(sortedCanonicalMethods) || customIndex < len(r.frozenCustomMethods) {
-		for canonicalIndex < len(sortedCanonicalMethods) && r.frozenMethodBits&(1<<canonicalIndex) == 0 {
-			canonicalIndex++
-		}
-		if canonicalIndex == len(sortedCanonicalMethods) {
-			return append(methods, r.frozenCustomMethods[customIndex:]...)
-		}
-		if customIndex == len(r.frozenCustomMethods) || sortedCanonicalMethods[canonicalIndex] < r.frozenCustomMethods[customIndex] {
-			methods = append(methods, sortedCanonicalMethods[canonicalIndex])
-			canonicalIndex++
-		} else {
-			methods = append(methods, r.frozenCustomMethods[customIndex])
-			customIndex++
-		}
-	}
-	return methods
-}
-
-func sortedCanonicalMethodIndex(method string) int {
-	switch method {
-	case "CONNECT":
-		return 0
-	case "DELETE":
-		return 1
-	case "GET":
-		return 2
-	case "HEAD":
-		return 3
-	case "OPTIONS":
-		return 4
-	case "PATCH":
-		return 5
-	case "POST":
-		return 6
-	case "PUT":
-		return 7
-	case "QUERY":
-		return 8
-	case "TRACE":
-		return 9
-	default:
-		return -1
-	}
-}
-
-func (r *Router) buildMethodsNoLock(dst []string) []string {
-	methods := dst
-	if methods == nil {
-		methods = make([]string, 0, len(r.trees)+2)
-	}
+func (r *Router) methodsNoLock() []string {
+	methods := make([]string, 0, len(r.trees)+2)
 	seen := make(map[string]struct{}, len(r.trees)+2)
 
 	for method := range r.trees {
@@ -727,45 +592,29 @@ func (r *Router) buildMethodsNoLock(dst []string) []string {
 	return methods
 }
 
-func canonicalRouteMethod(method string) bool {
-	switch method {
-	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "CONNECT", "OPTIONS", "TRACE", "QUERY":
-		return true
-	default:
-		return false
-	}
-}
-
 func (r *Router) addStaticShortcut(method string, fr staticShortcut) {
 	switch method {
 	case "GET":
-		r.staticShortcutGET = appendStaticShortcut(r.staticShortcutGET, fr)
+		r.staticShortcutGET = append(r.staticShortcutGET, fr)
 	case "POST":
-		r.staticShortcutPOST = appendStaticShortcut(r.staticShortcutPOST, fr)
+		r.staticShortcutPOST = append(r.staticShortcutPOST, fr)
 	case "PUT":
-		r.staticShortcutPUT = appendStaticShortcut(r.staticShortcutPUT, fr)
+		r.staticShortcutPUT = append(r.staticShortcutPUT, fr)
 	case "DELETE":
-		r.staticShortcutDELETE = appendStaticShortcut(r.staticShortcutDELETE, fr)
+		r.staticShortcutDELETE = append(r.staticShortcutDELETE, fr)
 	case "PATCH":
-		r.staticShortcutPATCH = appendStaticShortcut(r.staticShortcutPATCH, fr)
+		r.staticShortcutPATCH = append(r.staticShortcutPATCH, fr)
 	case "HEAD":
-		r.staticShortcutHEAD = appendStaticShortcut(r.staticShortcutHEAD, fr)
+		r.staticShortcutHEAD = append(r.staticShortcutHEAD, fr)
 	case "OPTIONS":
-		r.staticShortcutOPTIONS = appendStaticShortcut(r.staticShortcutOPTIONS, fr)
+		r.staticShortcutOPTIONS = append(r.staticShortcutOPTIONS, fr)
 	case "CONNECT":
-		r.staticShortcutCONNECT = appendStaticShortcut(r.staticShortcutCONNECT, fr)
+		r.staticShortcutCONNECT = append(r.staticShortcutCONNECT, fr)
 	case "TRACE":
-		r.staticShortcutTRACE = appendStaticShortcut(r.staticShortcutTRACE, fr)
+		r.staticShortcutTRACE = append(r.staticShortcutTRACE, fr)
 	case "QUERY":
-		r.staticShortcutQUERY = appendStaticShortcut(r.staticShortcutQUERY, fr)
+		r.staticShortcutQUERY = append(r.staticShortcutQUERY, fr)
 	}
-}
-
-func appendStaticShortcut(routes []staticShortcut, route staticShortcut) []staticShortcut {
-	if len(routes) > maxLinearRouteShortcuts {
-		return routes
-	}
-	return append(routes, route)
 }
 
 func (r *Router) addPrebuiltResponse(method, path string, resp []byte) {
@@ -903,33 +752,26 @@ func buildParamShortcut(segments []string, h HandlerFunc) (paramShortcut, bool) 
 func (r *Router) addParamShortcut(method string, fr paramShortcut) {
 	switch method {
 	case "GET":
-		r.paramGET = appendParamShortcut(r.paramGET, fr)
+		r.paramGET = append(r.paramGET, fr)
 	case "POST":
-		r.paramPOST = appendParamShortcut(r.paramPOST, fr)
+		r.paramPOST = append(r.paramPOST, fr)
 	case "PUT":
-		r.paramPUT = appendParamShortcut(r.paramPUT, fr)
+		r.paramPUT = append(r.paramPUT, fr)
 	case "DELETE":
-		r.paramDELETE = appendParamShortcut(r.paramDELETE, fr)
+		r.paramDELETE = append(r.paramDELETE, fr)
 	case "PATCH":
-		r.paramPATCH = appendParamShortcut(r.paramPATCH, fr)
+		r.paramPATCH = append(r.paramPATCH, fr)
 	case "HEAD":
-		r.paramHEAD = appendParamShortcut(r.paramHEAD, fr)
+		r.paramHEAD = append(r.paramHEAD, fr)
 	case "OPTIONS":
-		r.paramOPTIONS = appendParamShortcut(r.paramOPTIONS, fr)
+		r.paramOPTIONS = append(r.paramOPTIONS, fr)
 	case "CONNECT":
-		r.paramCONNECT = appendParamShortcut(r.paramCONNECT, fr)
+		r.paramCONNECT = append(r.paramCONNECT, fr)
 	case "TRACE":
-		r.paramTRACE = appendParamShortcut(r.paramTRACE, fr)
+		r.paramTRACE = append(r.paramTRACE, fr)
 	case "QUERY":
-		r.paramQUERY = appendParamShortcut(r.paramQUERY, fr)
+		r.paramQUERY = append(r.paramQUERY, fr)
 	}
-}
-
-func appendParamShortcut(routes []paramShortcut, route paramShortcut) []paramShortcut {
-	if len(routes) > maxLinearRouteShortcuts {
-		return routes
-	}
-	return append(routes, route)
 }
 
 func matchParamShortcuts(routes []paramShortcut, path []byte, params *[]Param, unsafeParams bool) HandlerFunc {
@@ -1192,26 +1034,6 @@ func match(n *node, path []byte, params *[]Param, unsafeParams bool) HandlerFunc
 	}
 
 	return nil
-}
-
-// matchesPath follows the same precedence and backtracking rules as match but
-// skips parameter materialization. It is used by Allowed, which only needs to
-// know whether an endpoint exists.
-func matchesPath(n *node, path []byte) bool {
-	if len(path) == 0 {
-		return n.handler != nil || n.wild != nil && n.wild.handler != nil
-	}
-
-	seg, rest := nextSegment(path)
-	if len(n.static) > 0 {
-		if child := n.static[b2s(seg)]; child != nil && matchesPath(child, rest) {
-			return true
-		}
-	}
-	if n.param != nil && len(seg) > 0 && matchesPath(n.param, rest) {
-		return true
-	}
-	return n.wild != nil && n.wild.handler != nil
 }
 
 func endpointHandler(endpoint *routeEndpoint, params *[]Param) HandlerFunc {

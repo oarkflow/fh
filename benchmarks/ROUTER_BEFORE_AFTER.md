@@ -44,20 +44,16 @@ go test -run '^$' -bench '^BenchmarkRouterOperations$' \
 
 ## Router utilities and construction
 
-Utilities were measured again after dedicated optimization, using five runs of
-at least 300 ms. Registration used five one-second runs and prebuilt route
-strings so formatting work is not charged to the router. The registration case
-uses the common two-segment `/resource-<n>/:id` shape. For this section,
-"Before" is commit `d57d82c1095c`, immediately before the utility-specific
-changes; the earlier matcher tables continue to use baseline `5e6a1da664c4`.
+These operations were not targeted by the matcher optimization. Small changes
+around 1% are benchmark noise rather than meaningful regressions.
 
-| Operation | Before | After | Speedup | Before allocation profile | After allocation profile |
-|---|---:|---:|---:|---:|---:|
-| Allowed | 369.3 ns | 242.6 ns | 1.52x | 160 B, 2 allocs | 128 B, 1 alloc |
-| Methods | 188.0 ns | 46.68 ns | 4.03x | 96 B, 1 alloc | 80 B, 1 alloc |
-| Named URL | 369.3 ns | 209.4 ns | 1.76x | 200 B, 7 allocs | 64 B, 1 alloc |
-| Compiled pattern | 63.89 ns | 41.79 ns | 1.53x | 8 B, 2 allocs | 0 B, 0 allocs |
-| Register 256 routes | 90.29 us | 87.12 us | 1.04x | 139,248 B, 1,846 allocs | 116,336 B, 1,842 allocs |
+| Operation | Before | After | Change | After allocation profile |
+|---|---:|---:|---:|---:|
+| Allowed | 375.5 ns | 376.7 ns | ~same | 160 B, 2 allocs |
+| Methods | 180.7 ns | 182.7 ns | ~same | 96 B, 1 alloc |
+| Named URL | 378.9 ns | 381.8 ns | ~same | 200 B, 7 allocs |
+| Compiled pattern | 63.13 ns | 64.06 ns | ~same | 8 B, 2 allocs |
+| Register 256 routes | 113.3 us | 106.6 us | 1.06x | 120,732 B, 1,840 allocs |
 
 ## Functional verification
 
