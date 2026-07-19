@@ -1,6 +1,6 @@
 # fh Documentation
 
-**fh** is a standalone, zero-dependency Go web framework that implements HTTP/1.1, HTTP/2, and WebSocket protocols entirely from scratch using only the Go standard library. It is not a wrapper around `net/http` or `fasthttp` — it has its own TCP server, HTTP parser, trie-based router, HTTP/2 framing engine, HPACK encoder/decoder, and WebSocket implementation.
+**fh** is a standalone Go web framework that implements HTTP/1.1, HTTP/2, and WebSocket protocols entirely from scratch using only the Go standard library plus `golang.org/x/crypto` (OCSP stapling and ACME/`autocert`, both optional). It is not a wrapper around `net/http` or `fasthttp` — it has its own TCP server, HTTP parser, trie-based router, HTTP/2 framing engine, HPACK encoder/decoder, and WebSocket implementation.
 
 **Module:** `github.com/oarkflow/fh` · **Go:** 1.26.5+
 
@@ -43,6 +43,7 @@ See the [root README](../README.md) for a quick tour. This folder is the full re
 | [SLO Tracking](slo.md) | Route-level availability/latency SLOs and burn-rate alerts |
 | [Budgets](budget.md) | Hierarchical per-request execution budgets (time, memory, upstream, retries) |
 | [Config Reload](configreload.md) | Atomic config/route/policy/certificate reload with generation tracking |
+| [ACME / Let's Encrypt](acme.md) | Automatic TLS certificate issuance and renewal via TLS-ALPN-01 |
 
 ## Operations
 
@@ -51,6 +52,7 @@ See the [root README](../README.md) for a quick tour. This folder is the full re
 | [Performance](performance.md) | Hot-path configuration and zero-allocation response APIs |
 | [Linux Kernel Transport](kernel-transport.md) | epoll/io_uring reactors, SO_REUSEPORT steering, XDP operations and deployment |
 | [Performance Profiles](performance_profiles.md) | Fast / Production / Enterprise runtime profiles |
+| [Prefork & Zero-Downtime Restarts](prefork.md) | Multi-process `SO_REUSEPORT` prefork and `SIGHUP`-triggered rolling restarts |
 
 ---
 
@@ -72,5 +74,7 @@ See the [root README](../README.md) for a quick tour. This folder is the full re
 - **Streaming** — chunked response streaming, Server-Sent Events
 - **Graceful shutdown** — drain mode, connection tracking, configurable timeout
 - **TLS / mTLS** — `ListenTLS` with automatic ALPN negotiation, verified peer state, atomic certificate reload
+- **ACME / Let's Encrypt** — automatic certificate issuance and renewal via TLS-ALPN-01, no `net/http` dependency
+- **Prefork & zero-downtime restarts** — multi-process `SO_REUSEPORT` supervisor with `SIGHUP`-triggered rolling restarts
 - **Pluggable storage** — custom backends for reliability (journal, idempotency, queue) and clustering
 - **Pluggable template engine** — `TemplateEngine` interface for any template library

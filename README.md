@@ -1,15 +1,15 @@
 # fh — Zero-Dependency Go Web Framework
 
-**fh** is a standalone, high-performance HTTP/1.1 + HTTP/2 + WebSocket web framework for Go with **zero external dependencies**. It implements HTTP parsing, routing, HTTP/2 framing, HPACK, and WebSocket protocols from scratch — no wrappers around `net/http` or `fasthttp`.
+**fh** is a standalone, high-performance HTTP/1.1 + HTTP/2 + WebSocket web framework for Go with **no third-party dependencies beyond `golang.org/x/crypto`** (used only for optional OCSP stapling and ACME certificate automation). It implements HTTP parsing, routing, HTTP/2 framing, HPACK, and WebSocket protocols from scratch — no wrappers around `net/http` or `fasthttp`.
 
 Full reference documentation lives in [`docs/`](docs/README.md).
 
 ## Features
 
-- **Zero dependencies** — only the Go standard library
+- **Minimal dependencies** — the Go standard library plus `golang.org/x/crypto`, both optional (OCSP stapling, ACME)
 - **HTTP/1.1** — full request/response parsing, chunked transfer, trailers
-- **HTTP/2** — TLS ALPN, optional h2c prior knowledge/upgrade, stream multiplexing, flow control
-- **WebSocket** — RFC 6455 server implementation with `EventHub` pub/sub layer
+- **HTTP/2** — TLS ALPN, optional h2c prior knowledge/upgrade, stream multiplexing, flow control, RFC 8441 extended CONNECT
+- **WebSocket** — RFC 6455 server implementation with `EventHub` pub/sub layer, transparently served over HTTP/1.1 or HTTP/2
 - **Trie-based router** — radix tree with named (`:param`) and wildcard (`*wild`) parameters
 - **Codec system** — pluggable body parsers for JSON, XML, form, multipart, CSV, NDJSON, text, binary
 - **65+ built-in middleware packages** — see [Middleware](#middleware) below
@@ -23,6 +23,8 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 - **Graceful TLS shutdown** — `app.ListenTLSWithGracefulShutdown(addr, certFile, keyFile)`
 - **Pool-based zero-allocation** — `sync.Pool` for contexts, byte buffers, HPACK decoders
 - **Hardened TLS/mTLS** — TLS 1.3 config builder, verified peer state in request contexts, atomic certificate reload
+- **ACME / Let's Encrypt** — `app.ListenAutoTLS(domains, cacheDir)` issues and renews certificates automatically via TLS-ALPN-01
+- **Prefork & zero-downtime restarts** — `app.ListenPrefork(addr)` runs a multi-process `SO_REUSEPORT` supervisor; `SIGHUP` rolls out a new binary with zero dropped connections
 - **Outbound HTTP client** — connection pooling, retries, circuit breaker, SSRF protection (`fh.NewClient`)
 - **Linux kernel-assisted transport** — raw sockets, sharded epoll or io_uring, SO_REUSEPORT CPU steering, socket tuning, and optional XDP admission with safe fallback
 
@@ -234,7 +236,7 @@ app.StaticFS("/", fh.StaticConfig{
 
 ## HTTP/2
 
-fh supports TLS + ALPN (`app.ListenTLS(":443", "cert.pem", "key.pem")`), h2c prior knowledge, and h2c upgrade from HTTP/1.1. Use `fh.WithDisableH2C(true)` on cleartext listeners that should accept only HTTP/1; `WithSecureByDefault(true)` applies that restriction automatically. See [HTTP/2](docs/http2.md).
+fh supports TLS + ALPN (`app.ListenTLS(":443", "cert.pem", "key.pem")`), h2c prior knowledge, and h2c upgrade from HTTP/1.1. Use `fh.WithDisableH2C(true)` on cleartext listeners that should accept only HTTP/1; `WithSecureByDefault(true)` applies that restriction automatically. fh also implements RFC 8441 extended CONNECT, so WebSocket (and other `c.Upgrade`-based protocols) tunnel over a single HTTP/2 stream instead of requiring an HTTP/1.1 fallback. See [HTTP/2](docs/http2.md).
 
 ## WebSocket
 
@@ -345,6 +347,33 @@ ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 defer cancel()
 app.ShutdownWithContext(ctx)
 ```
+
+## Prefork & Zero-Downtime Restarts
+
+```go
+// Multi-process SO_REUSEPORT supervisor instead of a single process.
+// The binary re-executes itself once per worker, so main() (including route
+// registration) naturally runs again in every worker.
+app.ListenPrefork(":8080")
+```
+
+Send `SIGHUP` to the master process to roll out a new binary with zero
+dropped connections: it spawns a fresh generation of workers, waits for them
+to report a bound listener, then gracefully drains and terminates the
+previous generation. `SIGINT`/`SIGTERM` stops the whole supervisor. On
+Windows (no `SIGHUP`), call `app.Reload()` instead. See
+[Prefork](docs/prefork.md).
+
+## ACME / Automatic TLS
+
+```go
+// Certificates issued and renewed automatically via TLS-ALPN-01
+// (golang.org/x/crypto/acme/autocert — already a dependency, no net/http
+// required). CacheDir persists them across restarts.
+app.ListenAutoTLS([]string{"example.com"}, "/var/lib/fh/acme-cache")
+```
+
+See [ACME](docs/acme.md).
 
 ## Reliability Layer
 

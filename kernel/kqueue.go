@@ -11,9 +11,12 @@ import (
 )
 
 type kqueueShard struct {
-	id            int
-	listener      *kernelFDListener
-	kq            int
+	id       int
+	listener *kernelFDListener
+	// kq is written by close() (from the shutdown goroutine) and read by
+	// run()/acceptReady() (from the accept-loop goroutine) concurrently, so
+	// it must not be a plain int.
+	kq            atomic.Int32
 	cfg           KernelConfig
 	host          Host
 	tlsWrap       func(net.Conn) net.Conn
@@ -33,18 +36,22 @@ func newKqueueShard(id int, l *kernelFDListener, c KernelConfig, h Host, t func(
 		_ = syscall.Close(k)
 		return nil, e
 	}
-	return &kqueueShard{id: id, listener: l, kq: k, cfg: c, host: h, tlsWrap: t, closed: closed}, nil
+	s := &kqueueShard{id: id, listener: l, cfg: c, host: h, tlsWrap: t, closed: closed}
+	s.kq.Store(int32(k))
+	return s, nil
 }
 func (s *kqueueShard) close() {
-	if s != nil && s.kq >= 0 {
-		_ = syscall.Close(s.kq)
-		s.kq = -1
+	if s == nil {
+		return
+	}
+	if old := s.kq.Swap(-1); old >= 0 {
+		_ = syscall.Close(int(old))
 	}
 }
 func (s *kqueueShard) run() error {
 	var events [8]syscall.Kevent_t
 	for !s.closed.Load() && !s.host.closed() {
-		n, e := syscall.Kevent(s.kq, nil, events[:], kqueueWaitTimeout())
+		n, e := syscall.Kevent(int(s.kq.Load()), nil, events[:], kqueueWaitTimeout())
 		if e != nil {
 			if errors.Is(e, syscall.EINTR) {
 				continue

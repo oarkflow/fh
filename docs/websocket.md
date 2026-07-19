@@ -2,6 +2,11 @@
 
 fh implements WebSocket (RFC 6455) entirely from scratch, including both low-level connection handling and a high-level pub/sub EventHub.
 
+Every handler below works unmodified over both HTTP/1.1 (`Connection: Upgrade`)
+and HTTP/2 (RFC 8441 extended CONNECT) clients — `c.Upgrade("websocket", ...)`
+detects the transport automatically. See [HTTP/2 § Extended
+CONNECT](http2.md#extended-connect-rfc-8441) for the protocol-level details.
+
 ## Architecture
 
 - **`pkg/websocket`** — Core WebSocket implementation

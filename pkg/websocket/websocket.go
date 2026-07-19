@@ -195,11 +195,15 @@ func NewWithConfig(cfg Config, handler func(*Conn) error) fh.HandlerFunc {
 			return ErrWebSocketHandshake
 		}
 
-		key := fh.TrimOWS(c.RequestHeader().Peek([]byte("Sec-WebSocket-Key")))
+		isH2 := c.ConnectProtocol() != ""
+		var key []byte
+		if !isH2 {
+			key = fh.TrimOWS(c.RequestHeader().Peek([]byte("Sec-WebSocket-Key")))
 
-		decoded, err := base64.StdEncoding.DecodeString(string(key))
-		if err != nil || len(decoded) != 16 {
-			return ErrWebSocketHandshake
+			decoded, err := base64.StdEncoding.DecodeString(string(key))
+			if err != nil || len(decoded) != 16 {
+				return ErrWebSocketHandshake
+			}
 		}
 
 		selectedProtocol := selectSubprotocol(
@@ -207,7 +211,9 @@ func NewWithConfig(cfg Config, handler func(*Conn) error) fh.HandlerFunc {
 			cfg.Subprotocols,
 		)
 
-		c.Set("Sec-WebSocket-Accept", Accept(key))
+		if !isH2 {
+			c.Set("Sec-WebSocket-Accept", Accept(key))
+		}
 
 		if selectedProtocol != "" {
 			c.Set("Sec-WebSocket-Protocol", selectedProtocol)
@@ -254,6 +260,14 @@ func NewWithConfig(cfg Config, handler func(*Conn) error) fh.HandlerFunc {
 }
 
 func isValidWebSocketRequest(c fh.Ctx) bool {
+	// RFC 8441 §5: over HTTP/2 the Sec-WebSocket-Key/Accept exchange and the
+	// Connection/Upgrade headers (forbidden in HTTP/2 anyway) are not used —
+	// the extended CONNECT stream's own 2xx response is the confirmation.
+	// Sec-WebSocket-Version remains a normal, required header field.
+	if proto := c.ConnectProtocol(); proto != "" {
+		return strings.EqualFold(proto, "websocket") &&
+			fh.StrEqFold(fh.TrimOWS(c.RequestHeader().Peek([]byte("Sec-WebSocket-Version"))), "13")
+	}
 	return fh.BytesEqualFold(c.RequestHeader().Method, fh.MethodGETBytes) &&
 		c.RequestHeader().ContentLength == 0 &&
 		!c.RequestHeader().Chunked &&

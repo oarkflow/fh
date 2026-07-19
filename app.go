@@ -401,6 +401,10 @@ type App struct {
 	kernelRuntime   KernelRuntimeInfo
 	kernelCloser    interface{ Close() error }
 	kernelCounters  kernelCounters
+	// preforkSupervisor is non-nil only in a ListenPrefork master process,
+	// for the duration of that call, so Reload can reach the running
+	// supervisor without threading it through every call site.
+	preforkSupervisor atomic.Pointer[preforkSupervisor]
 }
 
 type connState struct {

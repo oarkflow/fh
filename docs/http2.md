@@ -13,6 +13,7 @@ fh implements HTTP/2 (RFC 7540 / RFC 9113) entirely from scratch, including HPAC
 - **HPACK** — Custom HPACK encoder/decoder with Huffman coding
 - **Server Push** — PUSH_PROMISE support
 - **Connection Management** — SETTINGS exchange, PING keepalive, GOAWAY graceful shutdown
+- **Extended CONNECT (RFC 8441)** — bidirectional-stream tunnels over a single HTTP/2 stream, e.g. WebSocket without falling back to HTTP/1.1
 
 ## Configuration
 
@@ -79,6 +80,37 @@ serve HTTP/2 only through TLS/ALPN, use `fh.WithDisableH2C(true)`. The
 // Connection: Upgrade
 // Upgrade: h2c
 ```
+
+### Extended CONNECT (RFC 8441)
+
+fh advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL` and accepts extended CONNECT
+requests (`:method: CONNECT` with a `:protocol` pseudo-header) as
+bidirectional tunnels — the same primitive HTTP/2 clients use to run
+WebSocket without an HTTP/1.1 fallback. It is exposed through the same
+`c.Upgrade(protocol, handler)` API used for HTTP/1.1 upgrades in
+[websocket.go](../websocket.go):
+
+```go
+app.Get("/ws", func(c fh.Ctx) error {
+    return c.Upgrade("websocket", func(conn net.Conn) error {
+        // conn works identically whether the client spoke HTTP/1.1
+        // (Connection: Upgrade) or HTTP/2 (extended CONNECT) — no branching
+        // needed in handler code.
+        ...
+    })
+})
+```
+
+`c.ConnectProtocol()` reports the negotiated `:protocol` value for an HTTP/2
+extended-CONNECT request (`""` for HTTP/1.1 requests, where the equivalent
+signal is the `Upgrade` header instead). `pkg/websocket` already uses both of
+these internally, so existing `app.Get("/ws", websocket.New(...))` handlers
+serve HTTP/2 clients with zero code changes — see [WebSocket](websocket.md).
+
+Because an extended-CONNECT request addresses a resource like any other
+request (unlike classic proxy-style CONNECT, which only carries an
+`:authority`), fh routes it against the same table as a `GET` to that path —
+register the handler once with `app.Get`, exactly as for HTTP/1.1 upgrades.
 
 ## Testing
 

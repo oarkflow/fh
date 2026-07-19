@@ -139,6 +139,7 @@ type h2Stream struct {
 	path             string
 	authority        string
 	scheme           string
+	protocol         string // RFC 8441 :protocol pseudo-header, set once before the stream is published
 	headers          []hpack.HeaderField
 	trailers         []Header
 	trailerMu        sync.Mutex
@@ -155,6 +156,11 @@ type h2Stream struct {
 	cancel           context.CancelFunc
 	hasContentLength bool
 	contentLength    int
+	// connectConn is non-nil for RFC 8441 extended CONNECT streams (protocol != "").
+	// Written once under h.mu right after the stream is published into h.streams;
+	// read afterward without a lock (dispatch()'s own h.mu.Lock/Unlock establishes
+	// the happens-after edge for the goroutine that uses it).
+	connectConn *h2StreamConn
 }
 
 type h2Response struct {
@@ -615,7 +621,12 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			return nil
 		}
 		h.streams[f.streamID] = s
-		if f.flags&h2FlagEndStream == 0 && h.app.cfg.RequestBodyTimeout > 0 {
+		if s.method == "CONNECT" && s.protocol != "" {
+			// RFC 8441 extended CONNECT: this stream is a bidirectional tunnel that
+			// legitimately stays open for the tunnel's lifetime, not a buffered
+			// request body, so it never gets a body timer.
+			s.connectConn = newH2StreamConn(h, s)
+		} else if f.flags&h2FlagEndStream == 0 && h.app.cfg.RequestBodyTimeout > 0 {
 			streamID := f.streamID
 			s.bodyTimer = time.AfterFunc(h.app.cfg.RequestBodyTimeout, func() {
 				h.sendRST(streamID, h2Cancel)
@@ -680,14 +691,23 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 		}
 	}
 	h.mu.Unlock()
-	if end && !validH2ContentLength(s) {
+	if end && s.connectConn != nil {
+		// HEADERS arrived with END_STREAM: an immediately-half-closed tunnel.
+		// Signal EOF to whatever reads from it once dispatched.
+		s.connectConn.closeRemote()
+	}
+	if end && s.connectConn == nil && !validH2ContentLength(s) {
 		h.sendRST(f.streamID, h2ProtocolError)
 		return nil
 	}
 	if newStream && h.app.cfg.RequestHeadHandler != nil && !h.runRequestHeadHandler(s) {
 		return nil
 	}
-	if end {
+	// Extended CONNECT tunnels dispatch as soon as headers arrive (open state);
+	// they may never send END_STREAM for the life of the tunnel. dispatch()'s
+	// own s.dispatched guard makes a later end-of-stream on the same stream a
+	// safe no-op.
+	if end || (newStream && s.connectConn != nil) {
 		h.dispatch(s)
 	}
 	return nil
@@ -747,7 +767,8 @@ func (h *h2Conn) handleData(f h2Frame) error {
 		h.sendRST(f.streamID, h2ErrStreamClosed)
 		return nil
 	}
-	if len(s.body)+len(p) > maxH2RequestBodySize(h.app) {
+	isConnect := s.connectConn != nil
+	if !isConnect && len(s.body)+len(p) > maxH2RequestBodySize(h.app) {
 		h.mu.Unlock()
 		h.sendRST(f.streamID, h2Cancel)
 		return nil
@@ -760,7 +781,16 @@ func (h *h2Conn) handleData(f h2Frame) error {
 			return h2ConnError{h2FlowControlError}
 		}
 	}
-	s.body = append(s.body, p...)
+	var connectPayload []byte
+	if isConnect {
+		// Extended CONNECT tunnels credit the receive window back at consume
+		// time (h2StreamConn.Read), not at arrival, so the advertised window
+		// itself bounds how much unread data can be outstanding — no separate
+		// buffering cap is needed on top of it.
+		connectPayload = append([]byte(nil), p...)
+	} else {
+		s.body = append(s.body, p...)
+	}
 	s.recvWindow -= int64(flowControlled)
 	if s.recvWindow < 0 {
 		h.mu.Unlock()
@@ -769,7 +799,7 @@ func (h *h2Conn) handleData(f h2Frame) error {
 	// Batched flow control: accumulate consumed bytes and send WINDOW_UPDATE
 	// at threshold to avoid per-frame updates (RFC 9113 §6.9.1).
 	var connWU, streamWU uint32
-	if flowControlled > 0 {
+	if flowControlled > 0 && !isConnect {
 		h.connRecvWindowAccum += int64(flowControlled)
 		s.recvWindowAccum += int64(flowControlled)
 		if h.connRecvWindowAccum >= windowsUpdateThreshold {
@@ -813,6 +843,17 @@ func (h *h2Conn) handleData(f h2Frame) error {
 	}
 	if streamWU > 0 {
 		_ = h.sendWindowUpdate(f.streamID, streamWU)
+	}
+	if isConnect {
+		// Deliver (and possibly close) the tunnel outside h.mu — never send or
+		// notify while holding the connection-wide stream-registry lock.
+		if len(connectPayload) > 0 {
+			s.connectConn.deliver(connectPayload)
+		}
+		if end {
+			s.connectConn.closeRemote()
+		}
+		return nil
 	}
 	if end && !validH2ContentLength(s) {
 		h.sendRST(f.streamID, h2ProtocolError)
@@ -914,7 +955,17 @@ func (h *h2Conn) acquireRequestCtx(s *h2Stream) *DefaultCtx {
 	ctx := acquireCtx(h.conn, h.app)
 	ctx.h2 = &h2Response{conn: h, stream: s}
 	ctx.flags |= ctxFlagH2
-	ctx.Header.Method = s2b(s.method)
+	if s.connectConn != nil {
+		// RFC 8441 extended CONNECT: route the same way an HTTP/1.1 upgrade
+		// request would (a GET carrying Connection/Upgrade headers), so a
+		// handler registered once via app.Get("/ws", ...) serves both h1 and
+		// h2 clients unmodified. Ctx.ConnectProtocol() still reports the true
+		// negotiated protocol from the :protocol pseudo-header.
+		ctx.flags |= ctxFlagH2Connect
+		ctx.Header.Method = MethodGETBytes
+	} else {
+		ctx.Header.Method = s2b(s.method)
+	}
 	ctx.Header.URI = s2b(s.path)
 	ctx.Header.RequestTarget = ctx.Header.URI
 	ctx.Header.Path = ctx.Header.URI
@@ -999,6 +1050,8 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 				bit = 1 << 2
 			case ":scheme":
 				bit = 1 << 3
+			case ":protocol":
+				bit = 1 << 4
 			default:
 				return fmt.Errorf("h2: unknown pseudo header %q", f.Name)
 			}
@@ -1018,6 +1071,8 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 				s.authority = f.Value
 			case ":scheme":
 				s.scheme = f.Value
+			case ":protocol":
+				s.protocol = f.Value
 			}
 			continue
 		}
@@ -1074,18 +1129,30 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 	if s.method == "" || !validToken([]byte(s.method)) || s.authority == "" {
 		return fmt.Errorf("h2: missing pseudo header (method=%q, authority=%q)", s.method, s.authority)
 	}
+	if s.protocol != "" && s.method != "CONNECT" {
+		return fmt.Errorf("h2: :protocol requires CONNECT method, got %q", s.method)
+	}
+	// classicConnect is a plain tunneling CONNECT (RFC 9113 §8.5): it forbids
+	// :scheme/:path and reuses :authority as the target. Extended CONNECT (RFC
+	// 8441, :protocol present) is the opposite: it requires :scheme and :path
+	// like a normal request, since it addresses a resource to upgrade in place.
+	classicConnect := s.method == "CONNECT" && s.protocol == ""
 	if s.method == "CONNECT" {
-		if s.scheme != "" || s.path != "" {
-			return fmt.Errorf("h2: invalid CONNECT pseudo headers (scheme=%q, path=%q)", s.scheme, s.path)
+		if s.protocol == "" {
+			if s.scheme != "" || s.path != "" {
+				return fmt.Errorf("h2: invalid CONNECT pseudo headers (scheme=%q, path=%q)", s.scheme, s.path)
+			}
+			s.path = s.authority
+		} else if s.scheme == "" || s.path == "" {
+			return fmt.Errorf("h2: extended CONNECT missing pseudo header (path=%q, scheme=%q)", s.path, s.scheme)
 		}
-		s.path = s.authority
 	} else if s.path == "" || s.scheme == "" {
 		return fmt.Errorf("h2: missing pseudo header (path=%q, scheme=%q)", s.path, s.scheme)
 	}
-	if s.method != "CONNECT" && s.path != "*" && s.path[0] != '/' {
+	if !classicConnect && s.path != "*" && s.path[0] != '/' {
 		return fmt.Errorf("h2: invalid path %q", s.path)
 	}
-	if s.method != "CONNECT" && s.path != "*" {
+	if !classicConnect && s.path != "*" {
 		for i := 0; i < len(s.path); i++ {
 			if s.path[i] <= 0x20 || s.path[i] == 0x7f || s.path[i] == '#' {
 				return fmt.Errorf("h2: invalid path %q", s.path)
@@ -1470,7 +1537,7 @@ func (h *h2Conn) endLocalStream(s *h2Stream) {
 
 func (h *h2Conn) sendSettings() error {
 	h.settingsAwaitingAck.Store(true)
-	var p [30]byte
+	var p [36]byte
 	// SETTINGS_ENABLE_PUSH (0)
 	binary.BigEndian.PutUint16(p[0:2], 2)
 	binary.BigEndian.PutUint32(p[2:6], 0)
@@ -1486,6 +1553,9 @@ func (h *h2Conn) sendSettings() error {
 	// SETTINGS_MAX_HEADER_LIST_SIZE (6)
 	binary.BigEndian.PutUint16(p[24:26], 6)
 	binary.BigEndian.PutUint32(p[26:30], uint32(maxH2HeaderListSize(h.app)))
+	// SETTINGS_ENABLE_CONNECT_PROTOCOL (8, RFC 8441)
+	binary.BigEndian.PutUint16(p[30:32], 8)
+	binary.BigEndian.PutUint32(p[32:36], 1)
 	return h.writeFrame(h2Settings, 0, 0, p[:])
 }
 

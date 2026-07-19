@@ -59,10 +59,13 @@ func (c *DefaultCtx) Hijack(handler func(*ResponseConn) error) error {
 	})
 }
 
-// Upgrade switches an HTTP/1.1 connection to another protocol.
+// Upgrade switches an HTTP/1.1 connection to another protocol. Over HTTP/2 it
+// transparently uses an RFC 8441 extended CONNECT tunnel instead (see
+// upgradeH2) when the request negotiated one, so the same handler works
+// unmodified for both HTTP/1.1 and HTTP/2 clients.
 func (c *DefaultCtx) Upgrade(protocol string, handler func(net.Conn) error) error {
 	if c.h2 != nil {
-		return ErrHijackHTTP2
+		return c.upgradeH2(protocol, handler)
 	}
 
 	if c.responded ||
@@ -127,6 +130,39 @@ func (c *DefaultCtx) Upgrade(protocol string, handler func(net.Conn) error) erro
 		Conn:   c.conn,
 		prefix: c.upgradeBuffered,
 	})
+}
+
+// upgradeH2 confirms an RFC 8441 extended CONNECT tunnel and hands the caller
+// a net.Conn backed by the HTTP/2 stream. Unlike the HTTP/1.1 Upgrade above,
+// there is no "101 Switching Protocols" concept in HTTP/2 — a normal 2xx
+// HEADERS response with no END_STREAM is itself the tunnel confirmation
+// (RFC 8441 §5), and the underlying TCP/TLS connection keeps multiplexing
+// other streams independently, so forceClose is not set.
+func (c *DefaultCtx) upgradeH2(protocol string, handler func(net.Conn) error) error {
+	if c.responded || len(protocol) == 0 || handler == nil || c.h2.stream.connectConn == nil ||
+		!strEqFold(s2b(c.h2.stream.protocol), protocol) {
+		return ErrInvalidUpgrade
+	}
+
+	if err := c.runBeforeResponse(); err != nil {
+		return err
+	}
+
+	c.responded = true
+	c.upgraded = true
+
+	if err := c.h2.beginStream(c); err != nil {
+		return err
+	}
+
+	sc := c.h2.stream.connectConn
+	err := handler(sc)
+	// Unlike HTTP/1.1, where returning from an upgraded handler lets the whole
+	// TCP connection get torn down by the caller, an HTTP/2 stream shares its
+	// connection with others still in flight — always end this one stream
+	// (idempotent: a no-op if the handler already closed it).
+	_ = sc.Close()
+	return err
 }
 
 type prefixedConn struct {

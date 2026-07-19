@@ -22,6 +22,7 @@ const (
 	ctxFlagHasExtraResp  = 1 << 3 // headers, cookies, trailers, beforeResponse
 	ctxFlagHEAD          = 1 << 4
 	ctxFlagNon200        = 1 << 5 // status != StatusOK
+	ctxFlagH2Connect     = 1 << 6 // RFC 8441 extended CONNECT stream (c.h2.stream.protocol != "")
 )
 
 var (
@@ -96,6 +97,7 @@ type Ctx interface {
 	Get(name string, defaults ...string) string
 	GetReqHeaders() map[string][]string
 	GetHeaders() map[string][]string
+	ConnectProtocol() string
 	Hostname() string
 	Locals(key string, value ...any) any
 	IP() string
@@ -794,6 +796,19 @@ func (c *DefaultCtx) GetReqHeaders() map[string][]string { return c.Header.GetHe
 
 // GetHeaders is an alias for GetReqHeaders.
 func (c *DefaultCtx) GetHeaders() map[string][]string { return c.GetReqHeaders() }
+
+// ConnectProtocol returns the negotiated protocol for an RFC 8441 extended
+// CONNECT request (the HTTP/2 :protocol pseudo-header, e.g. "websocket").
+// It returns "" for HTTP/1.1 requests and for HTTP/2 requests that are not
+// extended CONNECT — use it to detect HTTP/2 upgrade-eligible requests
+// without relying on the HTTP/1.1-only Connection/Upgrade headers, which
+// HTTP/2 forbids.
+func (c *DefaultCtx) ConnectProtocol() string {
+	if c.flags&ctxFlagH2Connect == 0 || c.h2 == nil {
+		return ""
+	}
+	return c.h2.stream.protocol
+}
 
 // Hostname returns the request host without its port.
 func (c *DefaultCtx) Hostname() string {
