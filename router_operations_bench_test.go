@@ -137,11 +137,16 @@ func BenchmarkRouterOperations(b *testing.B) {
 	})
 
 	b.Run("Register256", func(b *testing.B) {
+		patterns := make([]string, routeCount)
+		for route := range patterns {
+			patterns[route] = fmt.Sprintf("/register-%d/:id", route)
+		}
 		b.ReportAllocs()
+		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			router := NewRouter()
-			for route := 0; route < routeCount; route++ {
-				router.Add("GET", fmt.Sprintf("/register/%d/:id", route), routerBenchmarkHandler)
+			for route := range patterns {
+				router.Add("GET", patterns[route], routerBenchmarkHandler)
 			}
 			router.Freeze()
 		}
