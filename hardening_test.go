@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -143,6 +144,92 @@ func TestSecureByDefaultResponseHeaders(t *testing.T) {
 		if got := c.GetRespHeader(name); got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
+	}
+}
+
+func runTCPApp(t *testing.T, app *App) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = app.Serve(ln) }()
+	t.Cleanup(func() { _ = app.ShutdownWithTimeout(time.Second) })
+	return ln.Addr().String()
+}
+
+func TestResourceGuardRejectsOverInFlightLimit(t *testing.T) {
+	app := New(WithMaxInFlightRequests(1), WithStartupBannerDisabled(true))
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	app.Get("/hold", func(c Ctx) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return c.SendString("ok")
+	})
+	addr := runTCPApp(t, app)
+
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := io.WriteString(client, "GET /hold HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+
+	client2, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client2.Close()
+	if _, err := io.WriteString(client2, "GET /hold HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := io.ReadAll(client2)
+	close(release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(resp, []byte("503")) {
+		t.Fatalf("expected 503 while at in-flight limit, got: %q", resp)
+	}
+}
+
+func TestResourceGuardRejectsOverGoroutineLimit(t *testing.T) {
+	app := New(WithMaxGoroutines(1), WithResourceCheckInterval(time.Nanosecond), WithStartupBannerDisabled(true))
+	app.Get("/ping", func(c Ctx) error { return c.SendString("ok") })
+	addr := runTCPApp(t, app)
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := io.WriteString(client, "GET /ping HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(resp, []byte("503")) {
+		t.Fatalf("expected 503 (runtime always has more than 1 goroutine), got: %q", resp)
+	}
+}
+
+func TestResourceGuardDisabledWithoutConfig(t *testing.T) {
+	app := New()
+	if defaultResourceGuardMiddleware(app.cfg) != nil {
+		t.Fatal("resource guard should be nil when no limits are configured")
+	}
+}
+
+func TestSecureByDefaultEnablesResourceGuard(t *testing.T) {
+	app := New(WithSecureByDefault(true))
+	if defaultResourceGuardMiddleware(app.cfg) == nil {
+		t.Fatal("SecureByDefault should enable the resource guard")
 	}
 }
 

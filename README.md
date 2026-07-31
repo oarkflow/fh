@@ -504,3 +504,12 @@ See [`benchmarks/`](benchmarks/README.md) for cross-framework comparisons agains
 ## Documentation
 
 Full reference documentation is in [`docs/README.md`](docs/README.md), covering configuration, routing, codecs, middleware, the reliability layer, HTTP/2, WebSocket, native features (typed endpoints, OpenAPI, SSE), security, and performance.
+
+## Known Limitations
+
+fh is production-ready for HTTP/1.1, HTTP/2, and WebSocket workloads on a single host or behind a load balancer with sticky/instance-local state. A few gaps to plan around, deliberately left out to preserve the zero-third-party-dependency design rather than half-implemented:
+
+- **No HTTP/3 / QUIC.** Only HTTP/1.1 and HTTP/2 are implemented. Terminate HTTP/3 at an edge proxy (e.g. a CDN) in front of fh if you need it.
+- **No OpenTelemetry (OTLP) export.** `mw/tracing` propagates/parses `traceparent` headers and `mw/metrics` exposes a hand-rolled Prometheus text endpoint, but neither ships an OTLP exporter to a collector (Grafana Tempo/Datadog/etc.). Bridge these yourself, or scrape the Prometheus endpoint and configure trace propagation compatible with your existing collector.
+- **In-memory-only distributed backends.** `mw/ratelimiter`, `mw/slidingwindow`, `mw/ipthrottle`, `mw/ipreputation`, `mw/timestamp`, `mw/cache`, `mw/session`, and `pkg/cluster` each define a pluggable `Store` interface but ship only a `MemoryStore`/in-process implementation. Behind multiple instances of fh, rate limits, caches, sessions, and replay protection are enforced per-instance, not globally — implement the relevant `Store` interface against your own shared backend (Redis, SQL, Consul, etc.) if you need cluster-wide consistency.
+- **No gRPC or GraphQL protocol handlers.** Only MIME-type constants exist for GraphQL; there's no built-in gRPC server. Both are addressable via a reverse-proxy route (`mw/proxy`) to a dedicated service if needed.

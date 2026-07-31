@@ -96,6 +96,22 @@ type Config struct {
 	// socket peer. It is enforced before TLS handshakes and HTTP parsing. Zero
 	// disables the per-peer limit; SecureByDefault caps it at 100.
 	MaxConnectionsPerIP int
+	// MaxInFlightRequests caps requests concurrently executing in handlers across
+	// the whole server. Zero disables the check. SecureByDefault sets a bound so
+	// a burst of slow/expensive requests cannot exhaust goroutines/memory before
+	// application-level rate limiting is installed.
+	MaxInFlightRequests int64
+	// MaxGoroutines rejects new requests once runtime.NumGoroutine() (sampled at
+	// ResourceCheckInterval) exceeds this bound. Zero disables the check.
+	// SecureByDefault sets a bound as defense-in-depth against slowloris-style
+	// goroutine exhaustion beyond what connection/timeout limits catch.
+	MaxGoroutines int
+	// MaxHeapBytes rejects new requests once sampled heap allocation exceeds this
+	// bound. Zero disables the check. SecureByDefault sets a bound.
+	MaxHeapBytes uint64
+	// ResourceCheckInterval controls how often goroutine/heap stats are resampled
+	// for MaxGoroutines/MaxHeapBytes. Defaults to 250ms.
+	ResourceCheckInterval time.Duration
 	// DisablePanicRecovery removes the application-level panic recovery defer from
 	// every request. It is useful for trusted benchmark/edge deployments that use
 	// process supervision or explicit recover middleware. Leave false for robust
@@ -162,22 +178,23 @@ type Config struct {
 }
 
 var defaultConfig = Config{
-	ReadTimeout:          10 * time.Second,
-	WriteTimeout:         30 * time.Second,
-	IdleTimeout:          120 * time.Second,
-	ReadHeaderTimeout:    5 * time.Second,
-	RequestBodyTimeout:   10 * time.Second,
-	ReadBufferSize:       16384,
-	MaxRequestBodySize:   4 << 20,
-	MaxHeaderListSize:    64 << 10,
-	MaxHeaderCount:       64,
-	MaxRequestLineSize:   8 << 10,
-	MaxConcurrentStreams: 128,
-	MaxConnections:       10_000,
-	TLSHandshakeTimeout:  10 * time.Second,
-	HTTP2IdleTimeout:     120 * time.Second,
-	Environment:          EnvProduction,
-	ErrorOptions:         ErrorOptions{Environment: EnvProduction},
+	ReadTimeout:           10 * time.Second,
+	WriteTimeout:          30 * time.Second,
+	IdleTimeout:           120 * time.Second,
+	ReadHeaderTimeout:     5 * time.Second,
+	RequestBodyTimeout:    10 * time.Second,
+	ReadBufferSize:        16384,
+	MaxRequestBodySize:    4 << 20,
+	MaxHeaderListSize:     64 << 10,
+	MaxHeaderCount:        64,
+	MaxRequestLineSize:    8 << 10,
+	MaxConcurrentStreams:  128,
+	MaxConnections:        10_000,
+	TLSHandshakeTimeout:   10 * time.Second,
+	HTTP2IdleTimeout:      120 * time.Second,
+	Environment:           EnvProduction,
+	ErrorOptions:          ErrorOptions{Environment: EnvProduction},
+	ResourceCheckInterval: 250 * time.Millisecond,
 }
 
 const maxServerHeaderCount = 1024
@@ -217,6 +234,18 @@ func WithMaxConnections(n int) Option {
 }
 func WithMaxConnectionsPerIP(n int) Option {
 	return func(c *Config) { c.MaxConnectionsPerIP = n }
+}
+func WithMaxInFlightRequests(n int64) Option {
+	return func(c *Config) { c.MaxInFlightRequests = n }
+}
+func WithMaxGoroutines(n int) Option {
+	return func(c *Config) { c.MaxGoroutines = n }
+}
+func WithMaxHeapBytes(n uint64) Option {
+	return func(c *Config) { c.MaxHeapBytes = n }
+}
+func WithResourceCheckInterval(d time.Duration) Option {
+	return func(c *Config) { c.ResourceCheckInterval = d }
 }
 func WithReadBufferSize(n int) Option {
 	return func(c *Config) { c.ReadBufferSize = n }
@@ -483,6 +512,9 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.RequestBodyTimeout <= 0 {
 		cfg.RequestBodyTimeout = defaultConfig.RequestBodyTimeout
 	}
+	if cfg.ResourceCheckInterval <= 0 && (cfg.MaxGoroutines > 0 || cfg.MaxHeapBytes > 0) {
+		cfg.ResourceCheckInterval = defaultConfig.ResourceCheckInterval
+	}
 }
 
 // buildApp constructs an *App from a fully resolved Config. It applies default
@@ -563,6 +595,10 @@ func buildApp(cfg Config) *App {
 
 	if hm := defaultHardeningMiddleware(cfg); hm != nil {
 		app.middleware = append([]HandlerFunc{hm}, app.middleware...)
+	}
+
+	if rg := defaultResourceGuardMiddleware(cfg); rg != nil {
+		app.middleware = append([]HandlerFunc{rg}, app.middleware...)
 	}
 
 	if !cfg.DisablePanicRecovery {

@@ -112,6 +112,9 @@ type SafeConfig struct {
 	HTTP2IdleTimeout      string            `json:"http2_idle_timeout,omitempty"`
 	MaxConnections        int               `json:"max_connections"`
 	MaxConnectionsPerIP   int               `json:"max_connections_per_ip"`
+	MaxInFlightRequests   int64             `json:"max_in_flight_requests"`
+	MaxGoroutines         int               `json:"max_goroutines"`
+	MaxHeapBytes          uint64            `json:"max_heap_bytes"`
 	H2CEnabled            bool              `json:"h2c_enabled"`
 	MaxRequestBodySize    int               `json:"max_request_body_size"`
 	MaxHeaderListSize     int               `json:"max_header_list_size"`
@@ -307,6 +310,21 @@ func applySecureDefaults(cfg *Config) {
 	if cfg.HTTP2IdleTimeout <= 0 || cfg.HTTP2IdleTimeout > 60*time.Second {
 		cfg.HTTP2IdleTimeout = 60 * time.Second
 	}
+
+	// Defense-in-depth against slowloris-style goroutine/heap exhaustion and
+	// sudden request bursts, beyond what connection counts and timeouts catch.
+	if cfg.MaxInFlightRequests <= 0 || cfg.MaxInFlightRequests > 5000 {
+		cfg.MaxInFlightRequests = 5000
+	}
+	if cfg.MaxGoroutines <= 0 || cfg.MaxGoroutines > 20_000 {
+		cfg.MaxGoroutines = 20_000
+	}
+	if cfg.MaxHeapBytes <= 0 || cfg.MaxHeapBytes > 1<<30 {
+		cfg.MaxHeapBytes = 1 << 30
+	}
+	if cfg.ResourceCheckInterval <= 0 || cfg.ResourceCheckInterval > time.Second {
+		cfg.ResourceCheckInterval = 250 * time.Millisecond
+	}
 }
 
 func (a *App) SafeConfig() SafeConfig {
@@ -325,6 +343,9 @@ func (a *App) SafeConfig() SafeConfig {
 		HTTP2IdleTimeout:      a.cfg.HTTP2IdleTimeout.String(),
 		MaxConnections:        a.cfg.MaxConnections,
 		MaxConnectionsPerIP:   a.cfg.MaxConnectionsPerIP,
+		MaxInFlightRequests:   a.cfg.MaxInFlightRequests,
+		MaxGoroutines:         a.cfg.MaxGoroutines,
+		MaxHeapBytes:          a.cfg.MaxHeapBytes,
 		H2CEnabled:            !a.cfg.DisableHTTP2 && !a.cfg.DisableH2C,
 		MaxRequestBodySize:    a.cfg.MaxRequestBodySize,
 		MaxHeaderListSize:     a.cfg.MaxHeaderListSize,
@@ -400,6 +421,9 @@ func (a *App) ValidateSecurity() []SecurityFinding {
 	}
 	if prod && a.cfg.MaxRequestBodySize <= 0 {
 		f = append(f, SecurityFinding{"critical", "BODY_LIMIT_MISSING", "MaxRequestBodySize is not enforced", "set Config.MaxRequestBodySize", ""})
+	}
+	if prod && a.cfg.MaxInFlightRequests <= 0 && a.cfg.MaxGoroutines <= 0 && a.cfg.MaxHeapBytes <= 0 {
+		f = append(f, SecurityFinding{"high", "RESOURCE_GUARD_MISSING", "no in-flight/goroutine/heap ceiling is enforced; slow or bursty requests can exhaust the process before connection limits engage", "set Config.MaxInFlightRequests/MaxGoroutines/MaxHeapBytes, or enable Config.SecureByDefault", ""})
 	}
 	if prod && !a.cfg.Redaction.Enabled {
 		f = append(f, SecurityFinding{"high", "REDACTION_DISABLED", "redaction is disabled", "enable Config.Redaction", ""})

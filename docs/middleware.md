@@ -94,6 +94,26 @@ app.Use(apiversion.New(apiversion.Config{
 | `Deprecated` | If true, adds `Sunset` and `Deprecation` headers |
 | `Sunset` | Sunset date for deprecated versions |
 
+### auditlog
+
+Records security-relevant events (auth failures, CSRF blocks, rate limits, injection attempts, etc.) to one or more pluggable sinks as structured `AuditEntry` records.
+
+```go
+import "github.com/oarkflow/fh/mw/auditlog"
+
+app.Use(auditlog.New(auditlog.Config{
+    Sinks:       []auditlog.Sink{auditlog.NewBufferSink(1000)},
+    MinSeverity: auditlog.SeverityWarning,
+}))
+```
+
+| Config | Description |
+|--------|-------------|
+| `Sinks` | Destinations implementing `Sink.Write(AuditEntry)` (e.g. `NewBufferSink`, or a custom sink to ship to SIEM/log storage) |
+| `MinSeverity` | Minimum severity to record (`info`, `warning`, `critical`) |
+| `CaptureHeaders` | Request headers to include in each entry |
+| `Skip` | Predicate to bypass logging for a request |
+
 ### basicauth
 
 HTTP Basic Authentication with memory, CSV, or JSON user storage.
@@ -287,6 +307,59 @@ app.Use(idempotency.New(idempotency.Config{
 }))
 ```
 
+### ipreputation
+
+Tracks a decaying reputation score per client IP and blocks/flags clients that cross suspicious or block thresholds. Returns a cleanup function alongside the handler for the background decay loop.
+
+```go
+import "github.com/oarkflow/fh/mw/ipreputation"
+
+reputation, stop := ipreputation.New(ipreputation.Config{
+    Store:               ipreputation.NewMemoryStore(10000),
+    BlockThreshold:      80,
+    SuspiciousThreshold: 40,
+    DecayRate:           0.1,
+    BlockDuration:       15 * time.Minute,
+})
+defer stop()
+
+app.Use(reputation)
+```
+
+| Config | Description |
+|--------|-------------|
+| `Store` | Backing store implementing `ReputationStore` (default: `NewMemoryStore`) |
+| `BlockThreshold` / `SuspiciousThreshold` | Score thresholds triggering `OnBlocked` / `OnSuspicious` |
+| `DecayRate` | Rate at which scores decay back toward zero over time |
+| `BlockDuration` | How long a client stays blocked once it crosses `BlockThreshold` |
+| `Whitelist` / `Blacklist` | Static IP/CIDR overrides |
+| `KeyFunc` | Custom client-identity extractor (default: remote IP) |
+
+### ipthrottle
+
+Sliding-window request throttling per IP, with an optional global cap across all clients.
+
+```go
+import "github.com/oarkflow/fh/mw/ipthrottle"
+
+app.Use(ipthrottle.New(ipthrottle.Config{
+    MaxPerIP:  100,
+    GlobalMax: 5000,
+    Window:    time.Minute,
+}))
+```
+
+| Config | Description |
+|--------|-------------|
+| `MaxPerIP` | Max requests per IP within `Window` |
+| `GlobalMax` | Max requests across all IPs within `Window` (0 disables) |
+| `MaxIPs` | Cap on tracked IP entries, to bound memory |
+| `Window` | Sliding window duration |
+| `KeyFunc` | Custom client-identity extractor (default: remote IP) |
+| `Reject` | Custom rejection handler |
+
+This is an in-memory, single-instance limiter — deploy behind a shared external store if you need limits enforced consistently across multiple server instances.
+
 ### ipwhitelist
 
 IP/CIDR allowlist and blocklist enforcement.
@@ -319,6 +392,18 @@ app.Use(lifecycle.New(lifecycle.Config{
     },
 }))
 ```
+
+### loadshed
+
+Rejects new requests once in-flight concurrency (or configured latency/error thresholds) exceeds capacity, protecting tail latency during overload.
+
+```go
+import "github.com/oarkflow/fh/mw/loadshed"
+
+app.Use(loadshed.New(loadshed.Config{MaxInFlight: 10000}))
+```
+
+Run it early in the chain, before expensive middleware and handlers, so shed requests never reach costly work. Return `Retry-After` and monitor shed counts by route/tenant; combine with `adaptiveconcurrency` and `backpressure` for full overload protection. See `mw/loadshed/README.md` for details.
 
 ### logger
 
@@ -592,6 +677,28 @@ skip.All(pred1, pred2)         // AND
 skip.Not(pred)                 // NOT
 ```
 
+### slowloris
+
+Guards against goroutine and heap exhaustion (e.g. from Slowloris-style connection-holding attacks) by periodically sampling runtime stats and rejecting requests once configured thresholds are exceeded.
+
+```go
+import "github.com/oarkflow/fh/mw/slowloris"
+
+app.Use(slowloris.New(slowloris.Config{
+    MaxGoroutines:  50000,
+    MaxHeapBytes:   2 << 30, // 2 GiB
+    SampleInterval: time.Second,
+}))
+```
+
+| Config | Description |
+|--------|-------------|
+| `MaxGoroutines` | Reject new requests once goroutine count exceeds this |
+| `MaxHeapBytes` | Reject new requests once heap usage exceeds this |
+| `SampleInterval` | How often runtime stats are resampled |
+| `Reject` | Custom rejection handler (default: `503`) |
+| `Skip` | Predicate to bypass the check for a request |
+
 ### static
 
 Enhanced static file serving with safety controls.
@@ -623,6 +730,37 @@ app.Use(timeout.New(timeout.Config{
     },
 }))
 ```
+
+### timestamp
+
+Anti-replay protection via a signed timestamp (and optional nonce) header, rejecting requests outside an allowed clock-skew window or with a reused nonce. Returns a cleanup function alongside the handler for the nonce store's background eviction.
+
+```go
+import "github.com/oarkflow/fh/mw/timestamp"
+
+replayGuard, stop := timestamp.New(timestamp.Config{
+    Header:       "X-Timestamp",
+    NonceHeader:  "X-Nonce",
+    MaxSkew:      5 * time.Minute,
+    RequireNonce: true,
+    Store:        timestamp.NewMemoryStore(10000),
+})
+defer stop()
+
+app.Use(replayGuard)
+```
+
+| Config | Description |
+|--------|-------------|
+| `Header` / `NonceHeader` | Header names carrying the timestamp and nonce |
+| `MaxSkew` | Maximum allowed difference between the header timestamp and server time |
+| `MaxSize` / `MaxNonceLength` | Bounds on the timestamp/nonce values to reject malformed input |
+| `Store` | Backing store implementing `ReplayStore` (default: `NewMemoryStore`) |
+| `Required` / `RequireNonce` | Whether the timestamp/nonce header must be present |
+| `KeyFunc` | Custom client-identity extractor for nonce scoping |
+| `Reject` | Custom rejection handler |
+
+This is an in-memory, single-instance nonce store — deploy behind a shared external store if you need replay protection enforced consistently across multiple server instances.
 
 ### workflow
 
@@ -670,7 +808,7 @@ app.Use(
 
 ## Full Package Index
 
-Packages detailed above: `actor`, `apikey`, `apiversion`, `basicauth`, `bodylimit`, `cache`, `circuitbreaker`, `compress`, `contract`, `correlationid`, `cors`, `csrf`, `earlydata`, `idempotency`, `ipwhitelist`, `lifecycle`, `logger`, `metrics`, `policy`, `proxy`, `ratelimiter`, `recover`, `reliability`, `replay`, `requestid`, `rewrite`, `security`, `session`, `signature`, `skip`, `static`, `timeout`, `workflow`.
+Packages detailed above: `actor`, `apikey`, `apiversion`, `auditlog`, `basicauth`, `bodylimit`, `cache`, `circuitbreaker`, `compress`, `contract`, `correlationid`, `cors`, `csrf`, `earlydata`, `idempotency`, `ipreputation`, `ipthrottle`, `ipwhitelist`, `lifecycle`, `loadshed`, `logger`, `metrics`, `policy`, `proxy`, `ratelimiter`, `recover`, `reliability`, `replay`, `requestid`, `rewrite`, `security`, `session`, `signature`, `skip`, `slowloris`, `static`, `timeout`, `timestamp`, `workflow`.
 
 Remaining packages — see `mw/<package>/README.md` for full usage:
 

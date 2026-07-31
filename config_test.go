@@ -97,6 +97,9 @@ func TestSecureByDefaultResolvesFailClosedBaseline(t *testing.T) {
 	if app.cfg.MaxRequestBodySize != 4<<20 || app.cfg.MaxHeaderListSize != 32<<10 || app.cfg.MaxHeaderCount != 64 || app.cfg.MaxRequestLineSize != 8<<10 || app.cfg.MaxConcurrentStreams != 128 {
 		t.Fatalf("input limits were not bounded: %#v", app.cfg)
 	}
+	if app.cfg.MaxInFlightRequests != 5000 || app.cfg.MaxGoroutines != 20_000 || app.cfg.MaxHeapBytes != 1<<30 || app.cfg.ResourceCheckInterval != 250*time.Millisecond {
+		t.Fatalf("resource guard was not bounded: %#v", app.cfg)
+	}
 	if !app.cfg.Redaction.Enabled {
 		t.Fatal("secure baseline did not enable redaction")
 	}
@@ -104,17 +107,24 @@ func TestSecureByDefaultResolvesFailClosedBaseline(t *testing.T) {
 
 func TestSecureByDefaultPreservesStricterLimits(t *testing.T) {
 	app := NewWithConfig(Config{
-		SecureByDefault:     true,
-		MaxRequestBodySize:  1024,
-		MaxHeaderListSize:   2048,
-		MaxHeaderCount:      12,
-		MaxRequestLineSize:  1024,
-		ReadBufferSize:      4096,
-		MaxConnections:      100,
-		MaxConnectionsPerIP: 10,
-		ReadTimeout:         time.Second,
+		SecureByDefault:       true,
+		MaxRequestBodySize:    1024,
+		MaxHeaderListSize:     2048,
+		MaxHeaderCount:        12,
+		MaxRequestLineSize:    1024,
+		ReadBufferSize:        4096,
+		MaxConnections:        100,
+		MaxConnectionsPerIP:   10,
+		ReadTimeout:           time.Second,
+		MaxInFlightRequests:   50,
+		MaxGoroutines:         500,
+		MaxHeapBytes:          1 << 20,
+		ResourceCheckInterval: 10 * time.Millisecond,
 	})
 	if app.cfg.MaxRequestBodySize != 1024 || app.cfg.MaxHeaderListSize != 2048 || app.cfg.MaxHeaderCount != 12 || app.cfg.MaxRequestLineSize != 1024 || app.cfg.ReadBufferSize != 4096 || app.cfg.MaxConnections != 100 || app.cfg.MaxConnectionsPerIP != 10 || app.cfg.ReadTimeout != time.Second {
 		t.Fatalf("stricter caller limits were changed: %#v", app.cfg)
+	}
+	if app.cfg.MaxInFlightRequests != 50 || app.cfg.MaxGoroutines != 500 || app.cfg.MaxHeapBytes != 1<<20 || app.cfg.ResourceCheckInterval != 10*time.Millisecond {
+		t.Fatalf("stricter resource guard limits were changed: %#v", app.cfg)
 	}
 }

@@ -17,6 +17,20 @@ headers. Stricter caller-supplied limits are preserved. Configuration loaded
 through `pkg/config` accepts `server.secure_by_default` or
 `FH_SECURE_BY_DEFAULT=true`.
 
+It also installs an in-process resource guard (`MaxInFlightRequests`,
+`MaxGoroutines`, `MaxHeapBytes`) as defense-in-depth against slowloris-style
+goroutine/heap exhaustion and sudden request bursts — attack patterns that
+hold connections open within every configured timeout while still driving
+resource usage up through many such connections or expensive handlers.
+Requests are rejected with `503 Service Unavailable` once a bound is
+crossed. Configure explicit values with `WithMaxInFlightRequests`,
+`WithMaxGoroutines`, `WithMaxHeapBytes`, and `WithResourceCheckInterval`;
+`SecureByDefault` sets a bound (5000 in-flight requests, 20,000 goroutines,
+1GiB heap) when the caller has not set a stricter one. This complements,
+rather than replaces, `mw/loadshed` and `mw/backpressure` for
+application-tunable shedding policy (custom `Retry-After`, per-route/tenant
+metrics, etc.).
+
 Authentication, authorization, CORS, CSRF, trusted-host/proxy, rate-limit, and
 application input-schema policies remain explicit middleware because safe
 values depend on the deployment. Serve public traffic with `ServeTLS` or TLS at

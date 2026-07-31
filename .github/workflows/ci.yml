@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build, vet, test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Test (race detector)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test ./... -race -count=1
+
+  fuzz:
+    name: Fuzz smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Run fuzz targets briefly
+        run: |
+          for fn in $(grep -rhoE '^func (Fuzz[A-Za-z0-9_]+)' --include='*_test.go' . | awk '{print $2}'); do
+            pkg=$(grep -rl "func $fn(" --include='*_test.go' . | head -n1 | xargs dirname)
+            echo "Fuzzing $fn in $pkg for 20s"
+            go test "$pkg" -run='^$' -fuzz="^${fn}\$" -fuzztime=20s
+          done
+
+  kernel-test:
+    name: Kernel-assisted transport tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Kernel tests
+        run: CGO_ENABLED=0 go test ./kernel . -run 'TestKernel|TestIOUring|TestPortKey|TestNormalizeKernel' -count=1
