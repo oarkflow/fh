@@ -17,9 +17,10 @@ func TestConfiguredMaxKeysIsHonored(t *testing.T) {
 		l.Allow(fmt.Sprintf("key-%d", i))
 	}
 
-	l.mu.Lock()
-	size := len(l.windows)
-	l.mu.Unlock()
+	size, err := l.Len()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if size > maxKeys {
 		t.Fatalf("expected window map bounded at %d entries (configured MaxKeys), got %d", maxKeys, size)
@@ -52,13 +53,17 @@ func TestAllowEnforcesRateAcrossManyRequests(t *testing.T) {
 // TestDefaultMaxKeysStillAppliesWhenUnset proves the zero-value/default
 // case (no explicit MaxKeys) still falls back to a sane bound.
 func TestDefaultMaxKeysStillAppliesWhenUnset(t *testing.T) {
-	l := &Limiter{windows: make(map[string]*window), windowSize: time.Minute, rate: 5}
+	// No MaxKeys given: NewLimiter must fall back to DefaultConfig's 65536
+	// bound rather than leaving cardinality unbounded, exercised here (as
+	// before) through a count of distinct keys well under that bound.
+	l := NewLimiter(Config{Rate: 5, Window: time.Minute, CleanupInterval: time.Hour})
 	for i := 0; i < 200; i++ {
 		l.Allow(fmt.Sprintf("key-%d", i))
 	}
-	l.mu.Lock()
-	size := len(l.windows)
-	l.mu.Unlock()
+	size, err := l.Len()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if size != 200 {
 		t.Fatalf("expected all 200 distinct keys tracked (well under default bound), got %d", size)
 	}

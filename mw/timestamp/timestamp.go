@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 type Config struct {
@@ -139,9 +140,18 @@ func normalize(cfg Config) Config {
 	return cfg
 }
 
+// seenMarker is the placeholder value written for a replay marker; only its
+// presence and TTL matter, never its content.
+var seenMarker = []byte{1}
+
+// MemoryStore is an in-process ReplayStore. It is a thin adapter over
+// kv.MemoryStore for the actual map/TTL/expiry mechanics; MemoryStore itself
+// only adds the "reject when at capacity rather than evict a live marker"
+// policy that kv.Store's generic capacity handling does not provide (see
+// package doc note in file_store.go for details on that gap).
 type MemoryStore struct {
 	mu      sync.Mutex
-	m       map[string]time.Time
+	store   *kv.MemoryStore
 	maxSize int
 }
 
@@ -149,39 +159,46 @@ func NewMemoryStore(maxSize int) *MemoryStore {
 	if maxSize <= 0 {
 		maxSize = 100000
 	}
-	return &MemoryStore{m: make(map[string]time.Time, maxSize/4), maxSize: maxSize}
+	// A single shard mirrors the original design's single mutex-guarded map:
+	// MemoryStore serializes all access itself (see Seen below), so there is
+	// no concurrency benefit to sharding here, and a single shard keeps
+	// capacity accounting exact rather than spread unevenly across shards.
+	return &MemoryStore{
+		store:   kv.NewMemoryStore(kv.WithShardCount(1)),
+		maxSize: maxSize,
+	}
 }
 
 func (s *MemoryStore) Seen(key string, ttl time.Duration) (bool, error) {
-	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if exp, ok := s.m[key]; ok && exp.After(now) {
+
+	_, exists, err := s.store.Get(key)
+	if err != nil {
+		return false, err
+	}
+	if exists {
 		return true, nil
 	}
 
-	if len(s.m) >= s.maxSize {
-		s.evictExpired(now)
-		if len(s.m) >= s.maxSize {
-			return false, ErrReplayStoreFull
-		}
+	// Len() sweeps expired entries as a side effect, mirroring the original
+	// evictExpired-then-recheck sequence.
+	n, err := s.store.Len()
+	if err != nil {
+		return false, err
+	}
+	if n >= s.maxSize {
+		return false, ErrReplayStoreFull
 	}
 
-	s.m[key] = now.Add(ttl)
+	if err := s.store.Set(key, seenMarker, ttl); err != nil {
+		return false, err
+	}
 	return false, nil
 }
 
 func (s *MemoryStore) cleanup() {
-	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.evictExpired(now)
-}
-
-func (s *MemoryStore) evictExpired(now time.Time) {
-	for k, exp := range s.m {
-		if exp.Before(now) {
-			delete(s.m, k)
-		}
-	}
+	_, _ = s.store.Len()
 }

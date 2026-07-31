@@ -36,3 +36,7 @@ Run after request ID/real IP/tracing and before authorization, rate limits that 
 
 Store only hashed API keys. Support rotation, expiration, scopes, tenant binding, and audit logs. Avoid putting keys in query strings because they leak into logs and proxies.
 
+## Persistent storage
+
+`NewMemoryStore` remains the default in-memory `Store`. For a registry that survives restarts, use `apikey.NewFileStore(dir, reloadInterval)`, which persists the full key list (a `[]KeyRecord`) through a `kv.FileStore` rooted at `dir`, atomically, under a single fixed key. Call `SaveRegistry(records)` to update the registry programmatically (atomic write, and the in-memory snapshot updates immediately); with `reloadInterval > 0` a background goroutine also polls the same entry on that interval, so a registry updated by another process sharing `dir` is picked up without a restart. Call `StopWatch()` to stop polling and release the store. If the registry is missing or malformed at construction the call returns an error, and if it becomes malformed during a later poll the last-good snapshot keeps serving lookups.
+

@@ -101,6 +101,12 @@ The default memory stores are useful for tests and single-process development. P
 
 If a browser keeps a device identity but the server loses its `DeviceStore` state, the next session creation fails authentication. The WASM client treats a 401/403 from `/session` as a recoverable stale-device signal, clears the stored browser device, re-registers, and retries once. Production systems should still persist the device store so device identity survives normal deploys.
 
+### File-Backed Stores
+
+`file_store.go` provides file-backed alternatives that persist across restarts, for operators who want durability without a third-party database: `NewFileDeviceStore(dir)`, `NewFileSessionStore(dir, gcInterval)`, and `NewFileReplayStore(dir, maxEntries)`. Memory stores remain the default for `Install`/tests; you must opt in explicitly by constructing and wiring one of these into `Config`. Each store creates its directory with mode `0700` and writes files with mode `0600` using atomic write-temp-then-rename, matching the convention used by `mw/session`'s file store.
+
+`FileSessionStore` persists session records that include the live symmetric transport keys (`Session.Keys`). It applies the same file permission discipline as the in-memory store's key-zeroing, but be aware of a real limitation: unlike the in-memory store, deleted key material may remain recoverable from disk/backups/journaling filesystems until overwritten by other data — there is no portable, dependency-free way to securely erase already-written disk blocks on delete. Encrypt the storage volume at rest if this matters for your threat model.
+
 ## Handler Helpers
 
 ```go

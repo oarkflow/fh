@@ -9,10 +9,10 @@ import (
 	"hash"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 type SecretFunc func(fh.Ctx) ([]byte, error)
@@ -129,32 +129,42 @@ func Verify(c fh.Ctx, cfg Config) error {
 	}
 	return nil
 }
+
+// replayMarker is the placeholder value written for a replay marker; only
+// its presence and TTL matter, never its content.
+var replayMarker = []byte{1}
+
 // memoryReplayStore is the default ReplayStore used when Config.Replay is
 // unset. It is process-local; deployments running multiple instances behind
 // a load balancer should supply a shared store (e.g. Redis-backed) instead.
+//
+// It is a thin adapter over kv.MemoryStore, which supplies the actual
+// map/TTL/expiry mechanics; the check-then-record happens atomically via
+// kv.Store.Mutate.
 type memoryReplayStore struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
+	store *kv.MemoryStore
 }
 
 func newMemoryReplayStore() *memoryReplayStore {
-	return &memoryReplayStore{seen: map[string]time.Time{}}
+	return &memoryReplayStore{store: kv.NewMemoryStore()}
 }
 
 func (s *memoryReplayStore) Seen(key string, ttl time.Duration) bool {
-	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for k, exp := range s.seen {
-		if exp.Before(now) {
-			delete(s.seen, k)
+	var seen bool
+	err := s.store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		if exists {
+			seen = true
+			return nil, 0, false, nil
 		}
-	}
-	if exp, ok := s.seen[key]; ok && exp.After(now) {
+		seen = false
+		return replayMarker, ttl, true, nil
+	})
+	if err != nil {
+		// Fail safe: treat any storage error as "already seen" so a
+		// malfunctioning store rejects rather than silently allows a replay.
 		return true
 	}
-	s.seen[key] = now.Add(ttl)
-	return false
+	return seen
 }
 
 func algo(a string) (func() hash.Hash, bool) {

@@ -16,29 +16,62 @@
 package slidingwindow
 
 import (
+	"encoding/json"
 	"math"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
-// Limiter is a sliding window rate limiter.
-type Limiter struct {
-	mu         sync.Mutex
-	windows    map[string]*window
+// Store holds per-key sliding window state for the rate limiter and decides
+// whether a request for key is allowed right now. Rate, burst and window
+// size are configured once when the Store is constructed (they are
+// properties of a single limiter instance, not per-call parameters), so
+// Allow only needs the key.
+//
+// Returns (allowed, remaining, retryAfter) with the same semantics as the
+// former Limiter.Allow: remaining is the number of requests still permitted
+// in the current window when allowed is true (0 otherwise), and retryAfter
+// is how long the caller should wait before retrying when allowed is false.
+type Store interface {
+	Allow(key string) (allowed bool, remaining int, retryAfter time.Duration)
+}
+
+// windowState is the JSON-encoded value held per key inside the underlying
+// kv.Store: the sorted, already-trimmed timestamps of requests still inside
+// the sliding window as of the last Allow call for that key.
+type windowState struct {
+	Timestamps []time.Time `json:"timestamps"`
+}
+
+// MemoryStore is the default Store: a thin adapter over kv.MemoryStore, the
+// shared in-process map+shard+mutex primitive used by every middleware
+// package in this module. Per-key sliding-window state (the compacting log
+// of in-window request timestamps) is JSON-encoded and mutated race-free via
+// kv.Store.Mutate, reproducing the exact admission decision (rate, burst,
+// retry-after) this package has always computed. Key cardinality (MaxKeys)
+// and idle-key cleanup (CleanupInterval) are delegated to kv.MemoryStore's
+// own WithMaxEntries/WithGCInterval options rather than reimplemented here.
+//
+// Limiter is kept as an alias so existing callers of NewLimiter keep
+// compiling unchanged. Because state now lives inside the wrapped
+// kv.MemoryStore rather than as directly-addressable unexported fields, code
+// that used to construct a Limiter/MemoryStore as a struct literal or reach
+// into l.mu/l.windows can no longer do so; see slidingwindow_test.go, which
+// was updated to go through the public New/Allow/Len API instead.
+type MemoryStore struct {
+	store      *kv.MemoryStore
 	windowSize time.Duration
 	rate       int
 	burst      int
 	maxKeys    int
 }
 
-type window struct {
-	timestamps []time.Time
-	head       int
-	count      int
-}
+// Limiter is the historical name for MemoryStore, preserved for backward
+// compatibility.
+type Limiter = MemoryStore
 
 // Config holds configuration for the sliding window rate limiter.
 type Config struct {
@@ -72,6 +105,13 @@ type Config struct {
 
 	// OnLimitReached is called when a request is rate-limited.
 	OnLimitReached func(ctx fh.Ctx, key string, remaining int)
+
+	// Store holds per-key sliding window state. Defaults to a new
+	// MemoryStore built from this Config (i.e. NewLimiter(cfg)), which
+	// reproduces the exact behavior this package has always had. Set Store
+	// to a FileStore (see file_store.go) to persist window state across
+	// restarts.
+	Store Store
 }
 
 // DefaultConfig returns the default configuration.
@@ -107,126 +147,127 @@ func NewLimiter(config ...Config) *Limiter {
 		}
 	}
 
-	l := &Limiter{
-		windows:    make(map[string]*window, cfg.MaxKeys),
+	l := &MemoryStore{
+		// A single shard (rather than kv.MemoryStore's default 16) is
+		// deliberate: WithMaxEntries splits its cap evenly across shards, so
+		// a small, user-configured MaxKeys (as in this package's tests, e.g.
+		// 10) would round down to a fractional per-shard cap and let the
+		// aggregate size overshoot the configured bound across shards. One
+		// shard makes the cap exact, matching the single-mutex, exact-bound
+		// behavior this package had before this retrofit; the trade-off is
+		// giving up kv.MemoryStore's per-shard lock concurrency, which the
+		// pre-retrofit implementation never had anyway (it used one mutex
+		// for everything).
+		store: kv.NewMemoryStore(
+			kv.WithShardCount(1),
+			kv.WithMaxEntries(cfg.MaxKeys),
+			kv.WithGCInterval(cfg.CleanupInterval),
+		),
 		windowSize: cfg.Window,
 		rate:       cfg.Rate,
 		burst:      cfg.Burst,
 		maxKeys:    cfg.MaxKeys,
 	}
 
-	go l.cleanup(cfg.CleanupInterval, cfg.MaxKeys)
-
 	return l
 }
 
 // Allow checks if a request with the given key is allowed.
 // Returns (allowed, remaining, retryAfter).
-func (l *Limiter) Allow(key string) (bool, int, time.Duration) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	now := time.Now()
-	w, exists := l.windows[key]
-	if !exists {
-		maxKeys := l.maxKeys
-		if maxKeys <= 0 {
-			maxKeys = 65536
-		}
-		if len(l.windows) >= maxKeys {
-			l.evictOldest()
-		}
-		w = &window{
-			timestamps: make([]time.Time, 0, l.rate*2),
-		}
-		l.windows[key] = w
-	}
-
-	// Expire old timestamps outside the window.
-	cutoff := now.Add(-l.windowSize)
-	for w.head < w.count && w.timestamps[w.head].Before(cutoff) {
-		w.head++
-	}
-
-	currentCount := w.count - w.head
-	remaining := l.rate - currentCount
-
-	if remaining <= 0 {
-		// Calculate retry-after from oldest request in window.
-		var retryAfter time.Duration
-		if w.head < w.count {
-			oldest := w.timestamps[w.head]
-			retryAfter = l.windowSize - now.Sub(oldest)
-			if retryAfter < 0 {
-				retryAfter = 0
-			}
-		}
-		return false, 0, retryAfter
-	}
-
-	// Allow burst above rate.
-	if currentCount >= l.rate+l.burst {
+func (l *MemoryStore) Allow(key string) (bool, int, time.Duration) {
+	allowed, remaining, retryAfter, err := allowViaStore(l.store, key, l.rate, l.burst, l.windowSize)
+	if err != nil {
+		// kv.Store.Mutate only errors on ErrClosed or a marshal failure,
+		// neither of which the Store.Allow signature (no error return) can
+		// surface; fail closed rather than silently letting the request
+		// through.
 		return false, 0, 0
 	}
-
-	// Add new timestamp.
-	if w.count == len(w.timestamps) {
-		// Compact: shift timestamps to front, reclaiming space freed by
-		// expiry so we don't append (and grow the slice) unnecessarily.
-		n := w.count - w.head
-		copy(w.timestamps, w.timestamps[w.head:w.count])
-		w.head = 0
-		w.count = n
-	}
-	// timestamps is allocated with length 0 (only capacity pre-reserved),
-	// so the first write — and any write once count has caught back up to
-	// the slice's current length even after compaction — must grow the
-	// slice via append rather than indexing past its length.
-	if w.count < len(w.timestamps) {
-		w.timestamps[w.count] = now
-	} else {
-		w.timestamps = append(w.timestamps, now)
-	}
-	w.count++
-
-	return true, remaining - 1, 0
+	return allowed, remaining, retryAfter
 }
 
-func (l *Limiter) evictOldest() {
-	var oldestKey string
-	var oldestTime time.Time
-	for k, w := range l.windows {
-		if w.head < w.count {
-			t := w.timestamps[w.head]
-			if oldestKey == "" || t.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = t
-			}
-		}
-	}
-	if oldestKey != "" {
-		delete(l.windows, oldestKey)
-	}
+// Len reports the number of distinct keys currently tracked. It is a thin
+// pass-through to the underlying kv.MemoryStore, exposed so callers (and
+// this package's own tests) can observe the MaxKeys cardinality bound
+// without reaching into unexported fields.
+func (l *MemoryStore) Len() (int, error) {
+	return l.store.Len()
 }
 
-func (l *Limiter) cleanup(interval time.Duration, maxKeys int) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for range ticker.C {
-		l.mu.Lock()
-		now := time.Now()
-		cutoff := now.Add(-l.windowSize * 2)
-		for k, w := range l.windows {
-			if w.head >= w.count {
-				delete(l.windows, k)
-				continue
-			}
-			if w.timestamps[w.count-1].Before(cutoff) {
-				delete(l.windows, k)
+// allowViaStore implements Store.Allow on top of any kv.Store, shared by
+// MemoryStore and FileStore. It reproduces the exact admission algorithm
+// this package has always used (expire timestamps outside the window,
+// compute remaining against rate, allow bursts up to rate+burst, otherwise
+// reject with a retry-after derived from the oldest in-window timestamp);
+// only the representation changes, from an in-memory compacting ring buffer
+// (an optimization to avoid reallocating the timestamp slice on every
+// request) to a plain trimmed slice that round-trips through JSON on every
+// Mutate call, since kv.Store already reallocates on every write and the
+// ring buffer's head/count bookkeeping has nothing left to optimize once
+// that's true.
+func allowViaStore(store kv.Store, key string, rate, burst int, windowSize time.Duration) (allowed bool, remaining int, retryAfter time.Duration, err error) {
+	now := time.Now()
+	err = store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		var ws windowState
+		if exists {
+			if jsonErr := json.Unmarshal(current, &ws); jsonErr != nil {
+				ws = windowState{}
 			}
 		}
-		l.mu.Unlock()
-	}
+
+		timestamps := ws.Timestamps
+		cutoff := now.Add(-windowSize)
+		trimmed := 0
+		for trimmed < len(timestamps) && timestamps[trimmed].Before(cutoff) {
+			trimmed++
+		}
+		if trimmed > 0 {
+			timestamps = append([]time.Time(nil), timestamps[trimmed:]...)
+		}
+
+		currentCount := len(timestamps)
+		remaining = rate - currentCount
+
+		if remaining <= 0 {
+			allowed = false
+			remaining = 0
+			if len(timestamps) > 0 {
+				oldest := timestamps[0]
+				retryAfter = windowSize - now.Sub(oldest)
+				if retryAfter < 0 {
+					retryAfter = 0
+				}
+			} else {
+				retryAfter = 0
+			}
+			next, marshalErr := json.Marshal(windowState{Timestamps: timestamps})
+			if marshalErr != nil {
+				return nil, 0, false, marshalErr
+			}
+			return next, windowSize * 2, true, nil
+		}
+
+		if currentCount >= rate+burst {
+			allowed = false
+			remaining = 0
+			retryAfter = 0
+			next, marshalErr := json.Marshal(windowState{Timestamps: timestamps})
+			if marshalErr != nil {
+				return nil, 0, false, marshalErr
+			}
+			return next, windowSize * 2, true, nil
+		}
+
+		timestamps = append(timestamps, now)
+		allowed = true
+		remaining--
+		next, marshalErr := json.Marshal(windowState{Timestamps: timestamps})
+		if marshalErr != nil {
+			return nil, 0, false, marshalErr
+		}
+		return next, windowSize * 2, true, nil
+	})
+	return allowed, remaining, retryAfter, err
 }
 
 // New creates a sliding window rate limiter middleware.
@@ -264,9 +305,15 @@ func New(config ...Config) fh.HandlerFunc {
 		if c.OnLimitReached != nil {
 			cfg.OnLimitReached = c.OnLimitReached
 		}
+		if c.Store != nil {
+			cfg.Store = c.Store
+		}
 	}
 
-	limiter := NewLimiter(cfg)
+	var store Store = cfg.Store
+	if store == nil {
+		store = NewLimiter(cfg)
+	}
 
 	return func(ctx fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(ctx) {
@@ -284,7 +331,7 @@ func New(config ...Config) fh.HandlerFunc {
 			return ctx.Next()
 		}
 
-		allowed, remaining, retryAfter := limiter.Allow(key)
+		allowed, remaining, retryAfter := store.Allow(key)
 
 		// Always set rate limit headers.
 		ctx.Set("X-RateLimit-Limit", strconv.Itoa(cfg.Rate))

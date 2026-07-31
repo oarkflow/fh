@@ -9,6 +9,7 @@ package smartcache
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -17,33 +18,34 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 // CacheControl directives parsed from Cache-Control header.
 type CacheControl struct {
-	MaxAge       time.Duration
-	SMaxAge      time.Duration
-	NoCache      bool
-	NoStore      bool
-	Public       bool
-	Private      bool
-	Immutable    bool
-	MustRevalidate bool
+	MaxAge          time.Duration
+	SMaxAge         time.Duration
+	NoCache         bool
+	NoStore         bool
+	Public          bool
+	Private         bool
+	Immutable       bool
+	MustRevalidate  bool
 	ProxyRevalidate bool
-	NoTransform  bool
-	StaleIfError time.Duration
+	NoTransform     bool
+	StaleIfError    time.Duration
 }
 
 // Response is a cached HTTP response.
 type Response struct {
-	StatusCode  int
-	Headers     map[string][]string
-	Body        []byte
-	ETag        string
-	LastMod     time.Time
-	Expires     time.Time
-	CC          CacheControl
-	Stored      time.Time
+	StatusCode int
+	Headers    map[string][]string
+	Body       []byte
+	ETag       string
+	LastMod    time.Time
+	Expires    time.Time
+	CC         CacheControl
+	Stored     time.Time
 }
 
 // Store defines the interface for cache storage backends.
@@ -97,11 +99,11 @@ type Config struct {
 
 // DefaultConfig returns the default configuration.
 var DefaultConfig = Config{
-	Methods:               []string{"GET", "HEAD"},
-	CacheableStatusCodes:  []int{200, 203, 204, 206, 300, 301, 404, 405, 410, 414, 501},
-	MaxSize:               10000,
-	DefaultTTL:            5 * time.Minute,
-	MaxBodySize:           1 << 20, // 1MB
+	Methods:              []string{"GET", "HEAD"},
+	CacheableStatusCodes: []int{200, 203, 204, 206, 300, 301, 404, 405, 410, 414, 501},
+	MaxSize:              10000,
+	DefaultTTL:           5 * time.Minute,
+	MaxBodySize:          1 << 20, // 1MB
 }
 
 // New creates a smartcache middleware.
@@ -435,16 +437,17 @@ func generateETag(body []byte) string {
 
 // ── In-memory store ────────────────────────────────────────────────────────
 
-// MemoryStore is a simple in-memory cache store with TTL-based expiration.
+// MemoryStore is a thin adapter over kv.MemoryStore: it JSON-encodes/decodes
+// *Response around the shared kv.Store mechanics (sharded locking, TTL
+// expiry, soft entry-count capacity) instead of reimplementing them. Every
+// method here fails safe — any underlying kv error (which in practice only
+// ever means ErrClosed, since MemoryStore.Get/Set never otherwise error) is
+// treated as a miss/no-op rather than surfaced, since the Store interface
+// this adapts to has no error return.
 type MemoryStore struct {
 	mu      sync.RWMutex
-	items   map[string]*cacheItem
+	store   kv.Store
 	maxSize int
-}
-
-type cacheItem struct {
-	resp  *Response
-	expires time.Time
 }
 
 // NewMemoryStore creates a new in-memory cache store.
@@ -453,78 +456,69 @@ func NewMemoryStore(maxSize int) *MemoryStore {
 		maxSize = 10000
 	}
 	return &MemoryStore{
-		items:   make(map[string]*cacheItem, maxSize),
+		store:   kv.NewMemoryStore(kv.WithMaxEntries(maxSize)),
 		maxSize: maxSize,
 	}
 }
 
 func (s *MemoryStore) Get(key string) (*Response, bool) {
 	s.mu.RLock()
-	item, ok := s.items[key]
+	store := s.store
 	s.mu.RUnlock()
 
-	if !ok {
+	data, ok, err := store.Get(key)
+	if err != nil || !ok {
 		return nil, false
 	}
-
-	if !item.expires.IsZero() && time.Now().After(item.expires) {
-		s.Delete(key)
+	var resp Response
+	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, false
 	}
-
-	return item.resp, true
+	return &resp, true
 }
 
 func (s *MemoryStore) Set(key string, resp *Response, ttl time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Evict if at capacity.
-	if len(s.items) >= s.maxSize {
-		// Simple random eviction — a production store would use LRU.
-		for k, v := range s.items {
-			if !v.expires.IsZero() && time.Now().After(v.expires) {
-				delete(s.items, k)
-			}
-			if len(s.items) < s.maxSize {
-				break
-			}
-		}
-		// If still at capacity, evict oldest.
-		if len(s.items) >= s.maxSize {
-			for k := range s.items {
-				delete(s.items, k)
-				break
-			}
-		}
+	if resp == nil {
+		return
 	}
-
-	var expires time.Time
-	if ttl > 0 {
-		expires = time.Now().Add(ttl)
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return
 	}
-
-	s.items[key] = &cacheItem{
-		resp:    resp,
-		expires: expires,
-	}
+	s.mu.RLock()
+	store := s.store
+	s.mu.RUnlock()
+	_ = store.Set(key, data, ttl)
 }
 
 func (s *MemoryStore) Delete(key string) {
-	s.mu.Lock()
-	delete(s.items, key)
-	s.mu.Unlock()
+	s.mu.RLock()
+	store := s.store
+	s.mu.RUnlock()
+	_ = store.Delete(key)
 }
 
+// Purge discards every cached entry. kv.Store has no "delete everything"
+// operation (by design — it's not a hot-path need for rate limiters/replay
+// guards/etc.), so since Purge is not itself a hot-path call, the simplest
+// correct implementation is to close the current in-memory kv.Store and swap
+// in a brand-new one under the write lock; the old one (and everything in
+// it) is simply dropped for the GC to reclaim.
 func (s *MemoryStore) Purge() {
 	s.mu.Lock()
-	s.items = make(map[string]*cacheItem, s.maxSize)
+	old := s.store
+	s.store = kv.NewMemoryStore(kv.WithMaxEntries(s.maxSize))
 	s.mu.Unlock()
+	_ = old.Close()
 }
 
 func (s *MemoryStore) Len() int {
 	s.mu.RLock()
-	n := len(s.items)
+	store := s.store
 	s.mu.RUnlock()
+	n, err := store.Len()
+	if err != nil {
+		return 0
+	}
 	return n
 }

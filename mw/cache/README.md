@@ -36,3 +36,7 @@ Run after request normalization and authentication only when cache keys include 
 
 Be careful with personalized responses. Include tenant/user/version/query in cache keys. Respect cache-control rules and avoid caching sensitive data.
 
+## Persistent storage
+
+For a cache that survives process restarts, pass `Store: cache.NewFileStore(dir, maxEntries)` (or `cache.NewFileStoreWithGC(dir, maxEntries, gcInterval)` for periodic background eviction of expired entries) in `cache.Config`. Entries are written atomically as one JSON file per hashed cache key under `dir`; response bodies larger than 8MB are rejected defensively to avoid disk exhaustion. `MemoryStore` remains the default when `Store` is left nil.
+

@@ -13,6 +13,7 @@ import (
 
 	"github.com/oarkflow/fh"
 	protocol "github.com/oarkflow/fh/pkg/httpsignature"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 type NonceStore interface {
@@ -211,11 +212,19 @@ func defaultString(value, fallback string) string {
 	return value
 }
 
-type nonceEntry struct{ expiresAt time.Time }
+// nonceMarker is the placeholder value written for an accepted nonce; only
+// its presence and TTL matter, never its content.
+var nonceMarker = []byte{1}
 
+// MemoryNonceStore is the default NonceStore used when Config.NonceStore is
+// unset. It is a thin adapter over kv.MemoryStore, which supplies the actual
+// map/TTL/expiry mechanics; MemoryNonceStore adds only the capacity-rejection
+// policy (kv.Store's own capacity handling evicts a live entry rather than
+// rejecting — see the package note in file_store.go) and the
+// expiresAt-to-ttl conversion CheckAndStore's interface requires.
 type MemoryNonceStore struct {
 	mu         sync.Mutex
-	entries    map[string]nonceEntry
+	store      *kv.MemoryStore
 	maxEntries int
 }
 
@@ -223,26 +232,52 @@ func NewMemoryNonceStore(maxEntries int) *MemoryNonceStore {
 	if maxEntries <= 0 {
 		maxEntries = 250_000
 	}
-	return &MemoryNonceStore{entries: make(map[string]nonceEntry), maxEntries: maxEntries}
+	// A single shard mirrors the original single mutex-guarded map:
+	// MemoryNonceStore serializes all access itself (see CheckAndStore
+	// below), so capacity accounting must stay exact rather than spread
+	// unevenly across shards.
+	return &MemoryNonceStore{
+		store:      kv.NewMemoryStore(kv.WithShardCount(1)),
+		maxEntries: maxEntries,
+	}
 }
 
 func (s *MemoryNonceStore) CheckAndStore(key string, expiresAt time.Time) (bool, error) {
-	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.entries) >= s.maxEntries {
-		for key, entry := range s.entries {
-			if !entry.expiresAt.After(now) {
-				delete(s.entries, key)
-			}
-		}
+	now := time.Now()
+
+	// Capacity is checked first, matching the original ordering: Len()
+	// sweeps expired entries as a side effect (mirroring the original's
+	// evict-then-recheck), and a store already at capacity rejects the
+	// call outright, even for an already-live key.
+	n, err := s.store.Len()
+	if err != nil {
+		return false, err
 	}
-	if len(s.entries) >= s.maxEntries {
+	if n >= s.maxEntries {
 		return false, fmt.Errorf("http signature nonce store capacity exhausted")
 	}
-	if entry, exists := s.entries[key]; exists && entry.expiresAt.After(now) {
+
+	_, exists, err := s.store.Get(key)
+	if err != nil {
+		return false, err
+	}
+	if exists {
 		return false, nil
 	}
-	s.entries[key] = nonceEntry{expiresAt: expiresAt}
+
+	ttl := expiresAt.Sub(now)
+	if ttl <= 0 {
+		// expiresAt already elapsed: the original implementation would
+		// still record an already-expired marker, which is indistinguishable
+		// from not recording anything at all (the very next check sees it as
+		// expired and overwrites it). Skip the write entirely for the same
+		// net effect.
+		return true, nil
+	}
+	if err := s.store.Set(key, nonceMarker, ttl); err != nil {
+		return false, err
+	}
 	return true, nil
 }

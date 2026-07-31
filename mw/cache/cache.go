@@ -2,12 +2,14 @@
 package cache
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 type Entry struct {
@@ -112,10 +114,21 @@ func merge(dst *Config, src Config) {
 	dst.AllowRequestCookies = src.AllowRequestCookies
 }
 
+// MemoryStore is a Store backed by kv.MemoryStore: it JSON-encodes each
+// Entry and delegates the map/lock/expiry mechanics to the shared kv
+// primitive instead of reimplementing them.
+//
+// kv.Store has no way to enumerate its keys, which the original
+// oldest-entry-first eviction policy needs. Rather than reimplement kv's
+// map+mutex storage locally to get that enumeration, MemoryStore keeps a
+// small side index of key -> Entry.Created purely for eviction ranking; the
+// authoritative entry data still lives in kv.
 type MemoryStore struct {
-	mu         sync.RWMutex
-	entries    map[string]Entry
+	store      *kv.MemoryStore
 	maxEntries int
+
+	mu      sync.Mutex
+	created map[string]time.Time // key -> Entry.Created, for oldest-eviction ranking only
 }
 
 func NewMemoryStore(maxEntries ...int) *MemoryStore {
@@ -123,34 +136,71 @@ func NewMemoryStore(maxEntries ...int) *MemoryStore {
 	if len(maxEntries) > 0 && maxEntries[0] > 0 {
 		max = maxEntries[0]
 	}
-	return &MemoryStore{entries: make(map[string]Entry), maxEntries: max}
+	return &MemoryStore{
+		store:      kv.NewMemoryStore(),
+		maxEntries: max,
+		created:    make(map[string]time.Time),
+	}
 }
 func (s *MemoryStore) Get(key string) (Entry, bool) {
-	s.mu.RLock()
-	e, ok := s.entries[key]
-	s.mu.RUnlock()
-	if !ok || time.Now().After(e.Expires) {
-		if ok {
-			s.Delete(key)
-		}
+	data, ok, err := s.store.Get(key)
+	if err != nil || !ok {
+		s.mu.Lock()
+		delete(s.created, key)
+		s.mu.Unlock()
 		return Entry{}, false
 	}
-	e.Body = append([]byte(nil), e.Body...)
+	var e Entry
+	if json.Unmarshal(data, &e) != nil {
+		return Entry{}, false
+	}
 	return e, true
 }
 func (s *MemoryStore) Set(key string, e Entry) {
-	s.mu.Lock()
-	if _, exists := s.entries[key]; !exists && len(s.entries) >= s.maxEntries {
-		var oldestKey string
-		var oldest time.Time
-		for candidate, entry := range s.entries {
-			if oldestKey == "" || entry.Created.Before(oldest) {
-				oldestKey, oldest = candidate, entry.Created
-			}
-		}
-		delete(s.entries, oldestKey)
+	data, err := json.Marshal(&e)
+	if err != nil {
+		return
 	}
-	s.entries[key] = e
+	ttl := time.Until(e.Expires)
+	if ttl <= 0 {
+		ttl = time.Nanosecond
+	}
+
+	s.mu.Lock()
+	if _, exists := s.created[key]; !exists && len(s.created) >= s.maxEntries {
+		s.evictOldestLocked()
+	}
+	s.created[key] = e.Created
 	s.mu.Unlock()
+
+	if err := s.store.Set(key, data, ttl); err != nil {
+		s.mu.Lock()
+		delete(s.created, key)
+		s.mu.Unlock()
+	}
 }
-func (s *MemoryStore) Delete(key string) { s.mu.Lock(); delete(s.entries, key); s.mu.Unlock() }
+
+// evictOldestLocked removes the single tracked key with the oldest Created
+// time. Caller holds s.mu.
+func (s *MemoryStore) evictOldestLocked() {
+	var oldestKey string
+	var oldest time.Time
+	first := true
+	for candidate, created := range s.created {
+		if first || created.Before(oldest) {
+			oldestKey, oldest = candidate, created
+			first = false
+		}
+	}
+	if oldestKey != "" {
+		delete(s.created, oldestKey)
+		_ = s.store.Delete(oldestKey)
+	}
+}
+
+func (s *MemoryStore) Delete(key string) {
+	s.mu.Lock()
+	delete(s.created, key)
+	s.mu.Unlock()
+	_ = s.store.Delete(key)
+}

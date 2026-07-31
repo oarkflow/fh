@@ -36,3 +36,7 @@ Run after real IP and authentication if the key depends on client identity. Run 
 
 Use distributed stores for multi-node deployments. Return clear `429` responses with retry headers. Track limit hits by route and key type.
 
+## Persistent storage
+
+`NewMemoryStore` remains the default. For counters that must survive a process restart on a single node, use `ratelimiter.NewFileStore(dir, gcInterval)`, which persists one JSON file per hashed key under `dir` (atomic writes, optional background GC). It is not a substitute for a distributed store across multiple nodes.
+

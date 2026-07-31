@@ -31,3 +31,5 @@ Use `pkg/httpsignature.Client` for a fail-closed Go client. See `examples/rfc942
 The negotiated profile deliberately rejects `Content-Encoding`; otherwise an intermediary could modify an unsigned content-coding header and change how authenticated bytes are interpreted. Install it after authorization and as the last response-transform middleware. Do not enable compression on these routes or use streaming responses because the final content must be buffered and digested. Use HTTPS even though responses are signed.
 
 The default replay store is bounded and process-local. Multi-instance deployments must provide a distributed atomic `NonceStore`.
+
+For a single instance that needs nonce records to survive a restart, `httpsignature.NewFileStore(dir, gcInterval)` persists accepted nonces to disk instead of memory; pass it as `Config.NonceStore`. Keys are hashed with SHA-256 before being used as filenames, so arbitrary nonce bytes never touch the filesystem path directly.

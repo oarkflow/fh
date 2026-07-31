@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 type SecretResolver func(ctx fh.Ctx, keyID string) [][]byte
@@ -119,10 +120,16 @@ func New(config Config) fh.HandlerFunc {
 // memoryReplayStore is the default ReplayStore used when Config.Replay is
 // unset. It is process-local; deployments running multiple instances behind
 // a load balancer should supply a shared store instead.
+//
+// It is a thin wrapper over kv.MemoryStore rather than a hand-rolled map: kv
+// provides the sharded storage/expiry mechanics, while capacity admission is
+// enforced here (not via kv's own WithMaxEntries/eviction, which would evict
+// an arbitrary live entry to admit a new one) because Seen's contract is to
+// fail closed at capacity and never evict a still-valid marker.
 type memoryReplayStore struct {
-	mu         sync.Mutex
-	seen       map[string]time.Time
+	kv         *kv.MemoryStore
 	maxEntries int
+	mu         sync.Mutex
 }
 
 func newMemoryReplayStore(maxEntries ...int) *memoryReplayStore {
@@ -130,29 +137,45 @@ func newMemoryReplayStore(maxEntries ...int) *memoryReplayStore {
 	if len(maxEntries) > 0 && maxEntries[0] > 0 {
 		maxSize = maxEntries[0]
 	}
-	return &memoryReplayStore{seen: make(map[string]time.Time, min(maxSize, 1024)), maxEntries: maxSize}
+	return &memoryReplayStore{kv: kv.NewMemoryStore(), maxEntries: maxSize}
 }
 
+// Seen implements ReplayStore. On any underlying store error (including
+// capacity exhaustion) it fails safe by returning true (treat as already
+// seen/replayed), per this package's existing fail-safe convention.
 func (s *memoryReplayStore) Seen(key string, ttl time.Duration) bool {
-	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if exp, ok := s.seen[key]; ok && exp.After(now) {
-		return true
-	}
-	if len(s.seen) >= s.maxEntries {
-		for k, exp := range s.seen {
-			if !exp.After(now) {
-				delete(s.seen, k)
+
+	if s.maxEntries > 0 {
+		if _, exists, _ := s.kv.Get(key); !exists {
+			// Len() sweeps expired entries as a side effect, reclaiming
+			// capacity the same way the original map-based implementation's
+			// opportunistic cleanup-on-full pass did.
+			n, err := s.kv.Len()
+			if err != nil {
+				return true
+			}
+			if n >= s.maxEntries {
+				// Fail closed: never evict a still-valid replay marker.
+				return true
 			}
 		}
 	}
-	if len(s.seen) >= s.maxEntries {
-		// Fail closed: never evict a still-valid replay marker.
+
+	var seen bool
+	err := s.kv.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		if exists {
+			seen = true
+			return nil, 0, false, nil
+		}
+		seen = false
+		return []byte{1}, ttl, true, nil
+	})
+	if err != nil {
 		return true
 	}
-	s.seen[key] = now.Add(ttl)
-	return false
+	return seen
 }
 
 func parseCombinedSignature(value string) (timestamp, signature string, ok bool) {

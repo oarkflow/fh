@@ -36,3 +36,7 @@ Run before authentication for preflight handling, but ensure actual protected re
 
 Avoid `*` with credentials. Prefer explicit origins, methods, and headers. Log unexpected origins during rollout.
 
+## File-backed origin store
+
+By default the allow-list comes from `Config.AllowOrigins` (in-memory). To manage it from a file instead, set `Config.OriginStore` to `cors.NewFileOriginStore(path, reloadInterval)`, where `path` points to a JSON array of origin patterns (same syntax as `AllowOrigins`: exact origins, `"*"`, or `"https://*.example.com"` subdomain wildcards). Pass a non-zero `reloadInterval` to poll the file for changes; a malformed edit is ignored and the last known-good list keeps serving.
+

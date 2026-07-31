@@ -40,3 +40,5 @@ Use provider-specific signature formats where needed. Rotate secrets safely and 
 
 Replay protection is on by default: `Config.Replay` falls back to a bounded in-memory store if unset, so a captured (signature, timestamp) pair cannot be resent within `Tolerance`. This default store is process-local — for multi-instance deployments behind a load balancer, supply a shared `ReplayStore` (e.g. Redis-backed) so replay detection works across instances.
 
+For a single-instance deployment that needs replay markers to survive a restart, `webhook.NewFileStore(dir, gcInterval)` persists seen signatures to disk instead of memory; pass it as `Config.Replay`. It hashes each key with SHA-256 before deriving a filename and fails closed (treats I/O errors as "seen") so a storage failure rejects rather than silently allows a replay.
+

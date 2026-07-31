@@ -36,3 +36,7 @@ Run after signature/key extraction and before side-effect handlers.
 
 Use a distributed store for multi-node deployments. Include timestamp skew validation and key scoping.
 
+## Persistent storage
+
+`NewMemoryStore` remains the default. For replay markers that must survive a process restart on a single node, use `replay.NewFileStore(dir, gcInterval)`, which persists one file per hashed key under `dir` (atomic writes, optional background GC). It is not a substitute for a distributed store across multiple nodes.
+

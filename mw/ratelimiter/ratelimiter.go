@@ -1,14 +1,13 @@
 package ratelimiter
 
 import (
+	"encoding/json"
 	"errors"
-	"hash/fnv"
 	"strconv"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 const (
@@ -134,27 +133,25 @@ func DefaultLimitReachedHandler(ctx fh.Ctx, result Result) error {
 }
 
 // -----------------------------------------------------------------------------
-// In-memory fixed-window store
+// In-memory sliding-window store
 // -----------------------------------------------------------------------------
 
+// windowState is the JSON-encoded value MemoryStore and FileStore persist per
+// key in the underlying kv.Store. Count/PrevCount/WindowStart drive the
+// sliding-window weighting; ResetAt is when the current window ends.
+type windowState struct {
+	Count       int       `json:"count"`
+	PrevCount   int       `json:"prev_count"`
+	WindowStart time.Time `json:"window_start"`
+	ResetAt     time.Time `json:"reset_at"`
+}
+
+// MemoryStore is a sharded, in-process Store backed by kv.MemoryStore. It
+// keeps the same sliding-window algorithm the original hand-rolled
+// implementation used, but the sharding, locking and expiry mechanics are now
+// provided once by pkg/storage/kv instead of being reimplemented here.
 type MemoryStore struct {
-	shards []memoryShard
-	mask   uint64
-
-	cleanupEvery time.Duration
-	nextCleanup  atomic.Int64
-}
-
-type memoryShard struct {
-	mu      sync.Mutex
-	buckets map[string]*bucket
-}
-
-type bucket struct {
-	count       int
-	prevCount   int
-	windowStart time.Time
-	resetAt     time.Time
+	kv *kv.MemoryStore
 }
 
 func NewMemoryStore(shardCount int) *MemoryStore {
@@ -164,19 +161,7 @@ func NewMemoryStore(shardCount int) *MemoryStore {
 
 	shardCount = nextPowerOfTwo(shardCount)
 
-	s := &MemoryStore{
-		shards:       make([]memoryShard, shardCount),
-		mask:         uint64(shardCount - 1),
-		cleanupEvery: time.Minute,
-	}
-
-	for i := range s.shards {
-		s.shards[i].buckets = make(map[string]*bucket, 64)
-	}
-
-	s.nextCleanup.Store(time.Now().Add(s.cleanupEvery).UnixNano())
-
-	return s
+	return &MemoryStore{kv: kv.NewMemoryStore(kv.WithShardCount(shardCount))}
 }
 
 func (s *MemoryStore) Allow(key string, limit int, window time.Duration, now time.Time) (Result, error) {
@@ -187,103 +172,82 @@ func (s *MemoryStore) Allow(key string, limit int, window time.Duration, now tim
 		window = time.Minute
 	}
 
-	s.maybeCleanup(now)
-
-	sh := &s.shards[s.hash(key)&s.mask]
-
-	sh.mu.Lock()
-
-	b := sh.buckets[key]
-	if b == nil {
-		b = &bucket{
-			count:       0,
-			prevCount:   0,
-			windowStart: now,
-			resetAt:     now.Add(window),
-		}
-		sh.buckets[key] = b
-	}
-
-	if !now.Before(b.resetAt) {
-		elapsed := now.Sub(b.windowStart)
-		if elapsed >= 2*window {
-			b.prevCount = 0
-		} else {
-			b.prevCount = b.count
-		}
-		b.count = 0
-		b.windowStart = now
-		b.resetAt = now.Add(window)
-	}
-
-	// Sliding window: weight previous window's count by elapsed fraction
-	elapsed := now.Sub(b.windowStart).Seconds()
-	windowSec := window.Seconds()
-	var weightedCount float64
-	if elapsed < windowSec && b.prevCount > 0 {
-		previousWeight := (windowSec - elapsed) / windowSec
-		weightedCount = float64(b.prevCount)*previousWeight + float64(b.count)
-	} else {
-		weightedCount = float64(b.count)
-	}
-
-	b.count++
-	used := int(weightedCount) + 1
-	resetAt := b.resetAt
-
-	sh.mu.Unlock()
-
-	remaining := limit - used
-	if remaining < 0 {
-		remaining = 0
-	}
-
-	allowed := used <= limit
-	retryAfter := time.Duration(0)
-	if !allowed {
-		retryAfter = resetAt.Sub(now)
-		if retryAfter < time.Second {
-			retryAfter = time.Second
-		}
-	}
-
-	return Result{
-		Allowed:    allowed,
-		Limit:      limit,
-		Remaining:  remaining,
-		Used:       used,
-		ResetAt:    resetAt,
-		RetryAfter: retryAfter,
-	}, nil
-}
-
-func (s *MemoryStore) maybeCleanup(now time.Time) {
-	deadline := s.nextCleanup.Load()
-	if now.UnixNano() < deadline {
-		return
-	}
-
-	next := now.Add(s.cleanupEvery).UnixNano()
-	if !s.nextCleanup.CompareAndSwap(deadline, next) {
-		return
-	}
-
-	for i := range s.shards {
-		sh := &s.shards[i]
-		sh.mu.Lock()
-		for k, b := range sh.buckets {
-			if !now.Before(b.resetAt) {
-				delete(sh.buckets, k)
+	var result Result
+	err := s.kv.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		var st windowState
+		if exists {
+			if jerr := json.Unmarshal(current, &st); jerr != nil {
+				exists = false
 			}
 		}
-		sh.mu.Unlock()
-	}
-}
+		if !exists {
+			st = windowState{WindowStart: now, ResetAt: now.Add(window)}
+		}
 
-func (s *MemoryStore) hash(key string) uint64 {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(key))
-	return h.Sum64()
+		if !now.Before(st.ResetAt) {
+			elapsed := now.Sub(st.WindowStart)
+			if elapsed >= 2*window {
+				st.PrevCount = 0
+			} else {
+				st.PrevCount = st.Count
+			}
+			st.Count = 0
+			st.WindowStart = now
+			st.ResetAt = now.Add(window)
+		}
+
+		// Sliding window: weight previous window's count by elapsed fraction.
+		elapsed := now.Sub(st.WindowStart).Seconds()
+		windowSec := window.Seconds()
+		var weightedCount float64
+		if elapsed < windowSec && st.PrevCount > 0 {
+			previousWeight := (windowSec - elapsed) / windowSec
+			weightedCount = float64(st.PrevCount)*previousWeight + float64(st.Count)
+		} else {
+			weightedCount = float64(st.Count)
+		}
+
+		st.Count++
+		used := int(weightedCount) + 1
+		resetAt := st.ResetAt
+
+		remaining := limit - used
+		if remaining < 0 {
+			remaining = 0
+		}
+
+		allowed := used <= limit
+		retryAfter := time.Duration(0)
+		if !allowed {
+			retryAfter = resetAt.Sub(now)
+			if retryAfter < time.Second {
+				retryAfter = time.Second
+			}
+		}
+
+		result = Result{
+			Allowed:    allowed,
+			Limit:      limit,
+			Remaining:  remaining,
+			Used:       used,
+			ResetAt:    resetAt,
+			RetryAfter: retryAfter,
+		}
+
+		data, merr := json.Marshal(st)
+		if merr != nil {
+			return nil, 0, false, merr
+		}
+		// Keep the window state alive for two full windows of inactivity so
+		// the prevCount weighting above still has something to read right
+		// after a window boundary; kv's own expiry then reclaims windows
+		// that truly go stale (no requests for that long).
+		return data, 2 * window, true, nil
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	return result, nil
 }
 
 func nextPowerOfTwo(n int) int {

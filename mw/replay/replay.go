@@ -6,16 +6,23 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 type Store interface {
 	Seen(key string, ttl time.Duration) (bool, error)
 }
 
+// MemoryStore is an in-process Store backed by kv.MemoryStore. It does not
+// use kv's own WithMaxEntries/eviction (which evicts an arbitrary live entry
+// to admit a new one): replay's contract is to fail closed at capacity and
+// never evict a still-valid marker, so capacity is enforced here instead. mu
+// serializes the whole Seen call, matching the single-mutex granularity the
+// original hand-rolled MemoryStore used.
 type MemoryStore struct {
-	mu         sync.Mutex
-	m          map[string]time.Time
+	kv         *kv.MemoryStore
 	maxEntries int
+	mu         sync.Mutex
 }
 
 var ErrStoreFull = errors.New("replay: store capacity exhausted")
@@ -25,27 +32,41 @@ func NewMemoryStore(maxEntries ...int) *MemoryStore {
 	if len(maxEntries) > 0 && maxEntries[0] > 0 {
 		maxSize = maxEntries[0]
 	}
-	return &MemoryStore{m: make(map[string]time.Time, min(maxSize, 1024)), maxEntries: maxSize}
+	return &MemoryStore{kv: kv.NewMemoryStore(), maxEntries: maxSize}
 }
+
 func (s *MemoryStore) Seen(key string, ttl time.Duration) (bool, error) {
-	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if exp, ok := s.m[key]; ok && exp.After(now) {
-		return true, nil
-	}
-	if len(s.m) >= s.maxEntries {
-		for k, exp := range s.m {
-			if !exp.After(now) {
-				delete(s.m, k)
+
+	if s.maxEntries > 0 {
+		if _, exists, _ := s.kv.Get(key); !exists {
+			// Len() sweeps expired entries as a side effect, reclaiming
+			// capacity the same way the original implementation's opportunistic
+			// cleanup-on-full pass did.
+			n, err := s.kv.Len()
+			if err != nil {
+				return false, err
+			}
+			if n >= s.maxEntries {
+				return false, ErrStoreFull
 			}
 		}
-		if len(s.m) >= s.maxEntries {
-			return false, ErrStoreFull
-		}
 	}
-	s.m[key] = now.Add(ttl)
-	return false, nil
+
+	var seen bool
+	err := s.kv.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		if exists {
+			seen = true
+			return nil, 0, false, nil
+		}
+		seen = false
+		return []byte{1}, ttl, true, nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return seen, nil
 }
 
 type Config struct {

@@ -36,3 +36,7 @@ Run early, after real IP/proxy header middleware if behind a trusted proxy.
 
 Only trust forwarded headers from known proxies. Keep allowlists updated and include monitoring for denied requests.
 
+## File-backed store
+
+By default `Config.Allowed`/`Config.Blocked` build an in-memory `MemoryStore`. To manage a list from a file instead, set `Config.Store` (or `Config.BlockStore`) to `ipwhitelist.NewFileStore(path, reloadInterval)`, where `path` points to a JSON array of strings, each a bare IP or CIDR (the same format `NewMemoryStore` accepts). Pass a non-zero `reloadInterval` to poll the file for changes; a malformed edit is ignored and the last known-good list keeps serving.
+
