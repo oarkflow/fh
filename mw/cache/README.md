@@ -38,5 +38,4 @@ Be careful with personalized responses. Include tenant/user/version/query in cac
 
 ## Persistent storage
 
-For a cache that survives process restarts, pass `Store: cache.NewFileStore(dir, maxEntries)` (or `cache.NewFileStoreWithGC(dir, maxEntries, gcInterval)` for periodic background eviction of expired entries) in `cache.Config`. Entries are written atomically as one JSON file per hashed cache key under `dir`; response bodies larger than 8MB are rejected defensively to avoid disk exhaustion. `MemoryStore` remains the default when `Store` is left nil.
-
+For a cache that survives process restarts, construct `kv.NewFileStore(dir, kv.WithMaxEntrySize(maxEntryBytes), kv.WithFileGCInterval(gcInterval))` and pass it as `cache.Config.Store`. `Store` is a `kv.Store`; `kv.NewMemoryStore` remains the default when left nil.

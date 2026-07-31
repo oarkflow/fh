@@ -61,24 +61,6 @@ func publicSession(session Session) SessionInfo {
 	}
 }
 
-type DeviceStore interface {
-	Register(device Device) error
-	Get(id protocol.ID16) (Device, error)
-	Touch(id protocol.ID16, at time.Time) error
-	Revoke(id protocol.ID16, at time.Time) error
-}
-
-type SessionStore interface {
-	Create(session Session) error
-	Get(id protocol.ID16) (Session, error)
-	Delete(id protocol.ID16) error
-	DeleteByDevice(deviceID protocol.ID16) error
-}
-
-type ReplayStore interface {
-	CheckAndStore(key string, expiresAt time.Time) (accepted bool, err error)
-}
-
 func zeroSession(session *Session) {
 	if session == nil {
 		return
@@ -88,9 +70,13 @@ func zeroSession(session *Session) {
 }
 
 // ---------------------------------------------------------------------------
-// on-disk/serialized record shapes, shared by the Memory* and File* adapters
-// below since both are now just kv.Store instances (in-memory vs. durable)
-// wearing the same domain-specific JSON encoding on top.
+// Device, session and replay state all live in a caller-supplied kv.Store
+// (see pkg/storage/kv) -- in-memory (kv.NewMemoryStore) or durable
+// (kv.NewFileStore), the operations below don't care which. Each domain just
+// wears its own JSON-encoded record shape and key scheme on top of the same
+// Get/Set/Delete/Len/Mutate primitives; there is no package-specific store
+// interface or Memory/File wrapper type, just plain functions parameterized
+// by kv.Store.
 // ---------------------------------------------------------------------------
 
 type fileDevice struct {
@@ -144,24 +130,17 @@ func (f fileSession) toSession() Session {
 func deviceKey(id protocol.ID16) string { return "device:" + hex.EncodeToString(id[:]) }
 
 // ---------------------------------------------------------------------------
-// kvDeviceStore: DeviceStore adapted onto a kv.Store. Device records never
-// expire and hold no secret key material (only a public key), so this
-// adapter is a straightforward JSON-over-kv wrapper.
+// Device operations. Device records never expire and hold no secret key
+// material (only a public key), so these are a straightforward JSON-over-kv
+// wrapper with no locking beyond what kv.Store.Mutate already provides.
 // ---------------------------------------------------------------------------
 
-type kvDeviceStore struct {
-	store kv.Store
-}
-
-func newKVDeviceStore(store kv.Store) *kvDeviceStore {
-	return &kvDeviceStore{store: store}
-}
-
-// Register uses Mutate rather than Get-then-Set so that two concurrent
-// Register calls for the same device ID cannot both observe "not present"
-// and both write: Mutate holds the per-key lock for the whole check+write.
-func (s *kvDeviceStore) Register(device Device) error {
-	return s.store.Mutate(deviceKey(device.ID), func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+// registerDevice uses Mutate rather than Get-then-Set so that two concurrent
+// registerDevice calls for the same device ID cannot both observe "not
+// present" and both write: Mutate holds the per-key lock for the whole
+// check+write.
+func registerDevice(store kv.Store, device Device) error {
+	return store.Mutate(deviceKey(device.ID), func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
 		if exists {
 			return nil, 0, false, errDuplicateDevice
 		}
@@ -173,8 +152,8 @@ func (s *kvDeviceStore) Register(device Device) error {
 	})
 }
 
-func (s *kvDeviceStore) Get(id protocol.ID16) (Device, error) {
-	data, exists, err := s.store.Get(deviceKey(id))
+func getDevice(store kv.Store, id protocol.ID16) (Device, error) {
+	data, exists, err := store.Get(deviceKey(id))
 	if err != nil {
 		return Device{}, err
 	}
@@ -192,8 +171,8 @@ func (s *kvDeviceStore) Get(id protocol.ID16) (Device, error) {
 	return device, nil
 }
 
-func (s *kvDeviceStore) Touch(id protocol.ID16, at time.Time) error {
-	return s.store.Mutate(deviceKey(id), func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+func touchDevice(store kv.Store, id protocol.ID16, at time.Time) error {
+	return store.Mutate(deviceKey(id), func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
 		if !exists {
 			return nil, 0, false, ErrDeviceNotFound
 		}
@@ -210,8 +189,8 @@ func (s *kvDeviceStore) Touch(id protocol.ID16, at time.Time) error {
 	})
 }
 
-func (s *kvDeviceStore) Revoke(id protocol.ID16, at time.Time) error {
-	return s.store.Mutate(deviceKey(id), func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+func revokeDevice(store kv.Store, id protocol.ID16, at time.Time) error {
+	return store.Mutate(deviceKey(id), func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
 		if !exists {
 			return nil, 0, false, ErrDeviceNotFound
 		}
@@ -228,42 +207,33 @@ func (s *kvDeviceStore) Revoke(id protocol.ID16, at time.Time) error {
 	})
 }
 
-// MemoryDeviceStore is an in-process DeviceStore backed by kv.MemoryStore.
-type MemoryDeviceStore struct {
-	*kvDeviceStore
-}
-
-func NewMemoryDeviceStore() *MemoryDeviceStore {
-	return &MemoryDeviceStore{kvDeviceStore: newKVDeviceStore(kv.NewMemoryStore())}
-}
-
 // ---------------------------------------------------------------------------
-// kvSessionStore: SessionStore adapted onto a kv.Store.
+// Session operations.
 //
 // SECURITY NOTE: Session.Keys holds live symmetric key material. Every
-// removal path (Delete, DeleteByDevice, and lazy/background expiry) overwrites the
-// stored record with zero bytes via kv.Store.Mutate *before* calling
-// kv.Store.Delete (see wipeAndDelete below) -- mirroring the discipline the
-// original hand-rolled MemorySessionStore applied to its map values before
-// dropping them, and giving FileStore-backed instances an actual on-disk
-// overwrite pass (via FileStore's atomic write) prior to unlink. That said,
-// as with the prior round's file_store.go, this is still not secure
-// erasure: a deleted (even zero-overwritten) file's prior on-disk blocks may
-// remain recoverable from backups, snapshots, or journaling filesystems
-// until overwritten by unrelated data. Encrypt the storage volume at rest if
-// that matters for your threat model.
+// removal path (deleteSession, deleteSessionsByDevice, lazy expiry on Get,
+// and SweepExpiredSessions) overwrites the stored record with zero bytes via
+// kv.Store.Mutate *before* calling kv.Store.Delete (see wipeAndDelete below),
+// mirroring the discipline the original hand-rolled MemorySessionStore
+// applied to its map values before dropping them, and giving
+// kv.FileStore-backed instances an actual on-disk overwrite pass (via
+// FileStore's atomic write) prior to unlink. That said, this is still not
+// secure erasure: a deleted (even zero-overwritten) file's prior on-disk
+// blocks may remain recoverable from backups, snapshots, or journaling
+// filesystems until overwritten by unrelated data. Encrypt the storage
+// volume at rest if that matters for your threat model.
 //
 // kv.Store has no query/iteration primitive (by design -- see pkg/storage/kv
-// doc comment), so DeleteByDevice cannot ask the store "which keys have this
-// DeviceID". This adapter therefore maintains its own secondary index: one
-// kv entry per device (key "sessdevidx:<deviceHex>") holding the JSON list
-// of session ID hex strings created for that device, kept in sync on
-// Create/Delete/expiry, plus one global index entry ("sessidx:all") used
-// only by the background GC sweep (see sweep below) to find candidates to
-// expire without a full store scan. Index updates are not transactionally
-// atomic with the session record write (two separate kv calls), so there is
-// a narrow window where a session exists but is not yet indexed (or vice
-// versa mid-delete); DeleteByDevice is documented/expected to be a rare
+// doc comment), so deleteSessionsByDevice cannot ask the store "which keys
+// have this DeviceID". These functions therefore maintain their own
+// secondary index: one kv entry per device (key "sessdevidx:<deviceHex>")
+// holding the JSON list of session ID hex strings created for that device,
+// kept in sync on create/delete/expiry, plus one global index entry
+// ("sessidx:all") used by SweepExpiredSessions to find candidates to expire
+// without a full store scan. Index updates are not transactionally atomic
+// with the session record write (two separate kv calls), so there is a
+// narrow window where a session exists but is not yet indexed (or vice versa
+// mid-delete); deleteSessionsByDevice is documented/expected to be a rare
 // admin operation, so this tradeoff (simplicity over perfect atomicity) was
 // judged acceptable rather than adding a second kv.Store+cross-store
 // transaction just for this.
@@ -345,19 +315,9 @@ func wipeAndDelete(store kv.Store, key string) error {
 	return store.Delete(key)
 }
 
-type kvSessionStore struct {
-	store    kv.Store
-	stopGC   chan struct{}
-	stopOnce sync.Once
-}
-
-func newKVSessionStore(store kv.Store) *kvSessionStore {
-	return &kvSessionStore{store: store}
-}
-
-func (s *kvSessionStore) Create(session Session) error {
+func createSession(store kv.Store, session Session) error {
 	key := sessionKey(session.ID)
-	err := s.store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+	err := store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
 		if exists {
 			return nil, 0, false, errDuplicateSession
 		}
@@ -371,14 +331,18 @@ func (s *kvSessionStore) Create(session Session) error {
 		return err
 	}
 	idHex := hex.EncodeToString(session.ID[:])
-	_ = addIndexEntry(s.store, sessionDeviceIndexKey(session.DeviceID), idHex)
-	_ = addIndexEntry(s.store, sessionAllIndexKey, idHex)
+	_ = addIndexEntry(store, sessionDeviceIndexKey(session.DeviceID), idHex)
+	_ = addIndexEntry(store, sessionAllIndexKey, idHex)
 	return nil
 }
 
-func (s *kvSessionStore) Get(id protocol.ID16) (Session, error) {
+// getSession expires the session lazily: a record whose ExpiresAt has passed
+// is wiped and removed on this read (rather than surviving until some
+// background sweep runs) and ErrSessionNotFound is returned, exactly as if
+// it had already been deleted.
+func getSession(store kv.Store, id protocol.ID16) (Session, error) {
 	key := sessionKey(id)
-	data, exists, err := s.store.Get(key)
+	data, exists, err := store.Get(key)
 	if err != nil {
 		return Session{}, err
 	}
@@ -392,31 +356,31 @@ func (s *kvSessionStore) Get(id protocol.ID16) (Session, error) {
 	session := fs.toSession()
 	if !session.ExpiresAt.After(time.Now()) {
 		idHex := hex.EncodeToString(id[:])
-		_ = removeIndexEntry(s.store, sessionDeviceIndexKey(session.DeviceID), idHex)
-		_ = removeIndexEntry(s.store, sessionAllIndexKey, idHex)
-		_ = wipeAndDelete(s.store, key)
+		_ = removeIndexEntry(store, sessionDeviceIndexKey(session.DeviceID), idHex)
+		_ = removeIndexEntry(store, sessionAllIndexKey, idHex)
+		_ = wipeAndDelete(store, key)
 		zeroSession(&session)
 		return Session{}, ErrSessionNotFound
 	}
 	return session, nil
 }
 
-func (s *kvSessionStore) Delete(id protocol.ID16) error {
+func deleteSession(store kv.Store, id protocol.ID16) error {
 	key := sessionKey(id)
 	idHex := hex.EncodeToString(id[:])
-	if data, exists, err := s.store.Get(key); err == nil && exists {
+	if data, exists, err := store.Get(key); err == nil && exists {
 		var fs fileSession
 		if json.Unmarshal(data, &fs) == nil {
-			_ = removeIndexEntry(s.store, sessionDeviceIndexKey(fs.DeviceID), idHex)
+			_ = removeIndexEntry(store, sessionDeviceIndexKey(fs.DeviceID), idHex)
 		}
 	}
-	_ = removeIndexEntry(s.store, sessionAllIndexKey, idHex)
-	return wipeAndDelete(s.store, key)
+	_ = removeIndexEntry(store, sessionAllIndexKey, idHex)
+	return wipeAndDelete(store, key)
 }
 
-func (s *kvSessionStore) DeleteByDevice(deviceID protocol.ID16) error {
+func deleteSessionsByDevice(store kv.Store, deviceID protocol.ID16) error {
 	idxKey := sessionDeviceIndexKey(deviceID)
-	data, exists, err := s.store.Get(idxKey)
+	data, exists, err := store.Get(idxKey)
 	if err != nil {
 		return err
 	}
@@ -428,17 +392,21 @@ func (s *kvSessionStore) DeleteByDevice(deviceID protocol.ID16) error {
 		return nil
 	}
 	for _, idHex := range ids {
-		_ = removeIndexEntry(s.store, sessionAllIndexKey, idHex)
-		_ = wipeAndDelete(s.store, "sess:"+idHex)
+		_ = removeIndexEntry(store, sessionAllIndexKey, idHex)
+		_ = wipeAndDelete(store, "sess:"+idHex)
 	}
-	return s.store.Delete(idxKey)
+	return store.Delete(idxKey)
 }
 
-// sweep expires and wipes any session past its ExpiresAt, using the global
-// index rather than a full store scan (kv.Store exposes no iteration
-// primitive to scan with anyway).
-func (s *kvSessionStore) sweep() {
-	data, exists, err := s.store.Get(sessionAllIndexKey)
+// SweepExpiredSessions removes every session in store whose ExpiresAt has
+// passed, using the "sessidx:all" secondary index rather than a full store
+// scan (kv.Store exposes no iteration primitive to scan with anyway).
+// Sessions also expire lazily on every getSession/Get call, so calling this
+// is entirely optional; wire it into your own *time.Ticker loop (or call it
+// from a cron-style job) if you want proactive expiry independent of read
+// traffic, e.g. for a durable kv.FileStore holding many idle sessions.
+func SweepExpiredSessions(store kv.Store) {
+	data, exists, err := store.Get(sessionAllIndexKey)
 	if err != nil || !exists {
 		return
 	}
@@ -448,7 +416,7 @@ func (s *kvSessionStore) sweep() {
 	}
 	now := time.Now()
 	for _, idHex := range ids {
-		raw, ok, err := s.store.Get("sess:" + idHex)
+		raw, ok, err := store.Get("sess:" + idHex)
 		if err != nil || !ok {
 			continue
 		}
@@ -457,60 +425,21 @@ func (s *kvSessionStore) sweep() {
 			continue
 		}
 		if !fs.ExpiresAt.After(now) {
-			_ = removeIndexEntry(s.store, sessionDeviceIndexKey(fs.DeviceID), idHex)
-			_ = removeIndexEntry(s.store, sessionAllIndexKey, idHex)
-			_ = wipeAndDelete(s.store, "sess:"+idHex)
+			_ = removeIndexEntry(store, sessionDeviceIndexKey(fs.DeviceID), idHex)
+			_ = removeIndexEntry(store, sessionAllIndexKey, idHex)
+			_ = wipeAndDelete(store, "sess:"+idHex)
 		}
 	}
-}
-
-func (s *kvSessionStore) gcLoop(interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			s.sweep()
-		case <-s.stopGC:
-			return
-		}
-	}
-}
-
-func (s *kvSessionStore) startGC(interval time.Duration) {
-	if interval > 0 {
-		s.stopGC = make(chan struct{})
-		go s.gcLoop(interval)
-	}
-}
-
-// StopGC stops the background garbage collection goroutine, if running.
-func (s *kvSessionStore) StopGC() {
-	if s.stopGC != nil {
-		s.stopOnce.Do(func() { close(s.stopGC) })
-	}
-}
-
-// MemorySessionStore is an in-process SessionStore backed by kv.MemoryStore.
-// It has no background GC goroutine (matching the prior hand-rolled
-// implementation, which only expired sessions lazily on Get) -- see
-// FileSessionStore for the durable variant that does run one.
-type MemorySessionStore struct {
-	*kvSessionStore
-}
-
-func NewMemorySessionStore() *MemorySessionStore {
-	return &MemorySessionStore{kvSessionStore: newKVSessionStore(kv.NewMemoryStore())}
 }
 
 // ---------------------------------------------------------------------------
-// kvReplayStore: ReplayStore adapted onto a kv.Store.
+// Replay operations.
 //
 // kv.Store's own capacity control (kv.WithMaxEntries) is a soft cap that
-// evicts an arbitrary/expired entry to make room rather than ever failing,
-// so it cannot reproduce the prior MemoryReplayStore/FileReplayStore
-// behavior of hard-rejecting once a maxEntries ceiling is reached. This
-// adapter therefore does not use kv.WithMaxEntries at all: it enforces
+// evicts an arbitrary/expired entry to make room rather than ever failing, so
+// it cannot reproduce the prior MemoryReplayStore/FileReplayStore behavior of
+// hard-rejecting once a maxEntries ceiling is reached. checkAndStoreReplay
+// therefore does not rely on kv.WithMaxEntries at all: it enforces
 // maxEntries itself using kv.Store.Len() (which, for both MemoryStore and
 // FileStore, also opportunistically prunes expired entries as a side effect
 // of counting -- the same "sweep expired, then check capacity" sequence the
@@ -519,37 +448,33 @@ func NewMemorySessionStore() *MemorySessionStore {
 // Len() cannot be called from inside a Mutate callback (both kv
 // implementations serialize Mutate under a lock that Len() would try to
 // re-acquire, e.g. FileStore's single s.mu, deadlocking), so the
-// Len-then-Mutate sequence below is wrapped in the adapter's own mutex to
-// keep the whole check-and-store operation atomic, the same way the
-// original implementations used a single mutex around their equivalent
-// count-then-write sequence.
+// Len-then-Mutate sequence below needs its own mutex to keep the whole
+// check-and-store operation atomic across concurrent callers -- the same way
+// the original implementations used a single mutex around their equivalent
+// count-then-write sequence. Since checkAndStoreReplay is now a plain
+// function rather than a struct method, that mutex has to be supplied by the
+// caller (Transport keeps one, scoped 1:1 with its ReplayStore) instead of
+// being embedded in a per-store wrapper type.
 // ---------------------------------------------------------------------------
 
-type kvReplayStore struct {
-	store      kv.Store
-	mu         sync.Mutex
-	maxEntries int
-}
+const defaultMaxReplayEntries = 250_000
 
-func newKVReplayStore(store kv.Store, maxEntries int) *kvReplayStore {
+func checkAndStoreReplay(store kv.Store, mu *sync.Mutex, maxEntries int, key string, expiresAt time.Time) (bool, error) {
 	if maxEntries <= 0 {
-		maxEntries = 250_000
+		maxEntries = defaultMaxReplayEntries
 	}
-	return &kvReplayStore{store: store, maxEntries: maxEntries}
-}
 
-func (s *kvReplayStore) CheckAndStore(key string, expiresAt time.Time) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mu.Lock()
+	defer mu.Unlock()
 
-	n, err := s.store.Len()
+	n, err := store.Len()
 	if err != nil {
 		return false, err
 	}
 
 	accepted := false
 	capExceeded := false
-	mErr := s.store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+	mErr := store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
 		if exists {
 			// Live (non-expired) entry already present: replay.
 			return nil, 0, false, nil
@@ -564,7 +489,7 @@ func (s *kvReplayStore) CheckAndStore(key string, expiresAt time.Time) (bool, er
 			accepted = true
 			return nil, 0, false, nil
 		}
-		if n >= s.maxEntries {
+		if n >= maxEntries {
 			capExceeded = true
 			return nil, 0, false, nil
 		}
@@ -578,13 +503,4 @@ func (s *kvReplayStore) CheckAndStore(key string, expiresAt time.Time) (bool, er
 		return false, errReplayCapacityExhausted
 	}
 	return accepted, nil
-}
-
-// MemoryReplayStore is an in-process ReplayStore backed by kv.MemoryStore.
-type MemoryReplayStore struct {
-	*kvReplayStore
-}
-
-func NewMemoryReplayStore(maxEntries int) *MemoryReplayStore {
-	return &MemoryReplayStore{kvReplayStore: newKVReplayStore(kv.NewMemoryStore(), maxEntries)}
 }

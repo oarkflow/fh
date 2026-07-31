@@ -93,7 +93,7 @@ Application routes protected by `Protect` are still your normal FH routes.
 
 ## Stores
 
-The default memory stores are useful for tests and single-process development. Production deployments should use durable or distributed implementations:
+The default `kv.NewMemoryStore` instances are useful for tests and single-process development. Production deployments should use durable or distributed `kv.Store` implementations:
 
 - `DeviceStore`: persists registered devices and revocation status.
 - `SessionStore`: stores active session keys. Protect this store carefully; do not serialize plaintext keys into an ordinary database.
@@ -103,9 +103,9 @@ If a browser keeps a device identity but the server loses its `DeviceStore` stat
 
 ### File-Backed Stores
 
-`file_store.go` provides file-backed alternatives that persist across restarts, for operators who want durability without a third-party database: `NewFileDeviceStore(dir)`, `NewFileSessionStore(dir, gcInterval)`, and `NewFileReplayStore(dir, maxEntries)`. Memory stores remain the default for `Install`/tests; you must opt in explicitly by constructing and wiring one of these into `Config`. Each store creates its directory with mode `0700` and writes files with mode `0600` using atomic write-temp-then-rename, matching the convention used by `mw/session`'s file store.
+For restart durability without a third-party database, construct `kv.NewFileStore(dir, kv.WithFileGCInterval(gcInterval))` and pass it as `DeviceStore`, `SessionStore`, or `ReplayStore` as appropriate. The secure transport domain logic only depends on `kv.Store`; concrete persistence choices happen when the application builds the config.
 
-`FileSessionStore` persists session records that include the live symmetric transport keys (`Session.Keys`). It applies the same file permission discipline as the in-memory store's key-zeroing, but be aware of a real limitation: unlike the in-memory store, deleted key material may remain recoverable from disk/backups/journaling filesystems until overwritten by other data — there is no portable, dependency-free way to securely erase already-written disk blocks on delete. Encrypt the storage volume at rest if this matters for your threat model.
+File-backed session records include live symmetric transport keys (`Session.Keys`). File permissions reduce accidental exposure, but deleted key material may remain recoverable from disk/backups/journaling filesystems until overwritten by other data. Encrypt the storage volume at rest if this matters for your threat model.
 
 ## Handler Helpers
 

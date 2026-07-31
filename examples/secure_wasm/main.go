@@ -24,6 +24,7 @@ import (
 	appconfig "github.com/oarkflow/fh/pkg/config"
 	responseprotocol "github.com/oarkflow/fh/pkg/httpsignature"
 	protocol "github.com/oarkflow/fh/pkg/securetransport"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 const (
@@ -168,7 +169,7 @@ func main() {
 		loginPassword = "demo"
 	}
 	webSessions := session.NewSessionManager(
-		session.NewMemoryStore(time.Minute),
+		kv.NewMemoryStore(kv.WithGCInterval(time.Minute), kv.WithMaxEntries(100000)),
 		session.SessionCookieName(cookieName(productionTLS)),
 		session.SessionSecret(sessionSecret),
 		session.SessionMaxAge(30*time.Minute),

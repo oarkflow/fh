@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
@@ -18,11 +17,11 @@ type Entry struct {
 	Body             []byte
 	Created, Expires time.Time
 }
-type Store interface {
-	Get(string) (Entry, bool)
-	Set(string, Entry)
-	Delete(string)
-}
+
+const maxCachedBodySize = 8 << 20
+
+const maxStoredEntrySize = maxCachedBodySize + maxCachedBodySize/2 + 4096
+
 type Config struct {
 	TTL                 time.Duration
 	MaxBodySize         int
@@ -30,7 +29,7 @@ type Config struct {
 	Methods             []string
 	VaryHeaders         []string
 	AllowRequestCookies bool
-	Store               Store
+	Store               kv.Store
 	KeyGenerator        func(fh.Ctx) string
 	Next                func(fh.Ctx) bool
 }
@@ -43,7 +42,7 @@ func New(config ...Config) fh.HandlerFunc {
 		merge(&cfg, config[0])
 	}
 	if cfg.Store == nil {
-		cfg.Store = NewMemoryStore(cfg.MaxEntries)
+		cfg.Store = kv.NewMemoryStore(kv.WithMaxEntries(cfg.MaxEntries))
 	}
 	if cfg.KeyGenerator == nil {
 		cfg.KeyGenerator = func(c fh.Ctx) string {
@@ -66,7 +65,7 @@ func New(config ...Config) fh.HandlerFunc {
 		for _, h := range cfg.VaryHeaders {
 			key += "\x00" + strings.ToLower(h) + "=" + c.Get(h)
 		}
-		if entry, ok := cfg.Store.Get(key); ok {
+		if entry, ok := Get(cfg.Store, key); ok {
 			c.Set("Age", strconv.Itoa(int(time.Since(entry.Created).Seconds())))
 			c.Set("X-Cache", "HIT")
 			if entry.ContentType != "" {
@@ -80,7 +79,7 @@ func New(config ...Config) fh.HandlerFunc {
 			if c.StatusCode() == fh.StatusOK && len(body) <= cfg.MaxBodySize && !c.HasResponseCookies() && !strings.Contains(cacheControl, "no-store") && !strings.Contains(cacheControl, "private") {
 				now := time.Now()
 				copyBody := append([]byte(nil), body...)
-				cfg.Store.Set(key, Entry{Status: c.StatusCode(), ContentType: c.ResponseHeader("Content-Type"), Body: copyBody, Created: now, Expires: now.Add(cfg.TTL)})
+				Set(cfg.Store, key, Entry{Status: c.StatusCode(), ContentType: c.ResponseHeader("Content-Type"), Body: copyBody, Created: now, Expires: now.Add(cfg.TTL)})
 			}
 			return body, nil
 		})
@@ -114,40 +113,9 @@ func merge(dst *Config, src Config) {
 	dst.AllowRequestCookies = src.AllowRequestCookies
 }
 
-// MemoryStore is a Store backed by kv.MemoryStore: it JSON-encodes each
-// Entry and delegates the map/lock/expiry mechanics to the shared kv
-// primitive instead of reimplementing them.
-//
-// kv.Store has no way to enumerate its keys, which the original
-// oldest-entry-first eviction policy needs. Rather than reimplement kv's
-// map+mutex storage locally to get that enumeration, MemoryStore keeps a
-// small side index of key -> Entry.Created purely for eviction ranking; the
-// authoritative entry data still lives in kv.
-type MemoryStore struct {
-	store      *kv.MemoryStore
-	maxEntries int
-
-	mu      sync.Mutex
-	created map[string]time.Time // key -> Entry.Created, for oldest-eviction ranking only
-}
-
-func NewMemoryStore(maxEntries ...int) *MemoryStore {
-	max := 1024
-	if len(maxEntries) > 0 && maxEntries[0] > 0 {
-		max = maxEntries[0]
-	}
-	return &MemoryStore{
-		store:      kv.NewMemoryStore(),
-		maxEntries: max,
-		created:    make(map[string]time.Time),
-	}
-}
-func (s *MemoryStore) Get(key string) (Entry, bool) {
-	data, ok, err := s.store.Get(key)
+func Get(store kv.Store, key string) (Entry, bool) {
+	data, ok, err := store.Get(key)
 	if err != nil || !ok {
-		s.mu.Lock()
-		delete(s.created, key)
-		s.mu.Unlock()
 		return Entry{}, false
 	}
 	var e Entry
@@ -156,7 +124,11 @@ func (s *MemoryStore) Get(key string) (Entry, bool) {
 	}
 	return e, true
 }
-func (s *MemoryStore) Set(key string, e Entry) {
+
+func Set(store kv.Store, key string, e Entry) {
+	if len(e.Body) > maxCachedBodySize {
+		return
+	}
 	data, err := json.Marshal(&e)
 	if err != nil {
 		return
@@ -165,42 +137,9 @@ func (s *MemoryStore) Set(key string, e Entry) {
 	if ttl <= 0 {
 		ttl = time.Nanosecond
 	}
-
-	s.mu.Lock()
-	if _, exists := s.created[key]; !exists && len(s.created) >= s.maxEntries {
-		s.evictOldestLocked()
-	}
-	s.created[key] = e.Created
-	s.mu.Unlock()
-
-	if err := s.store.Set(key, data, ttl); err != nil {
-		s.mu.Lock()
-		delete(s.created, key)
-		s.mu.Unlock()
-	}
+	_ = store.Set(key, data, ttl)
 }
 
-// evictOldestLocked removes the single tracked key with the oldest Created
-// time. Caller holds s.mu.
-func (s *MemoryStore) evictOldestLocked() {
-	var oldestKey string
-	var oldest time.Time
-	first := true
-	for candidate, created := range s.created {
-		if first || created.Before(oldest) {
-			oldestKey, oldest = candidate, created
-			first = false
-		}
-	}
-	if oldestKey != "" {
-		delete(s.created, oldestKey)
-		_ = s.store.Delete(oldestKey)
-	}
-}
-
-func (s *MemoryStore) Delete(key string) {
-	s.mu.Lock()
-	delete(s.created, key)
-	s.mu.Unlock()
-	_ = s.store.Delete(key)
+func Delete(store kv.Store, key string) {
+	_ = store.Delete(key)
 }

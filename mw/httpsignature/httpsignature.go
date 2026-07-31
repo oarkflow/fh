@@ -16,10 +16,6 @@ import (
 	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
-type NonceStore interface {
-	CheckAndStore(key string, expiresAt time.Time) (accepted bool, err error)
-}
-
 type Config struct {
 	PrivateKey ed25519.PrivateKey
 	KeyID      string
@@ -34,7 +30,7 @@ type Config struct {
 
 	Validity    time.Duration
 	MaxBodySize int
-	NonceStore  NonceStore
+	NonceStore  kv.Store
 	Now         func() time.Time
 	Skip        func(fh.Ctx) bool
 }
@@ -74,8 +70,9 @@ func New(config Config) (fh.HandlerFunc, error) {
 		config.MaxBodySize = 16 << 20
 	}
 	if config.NonceStore == nil {
-		config.NonceStore = NewMemoryNonceStore(250_000)
+		config.NonceStore = kv.NewMemoryStore(kv.WithShardCount(1))
 	}
+	var nonceMu sync.Mutex
 	privateKey := append(ed25519.PrivateKey(nil), config.PrivateKey...)
 	config.PrivateKey = nil
 
@@ -91,7 +88,7 @@ func New(config Config) (fh.HandlerFunc, error) {
 		if config.Now != nil {
 			now = config.Now()
 		}
-		accepted, err := config.NonceStore.CheckAndStore(config.KeyID+":"+request.Nonce, now.Add(config.Validity))
+		accepted, err := CheckAndStore(config.NonceStore, &nonceMu, config.KeyID+":"+request.Nonce, now.Add(config.Validity), 250_000)
 		if err != nil {
 			return fh.NewHTTPError(fh.StatusServiceUnavailable, "HTTP_SIGNATURE_NONCE_STORE", "response signature nonce could not be reserved")
 		}
@@ -216,50 +213,25 @@ func defaultString(value, fallback string) string {
 // its presence and TTL matter, never its content.
 var nonceMarker = []byte{1}
 
-// MemoryNonceStore is the default NonceStore used when Config.NonceStore is
-// unset. It is a thin adapter over kv.MemoryStore, which supplies the actual
-// map/TTL/expiry mechanics; MemoryNonceStore adds only the capacity-rejection
-// policy (kv.Store's own capacity handling evicts a live entry rather than
-// rejecting — see the package note in file_store.go) and the
-// expiresAt-to-ttl conversion CheckAndStore's interface requires.
-type MemoryNonceStore struct {
-	mu         sync.Mutex
-	store      *kv.MemoryStore
-	maxEntries int
-}
-
-func NewMemoryNonceStore(maxEntries int) *MemoryNonceStore {
+func CheckAndStore(store kv.Store, mu *sync.Mutex, key string, expiresAt time.Time, maxEntries int) (bool, error) {
 	if maxEntries <= 0 {
 		maxEntries = 250_000
 	}
-	// A single shard mirrors the original single mutex-guarded map:
-	// MemoryNonceStore serializes all access itself (see CheckAndStore
-	// below), so capacity accounting must stay exact rather than spread
-	// unevenly across shards.
-	return &MemoryNonceStore{
-		store:      kv.NewMemoryStore(kv.WithShardCount(1)),
-		maxEntries: maxEntries,
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
 	}
-}
-
-func (s *MemoryNonceStore) CheckAndStore(key string, expiresAt time.Time) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	now := time.Now()
 
-	// Capacity is checked first, matching the original ordering: Len()
-	// sweeps expired entries as a side effect (mirroring the original's
-	// evict-then-recheck), and a store already at capacity rejects the
-	// call outright, even for an already-live key.
-	n, err := s.store.Len()
+	n, err := store.Len()
 	if err != nil {
 		return false, err
 	}
-	if n >= s.maxEntries {
+	if n >= maxEntries {
 		return false, fmt.Errorf("http signature nonce store capacity exhausted")
 	}
 
-	_, exists, err := s.store.Get(key)
+	_, exists, err := store.Get(key)
 	if err != nil {
 		return false, err
 	}
@@ -276,7 +248,7 @@ func (s *MemoryNonceStore) CheckAndStore(key string, expiresAt time.Time) (bool,
 		// net effect.
 		return true, nil
 	}
-	if err := s.store.Set(key, nonceMarker, ttl); err != nil {
+	if err := store.Set(key, nonceMarker, ttl); err != nil {
 		return false, err
 	}
 	return true, nil

@@ -4,10 +4,12 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func TestMemoryCoordinatorLeaderLease(t *testing.T) {
-	st := NewMemoryStore()
+	st := kv.NewMemoryStore(kv.WithShardCount(1))
 	a, err := New(Config{Store: st, Node: Node{ID: "a"}, TTL: time.Minute})
 	if err != nil {
 		t.Fatal(err)

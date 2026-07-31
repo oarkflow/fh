@@ -2,17 +2,13 @@
 // shared by fh's middleware packages (rate limiters, replay/nonce guards,
 // response caches, reputation scores, allow-lists, admin registries, ...).
 //
-// Each middleware package still defines its own domain-specific storage
-// interface (e.g. ratelimiter.Store.Allow, timestamp.ReplayStore.Seen,
-// ipreputation.ReputationStore.Get/Set/Update) because those operations carry
-// package-specific semantics. What used to differ between packages was the
-// underlying mechanics of "keep this durably, keyed by an arbitrary string,
-// with an optional TTL" — atomic file writes, key-to-filename hashing,
-// directory permissions, background expiry sweeps. That mechanics layer is
-// implemented exactly once here, as Store, MemoryStore and FileStore, and
-// every middleware package's own Store adapts its domain type (JSON-encoded)
-// on top of a kv.Store instance instead of reimplementing storage from
-// scratch.
+// Middleware packages should depend on Store directly and layer their
+// domain-specific operations (rate-limit Allow, replay Seen, cache Get/Set,
+// and so on) as package functions over a Store parameter. The concrete
+// mechanics of "keep this durably, keyed by an arbitrary string, with an
+// optional TTL" — sharded locking, atomic file writes, key-to-filename hashing,
+// directory permissions, background expiry sweeps — live here once, in
+// MemoryStore and FileStore.
 package kv
 
 import (

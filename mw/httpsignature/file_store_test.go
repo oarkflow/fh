@@ -1,20 +1,27 @@
 package httpsignature
 
 import (
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func TestHTTPSigFileStoreCheckAndStoreBasic(t *testing.T) {
-	s := NewFileStore(t.TempDir(), 0)
-	accepted, err := s.CheckAndStore("nonce-a", time.Now().Add(time.Minute))
+	s, err := kv.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	var mu sync.Mutex
+	accepted, err := CheckAndStore(s, &mu, "nonce-a", time.Now().Add(time.Minute), 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !accepted {
 		t.Fatal("expected first use to be accepted")
 	}
-	accepted, err = s.CheckAndStore("nonce-a", time.Now().Add(time.Minute))
+	accepted, err = CheckAndStore(s, &mu, "nonce-a", time.Now().Add(time.Minute), 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -24,8 +31,12 @@ func TestHTTPSigFileStoreCheckAndStoreBasic(t *testing.T) {
 }
 
 func TestHTTPSigFileStoreExpiry(t *testing.T) {
-	s := NewFileStore(t.TempDir(), 0)
-	accepted, err := s.CheckAndStore("nonce-expiring", time.Now().Add(20*time.Millisecond))
+	s, err := kv.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	var mu sync.Mutex
+	accepted, err := CheckAndStore(s, &mu, "nonce-expiring", time.Now().Add(20*time.Millisecond), 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -33,7 +44,7 @@ func TestHTTPSigFileStoreExpiry(t *testing.T) {
 		t.Fatal("expected first use to be accepted")
 	}
 	time.Sleep(50 * time.Millisecond)
-	accepted, err = s.CheckAndStore("nonce-expiring", time.Now().Add(time.Minute))
+	accepted, err = CheckAndStore(s, &mu, "nonce-expiring", time.Now().Add(time.Minute), 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -43,19 +54,23 @@ func TestHTTPSigFileStoreExpiry(t *testing.T) {
 }
 
 func TestHTTPSigFileStoreDifferentKeysDoNotCollide(t *testing.T) {
-	s := NewFileStore(t.TempDir(), 0)
-	accepted, err := s.CheckAndStore("nonce-one", time.Now().Add(time.Minute))
+	s, err := kv.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	var mu sync.Mutex
+	accepted, err := CheckAndStore(s, &mu, "nonce-one", time.Now().Add(time.Minute), 100)
 	if err != nil || !accepted {
 		t.Fatalf("nonce-one: accepted=%v err=%v", accepted, err)
 	}
-	accepted, err = s.CheckAndStore("nonce-two", time.Now().Add(time.Minute))
+	accepted, err = CheckAndStore(s, &mu, "nonce-two", time.Now().Add(time.Minute), 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !accepted {
 		t.Fatal("expected nonce-two to be accepted despite nonce-one being recorded")
 	}
-	accepted, err = s.CheckAndStore("nonce-one", time.Now().Add(time.Minute))
+	accepted, err = CheckAndStore(s, &mu, "nonce-one", time.Now().Add(time.Minute), 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -66,23 +81,21 @@ func TestHTTPSigFileStoreDifferentKeysDoNotCollide(t *testing.T) {
 
 func TestHTTPSigFileStoreGC(t *testing.T) {
 	dir := t.TempDir()
-	s := NewFileStore(dir, 0)
-	if _, err := s.CheckAndStore("gc-nonce", time.Now().Add(10*time.Millisecond)); err != nil {
+	s, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	var mu sync.Mutex
+	if _, err := CheckAndStore(s, &mu, "gc-nonce", time.Now().Add(10*time.Millisecond), 100); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	time.Sleep(30 * time.Millisecond)
 	s.GC()
-	accepted, err := s.CheckAndStore("gc-nonce", time.Now().Add(time.Minute))
+	accepted, err := CheckAndStore(s, &mu, "gc-nonce", time.Now().Add(time.Minute), 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !accepted {
 		t.Fatal("expected expired nonce removed by GC to be accepted again")
 	}
-}
-
-func TestHTTPSigFileStoreStopGC(t *testing.T) {
-	s := NewFileStore(t.TempDir(), 5*time.Millisecond)
-	s.StopGC()
-	s.StopGC()
 }

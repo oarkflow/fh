@@ -20,18 +20,21 @@ func TestGenerateHashAndSplitKey(t *testing.T) {
 }
 func TestMemoryStoreRevoke(t *testing.T) {
 	key, hash, _ := Generate("fh_live", 8)
-	store := NewMemoryStore(KeyRecord{ID: "fh_live", Hash: hash})
-	rec, ok, err := store.Lookup(nil, "fh_live")
+	store, err := NewKVStore(KeyRecord{ID: "fh_live", Hash: hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok, err := Lookup(store, "fh_live")
 	if err != nil || !ok {
 		t.Fatal("lookup failed")
 	}
 	if !VerifyRecord(nil, key, rec) {
 		t.Fatal("expected verify")
 	}
-	if err := store.Revoke("fh_live"); err != nil {
+	if err := Revoke(store, "fh_live"); err != nil {
 		t.Fatal(err)
 	}
-	rec, _, _ = store.Lookup(nil, "fh_live")
+	rec, _, _ = Lookup(store, "fh_live")
 	if VerifyRecord(nil, key, rec) {
 		t.Fatal("revoked verified")
 	}

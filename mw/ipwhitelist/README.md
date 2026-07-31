@@ -38,5 +38,4 @@ Only trust forwarded headers from known proxies. Keep allowlists updated and inc
 
 ## File-backed store
 
-By default `Config.Allowed`/`Config.Blocked` build an in-memory `MemoryStore`. To manage a list from a file instead, set `Config.Store` (or `Config.BlockStore`) to `ipwhitelist.NewFileStore(path, reloadInterval)`, where `path` points to a JSON array of strings, each a bare IP or CIDR (the same format `NewMemoryStore` accepts). Pass a non-zero `reloadInterval` to poll the file for changes; a malformed edit is ignored and the last known-good list keeps serving.
-
+By default `Config.Allowed`/`Config.Blocked` build a `kv.NewMemoryStore`. To manage a list from a file, create any `kv.Store`, call `ipwhitelist.LoadFile(store, path)`, then pass it as `Config.Store` or `Config.BlockStore`. Use `ipwhitelist.StartFileWatcher(store, path, reloadInterval)` to poll for changes; a malformed edit is ignored and the last known-good list keeps serving.

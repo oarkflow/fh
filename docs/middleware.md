@@ -312,10 +312,13 @@ app.Use(idempotency.New(idempotency.Config{
 Tracks a decaying reputation score per client IP and blocks/flags clients that cross suspicious or block thresholds. Returns a cleanup function alongside the handler for the background decay loop.
 
 ```go
-import "github.com/oarkflow/fh/mw/ipreputation"
+import (
+    "github.com/oarkflow/fh/mw/ipreputation"
+    "github.com/oarkflow/fh/pkg/storage/kv"
+)
 
 reputation, stop := ipreputation.New(ipreputation.Config{
-    Store:               ipreputation.NewMemoryStore(10000),
+    Store:               kv.NewMemoryStore(kv.WithMaxEntries(10000)),
     BlockThreshold:      80,
     SuspiciousThreshold: 40,
     DecayRate:           0.1,
@@ -328,7 +331,7 @@ app.Use(reputation)
 
 | Config | Description |
 |--------|-------------|
-| `Store` | Backing store implementing `ReputationStore` (default: `NewMemoryStore`) |
+| `Store` | Backing `kv.Store` (default: `kv.NewMemoryStore`) |
 | `BlockThreshold` / `SuspiciousThreshold` | Score thresholds triggering `OnBlocked` / `OnSuspicious` |
 | `DecayRate` | Rate at which scores decay back toward zero over time |
 | `BlockDuration` | How long a client stays blocked once it crosses `BlockThreshold` |
@@ -529,10 +532,13 @@ app.Use(reliability.New(reliability.Config{}))
 Nonce/replay protection to prevent request replay attacks.
 
 ```go
-import "github.com/oarkflow/fh/mw/replay"
+import (
+    "github.com/oarkflow/fh/mw/replay"
+    "github.com/oarkflow/fh/pkg/storage/kv"
+)
 
 app.Use(replay.New(replay.Config{
-    Store: replay.NewMemoryStore(),
+    Store: kv.NewMemoryStore(),
     MaxAge: 5 * time.Minute,
 }))
 ```
@@ -604,13 +610,16 @@ app.Use(security.New(security.Config{
 
 ### session
 
-Signed cookie sessions with `MemoryStore` and `FileStore`.
+Signed cookie sessions backed by any `kv.Store`.
 
 ```go
-import "github.com/oarkflow/fh/mw/session"
+import (
+    "github.com/oarkflow/fh/mw/session"
+    "github.com/oarkflow/fh/pkg/storage/kv"
+)
 
 manager := session.NewSessionManager(
-    session.NewMemoryStore(5*time.Minute), // GC interval; bounded at 100k sessions by default
+    kv.NewMemoryStore(kv.WithGCInterval(5*time.Minute), kv.WithMaxEntries(100000)),
     session.SessionSecret([]byte("at-least-32-bytes-of-random-secret")),
 )
 app.Use(session.New(manager))
@@ -736,14 +745,17 @@ app.Use(timeout.New(timeout.Config{
 Anti-replay protection via a signed timestamp (and optional nonce) header, rejecting requests outside an allowed clock-skew window or with a reused nonce. Returns a cleanup function alongside the handler for the nonce store's background eviction.
 
 ```go
-import "github.com/oarkflow/fh/mw/timestamp"
+import (
+    "github.com/oarkflow/fh/mw/timestamp"
+    "github.com/oarkflow/fh/pkg/storage/kv"
+)
 
 replayGuard, stop := timestamp.New(timestamp.Config{
     Header:       "X-Timestamp",
     NonceHeader:  "X-Nonce",
     MaxSkew:      5 * time.Minute,
     RequireNonce: true,
-    Store:        timestamp.NewMemoryStore(10000),
+    Store:        kv.NewMemoryStore(kv.WithMaxEntries(10000)),
 })
 defer stop()
 
@@ -755,7 +767,7 @@ app.Use(replayGuard)
 | `Header` / `NonceHeader` | Header names carrying the timestamp and nonce |
 | `MaxSkew` | Maximum allowed difference between the header timestamp and server time |
 | `MaxSize` / `MaxNonceLength` | Bounds on the timestamp/nonce values to reject malformed input |
-| `Store` | Backing store implementing `ReplayStore` (default: `NewMemoryStore`) |
+| `Store` | Backing `kv.Store` (default: `kv.NewMemoryStore`) |
 | `Required` / `RequireNonce` | Whether the timestamp/nonce header must be present |
 | `KeyFunc` | Custom client-identity extractor for nonce scoping |
 | `Reject` | Custom rejection handler |

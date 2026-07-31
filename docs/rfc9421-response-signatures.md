@@ -25,7 +25,7 @@ app.Use(signer)
 
 `Origin` is explicit so `@target-uri` is never derived from untrusted forwarding headers. The middleware requires a matching negotiation, rejects reused nonces, caps buffered response size, sets `Cache-Control: no-store` and `Vary: Accept-Signature`, and signs the final transformed bytes.
 
-Install it after authentication/authorization and as the last response-transform middleware. The profile intentionally rejects streaming and `Content-Encoding`; disable compression on signed routes. For multiple server instances, provide a distributed `NonceStore` whose `CheckAndStore` operation is atomic.
+Install it after authentication/authorization and as the last response-transform middleware. The profile intentionally rejects streaming and `Content-Encoding`; disable compression on signed routes. For multiple server instances, provide a distributed `kv.Store` as `Config.NonceStore`.
 
 ## Go client
 

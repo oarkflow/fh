@@ -1,49 +1,31 @@
 package apikey
 
 import (
-	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 // writeRegistry persists records as the whole registry at dir, through a
-// kv.FileStore the same way FileStore.SaveRegistry does, then closes it so
-// the caller's own FileStore (or the next helper call) can open/reopen dir
-// without contention. This stands in for what used to be a raw
-// os.WriteFile of a hand-edited JSON array, now that persistence goes
-// through kv.FileStore under a single fixed key.
-func writeRegistry(t *testing.T, dir string, records []KeyRecord) {
+func newFileRegistry(t *testing.T, records []KeyRecord) kv.Store {
 	t.Helper()
-	store, err := kv.NewFileStore(dir)
+	store, err := kv.NewFileStore(t.TempDir(), kv.WithMaxEntrySize(maxRegistryFileSize))
 	if err != nil {
 		t.Fatalf("kv.NewFileStore: %v", err)
 	}
-	defer store.Close()
-	data, err := json.Marshal(records)
-	if err != nil {
-		t.Fatalf("marshal records: %v", err)
+	if err := SaveRegistry(store, records); err != nil {
+		t.Fatalf("SaveRegistry: %v", err)
 	}
-	if err := store.Set(registryKey, data, 0); err != nil {
-		t.Fatalf("set registry: %v", err)
-	}
+	return store
 }
 
 func TestFileStoreLookup(t *testing.T) {
-	dir := t.TempDir()
-	writeRegistry(t, dir, []KeyRecord{
+	s := newFileRegistry(t, []KeyRecord{
 		{ID: "key1", Name: "First", Hash: "h1", Scopes: []string{"read"}},
 		{ID: "key2", Name: "Second", Hash: "h2", Revoked: true},
 	})
 
-	s, err := NewFileStore(dir, 0)
-	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
-	}
-	defer s.StopWatch()
-
-	rec, ok, err := s.Lookup(nil, "key1")
+	rec, ok, err := Lookup(s, "key1")
 	if err != nil || !ok {
 		t.Fatalf("expected key1 found, ok=%v err=%v", ok, err)
 	}
@@ -51,20 +33,19 @@ func TestFileStoreLookup(t *testing.T) {
 		t.Fatalf("unexpected record for key1: %+v", rec)
 	}
 
-	rec2, ok, err := s.Lookup(nil, "key2")
+	rec2, ok, err := Lookup(s, "key2")
 	if err != nil || !ok || !rec2.Revoked {
 		t.Fatalf("expected key2 found and revoked, ok=%v err=%v rec=%+v", ok, err, rec2)
 	}
 
-	_, ok, err = s.Lookup(nil, "unknown")
+	_, ok, err = Lookup(s, "unknown")
 	if err != nil || ok {
 		t.Fatalf("expected unknown id to miss, ok=%v err=%v", ok, err)
 	}
 }
 
 func TestFileStoreConstructorErrorsOnMalformedFile(t *testing.T) {
-	dir := t.TempDir()
-	store, err := kv.NewFileStore(dir)
+	store, err := kv.NewFileStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("kv.NewFileStore: %v", err)
 	}
@@ -73,83 +54,58 @@ func TestFileStoreConstructorErrorsOnMalformedFile(t *testing.T) {
 	}
 	store.Close()
 
-	if _, err := NewFileStore(dir, 0); err == nil {
-		t.Fatalf("expected error constructing FileStore from malformed registry")
+	if _, _, err := Lookup(store, "anything"); err == nil {
+		t.Fatalf("expected lookup error from malformed registry")
 	}
 }
 
-func TestFileStoreConstructorErrorsOnMissingFile(t *testing.T) {
-	dir := t.TempDir()
-
-	if _, err := NewFileStore(dir, 0); err == nil {
-		t.Fatalf("expected error constructing FileStore from a registry-less directory")
+func TestFileStoreMissingRegistryMisses(t *testing.T) {
+	store, err := kv.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	if _, ok, err := Lookup(store, "missing"); err != nil || ok {
+		t.Fatalf("expected missing registry to miss without error, ok=%v err=%v", ok, err)
 	}
 }
 
-func TestFileStoreReloadPicksUpChanges(t *testing.T) {
-	dir := t.TempDir()
-	writeRegistry(t, dir, []KeyRecord{
+func TestFileStorePicksUpChanges(t *testing.T) {
+	s := newFileRegistry(t, []KeyRecord{
 		{ID: "key1", Name: "Original"},
 	})
 
-	s, err := NewFileStore(dir, 30*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
-	}
-	defer s.StopWatch()
-
-	rec, ok, _ := s.Lookup(nil, "key1")
+	rec, ok, _ := Lookup(s, "key1")
 	if !ok || rec.Name != "Original" {
 		t.Fatalf("expected original record, got ok=%v rec=%+v", ok, rec)
 	}
 
-	if err := s.SaveRegistry([]KeyRecord{
+	if err := SaveRegistry(s, []KeyRecord{
 		{ID: "key1", Name: "Updated"},
 		{ID: "key2", Name: "NewKey"},
 	}); err != nil {
 		t.Fatalf("SaveRegistry: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
-
-	rec, ok, _ = s.Lookup(nil, "key1")
+	rec, ok, _ = Lookup(s, "key1")
 	if !ok || rec.Name != "Updated" {
 		t.Fatalf("expected updated record after reload, got ok=%v rec=%+v", ok, rec)
 	}
-	rec2, ok, _ := s.Lookup(nil, "key2")
+	rec2, ok, _ := Lookup(s, "key2")
 	if !ok || rec2.Name != "NewKey" {
 		t.Fatalf("expected new key2 after reload, got ok=%v rec=%+v", ok, rec2)
 	}
 }
 
-func TestFileStoreReloadKeepsLastGoodOnMalformedUpdate(t *testing.T) {
-	dir := t.TempDir()
-	writeRegistry(t, dir, []KeyRecord{
+func TestFileStoreMalformedUpdateReturnsLookupError(t *testing.T) {
+	s := newFileRegistry(t, []KeyRecord{
 		{ID: "key1", Name: "Good"},
 	})
 
-	s, err := NewFileStore(dir, 30*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
-	}
-	defer s.StopWatch()
-
-	// Corrupt the registry directly (bypassing SaveRegistry, which would
-	// refuse to marshal/write anything malformed) to simulate an external
-	// writer leaving a bad entry behind.
-	badStore, err := kv.NewFileStore(dir)
-	if err != nil {
-		t.Fatalf("kv.NewFileStore: %v", err)
-	}
-	if err := badStore.Set(registryKey, []byte("{ broken"), 0); err != nil {
+	if err := s.Set(registryKey, []byte("{ broken"), 0); err != nil {
 		t.Fatalf("set broken registry: %v", err)
 	}
-	badStore.Close()
 
-	time.Sleep(100 * time.Millisecond)
-
-	rec, ok, _ := s.Lookup(nil, "key1")
-	if !ok || rec.Name != "Good" {
-		t.Fatalf("expected last-good record retained after malformed reload, got ok=%v rec=%+v", ok, rec)
+	if _, _, err := Lookup(s, "key1"); err == nil {
+		t.Fatalf("expected malformed registry to return lookup error")
 	}
 }

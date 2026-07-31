@@ -4,17 +4,19 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func TestMemoryStoreDoesNotEvictLiveReplayMarkers(t *testing.T) {
-	store := NewMemoryStore(1)
-	if _, err := store.Seen("first", time.Minute); err != nil {
+	store := kv.NewMemoryStore()
+	if _, err := Seen(store, "first", time.Minute, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Seen("second", time.Minute); !errors.Is(err, ErrReplayStoreFull) {
+	if _, err := Seen(store, "second", time.Minute, 1); !errors.Is(err, ErrReplayStoreFull) {
 		t.Fatalf("expected ErrReplayStoreFull, got %v", err)
 	}
-	if seen, err := store.Seen("first", time.Minute); err != nil || !seen {
+	if seen, err := Seen(store, "first", time.Minute, 1); err != nil || !seen {
 		t.Fatalf("valid replay marker was evicted: seen=%v err=%v", seen, err)
 	}
 }

@@ -34,10 +34,6 @@ type Result struct {
 	RetryAfter time.Duration
 }
 
-type Store interface {
-	Allow(key string, limit int, window time.Duration, now time.Time) (Result, error)
-}
-
 type Config struct {
 	Max    int
 	Window time.Duration
@@ -45,7 +41,11 @@ type Config struct {
 	KeyFunc KeyFunc
 	Skip    SkipFunc
 
-	Store Store
+	// Store backs the rate-limit counters. Defaults to an in-process
+	// kv.MemoryStore. Pass a kv.NewFileStore(dir, ...) to persist counters
+	// across restarts on a single node, or any other kv.Store implementation
+	// for a distributed backend.
+	Store kv.Store
 
 	SendHeaders bool
 
@@ -68,7 +68,7 @@ func New(config Config) fh.HandlerFunc {
 		}
 
 		now := time.Now()
-		result, err := cfg.Store.Allow(key, cfg.Max, cfg.Window, now)
+		result, err := Allow(cfg.Store, key, cfg.Max, cfg.Window, now)
 		if err != nil {
 			return err
 		}
@@ -109,7 +109,7 @@ func normalize(cfg Config) Config {
 		}
 	}
 	if cfg.Store == nil {
-		cfg.Store = NewMemoryStore(256)
+		cfg.Store = kv.NewMemoryStore(kv.WithShardCount(256))
 	}
 	if cfg.LimitReached == nil {
 		cfg.LimitReached = DefaultLimitReachedHandler
@@ -133,38 +133,23 @@ func DefaultLimitReachedHandler(ctx fh.Ctx, result Result) error {
 }
 
 // -----------------------------------------------------------------------------
-// In-memory sliding-window store
+// Fixed-window counting
 // -----------------------------------------------------------------------------
 
-// windowState is the JSON-encoded value MemoryStore and FileStore persist per
-// key in the underlying kv.Store. Count/PrevCount/WindowStart drive the
-// sliding-window weighting; ResetAt is when the current window ends.
+// windowState is the JSON-encoded value Allow persists per key in the
+// underlying kv.Store.
 type windowState struct {
 	Count       int       `json:"count"`
-	PrevCount   int       `json:"prev_count"`
 	WindowStart time.Time `json:"window_start"`
 	ResetAt     time.Time `json:"reset_at"`
 }
 
-// MemoryStore is a sharded, in-process Store backed by kv.MemoryStore. It
-// keeps the same sliding-window algorithm the original hand-rolled
-// implementation used, but the sharding, locking and expiry mechanics are now
-// provided once by pkg/storage/kv instead of being reimplemented here.
-type MemoryStore struct {
-	kv *kv.MemoryStore
-}
-
-func NewMemoryStore(shardCount int) *MemoryStore {
-	if shardCount <= 0 {
-		shardCount = 256
-	}
-
-	shardCount = nextPowerOfTwo(shardCount)
-
-	return &MemoryStore{kv: kv.NewMemoryStore(kv.WithShardCount(shardCount))}
-}
-
-func (s *MemoryStore) Allow(key string, limit int, window time.Duration, now time.Time) (Result, error) {
+// Allow applies a fixed-window rate-limit check for key against store,
+// admitting up to limit requests per window. One file-per-key or
+// shard-per-key counter is read, incremented and written back atomically via
+// kv.Store.Mutate, so the same algorithm works unchanged whether store is a
+// kv.MemoryStore, a kv.FileStore, or any other kv.Store implementation.
+func Allow(store kv.Store, key string, limit int, window time.Duration, now time.Time) (Result, error) {
 	if limit <= 0 {
 		limit = 1
 	}
@@ -173,42 +158,19 @@ func (s *MemoryStore) Allow(key string, limit int, window time.Duration, now tim
 	}
 
 	var result Result
-	err := s.kv.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+	err := store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
 		var st windowState
 		if exists {
 			if jerr := json.Unmarshal(current, &st); jerr != nil {
 				exists = false
 			}
 		}
-		if !exists {
+		if !exists || !now.Before(st.ResetAt) {
 			st = windowState{WindowStart: now, ResetAt: now.Add(window)}
 		}
 
-		if !now.Before(st.ResetAt) {
-			elapsed := now.Sub(st.WindowStart)
-			if elapsed >= 2*window {
-				st.PrevCount = 0
-			} else {
-				st.PrevCount = st.Count
-			}
-			st.Count = 0
-			st.WindowStart = now
-			st.ResetAt = now.Add(window)
-		}
-
-		// Sliding window: weight previous window's count by elapsed fraction.
-		elapsed := now.Sub(st.WindowStart).Seconds()
-		windowSec := window.Seconds()
-		var weightedCount float64
-		if elapsed < windowSec && st.PrevCount > 0 {
-			previousWeight := (windowSec - elapsed) / windowSec
-			weightedCount = float64(st.PrevCount)*previousWeight + float64(st.Count)
-		} else {
-			weightedCount = float64(st.Count)
-		}
-
 		st.Count++
-		used := int(weightedCount) + 1
+		used := st.Count
 		resetAt := st.ResetAt
 
 		remaining := limit - used
@@ -238,27 +200,14 @@ func (s *MemoryStore) Allow(key string, limit int, window time.Duration, now tim
 		if merr != nil {
 			return nil, 0, false, merr
 		}
-		// Keep the window state alive for two full windows of inactivity so
-		// the prevCount weighting above still has something to read right
-		// after a window boundary; kv's own expiry then reclaims windows
-		// that truly go stale (no requests for that long).
-		return data, 2 * window, true, nil
+		ttl := resetAt.Sub(now)
+		if ttl <= 0 {
+			ttl = window
+		}
+		return data, ttl, true, nil
 	})
 	if err != nil {
 		return Result{}, err
 	}
 	return result, nil
-}
-
-func nextPowerOfTwo(n int) int {
-	if n <= 1 {
-		return 1
-	}
-
-	p := 1
-	for p < n {
-		p <<= 1
-	}
-
-	return p
 }

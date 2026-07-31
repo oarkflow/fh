@@ -26,14 +26,8 @@ type Score struct {
 	UpdatedAt time.Time
 }
 
-type ReputationStore interface {
-	Get(ip string) (*Score, bool)
-	Set(ip string, score *Score)
-	Update(ip string, delta float64, reason string)
-}
-
 type Config struct {
-	Store               ReputationStore
+	Store               kv.Store
 	BlockThreshold      float64
 	SuspiciousThreshold float64
 	DecayRate           float64
@@ -59,9 +53,8 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 	}
 
 	stop := make(chan struct{})
-	if ms, ok := cfg.Store.(*MemoryStore); ok {
-		go ms.startDecay(cfg.DecayRate, cfg.BlockDuration, cfg.BlockThreshold, stop)
-	}
+	index := newIndexState(cfg.MaxEntries)
+	go startDecay(cfg.Store, index, cfg.DecayRate, cfg.BlockDuration, cfg.BlockThreshold, stop)
 
 	handler := func(c fh.Ctx) error {
 		if cfg.Skip != nil && cfg.Skip(c) {
@@ -79,7 +72,7 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 			return cfg.OnBlocked(c, &Score{Value: 100, Reasons: []string{"blacklisted"}})
 		}
 
-		score, exists := cfg.Store.Get(ip)
+		score, exists := Get(cfg.Store, ip)
 		if exists {
 			switch {
 			case score.Value >= cfg.BlockThreshold:
@@ -94,7 +87,7 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 		err := c.Next()
 
 		status := c.StatusCode()
-		recordScore(cfg.Store, ip, status)
+		recordScore(cfg.Store, index, ip, status)
 
 		return err
 	}
@@ -121,7 +114,7 @@ func normalize(cfg Config) Config {
 		cfg.BlockDuration = 30 * time.Minute
 	}
 	if cfg.Store == nil {
-		cfg.Store = NewMemoryStore(cfg.MaxEntries)
+		cfg.Store = kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(cfg.MaxEntries))
 	}
 	if cfg.KeyFunc == nil {
 		cfg.KeyFunc = func(c fh.Ctx) string { return c.IP() }
@@ -145,7 +138,7 @@ func extractIP(addr string) string {
 	return host
 }
 
-func recordScore(store ReputationStore, ip string, status int) {
+func recordScore(store kv.Store, index *indexState, ip string, status int) {
 	delta := 0.0
 	reason := ""
 	switch {
@@ -170,41 +163,25 @@ func recordScore(store ReputationStore, ip string, status int) {
 	}
 
 	if delta != 0 {
-		store.Update(ip, delta, reason)
+		Update(store, index, ip, delta, reason)
 	}
 }
 
-// MemoryStore is a ReputationStore backed by kv.MemoryStore: it JSON-encodes
-// each IP's Score and delegates the actual map/lock/expiry mechanics to the
-// shared kv primitive instead of reimplementing them.
-//
-// kv.Store has no way to enumerate its keys, but the lowest-scoring-first
-// eviction policy below (and the decay loop) both need to walk every tracked
-// IP. Rather than reimplement kv's map+mutex storage locally to get that
-// enumeration, MemoryStore keeps a small side index of ip -> current Score
-// value (float64 only, not the full Score/Reasons) purely for that ranking
-// purpose; the authoritative data for every IP still lives in kv.
-type MemoryStore struct {
-	store   *kv.MemoryStore
-	maxSize int
-
+type indexState struct {
 	mu    sync.Mutex
-	index map[string]float64 // ip -> current Score.Value, for eviction/decay ranking only
+	score map[string]float64
+	max   int
 }
 
-func NewMemoryStore(maxSize int) *MemoryStore {
-	if maxSize <= 0 {
-		maxSize = 100000
+func newIndexState(max int) *indexState {
+	if max <= 0 {
+		max = 100000
 	}
-	return &MemoryStore{
-		store:   kv.NewMemoryStore(),
-		maxSize: maxSize,
-		index:   make(map[string]float64, maxSize/4),
-	}
+	return &indexState{score: make(map[string]float64, max/4), max: max}
 }
 
-func (s *MemoryStore) Get(ip string) (*Score, bool) {
-	data, ok, err := s.store.Get(ip)
+func Get(store kv.Store, ip string) (*Score, bool) {
+	data, ok, err := store.Get(ip)
 	if err != nil || !ok {
 		return nil, false
 	}
@@ -215,7 +192,7 @@ func (s *MemoryStore) Get(ip string) (*Score, bool) {
 	return &sc, true
 }
 
-func (s *MemoryStore) Set(ip string, score *Score) {
+func Set(store kv.Store, index *indexState, ip string, score *Score) {
 	if score == nil {
 		return
 	}
@@ -225,18 +202,20 @@ func (s *MemoryStore) Set(ip string, score *Score) {
 	if err != nil {
 		return
 	}
-	if err := s.store.Set(ip, data, 0); err != nil {
+	if err := store.Set(ip, data, 0); err != nil {
 		return
 	}
-	s.mu.Lock()
-	s.index[ip] = clone.Value
-	s.mu.Unlock()
-	s.evict()
+	if index != nil {
+		index.mu.Lock()
+		index.score[ip] = clone.Value
+		index.mu.Unlock()
+		evict(store, index)
+	}
 }
 
-func (s *MemoryStore) Update(ip string, delta float64, reason string) {
+func Update(store kv.Store, index *indexState, ip string, delta float64, reason string) {
 	var newValue float64
-	err := s.store.Mutate(ip, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+	err := store.Mutate(ip, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
 		var sc Score
 		if exists {
 			if json.Unmarshal(current, &sc) != nil {
@@ -259,26 +238,28 @@ func (s *MemoryStore) Update(ip string, delta float64, reason string) {
 	if err != nil {
 		return
 	}
-	s.mu.Lock()
-	s.index[ip] = newValue
-	s.mu.Unlock()
-	s.evict()
+	if index != nil {
+		index.mu.Lock()
+		index.score[ip] = newValue
+		index.mu.Unlock()
+		evict(store, index)
+	}
 }
 
 // evict mirrors the original MemoryStore's policy: once over maxSize, sort
 // tracked IPs by score value ascending and drop the lowest 10% (at least 1).
-func (s *MemoryStore) evict() {
-	s.mu.Lock()
-	if len(s.index) <= s.maxSize {
-		s.mu.Unlock()
+func evict(store kv.Store, index *indexState) {
+	index.mu.Lock()
+	if len(index.score) <= index.max {
+		index.mu.Unlock()
 		return
 	}
 	type entry struct {
 		ip    string
 		value float64
 	}
-	entries := make([]entry, 0, len(s.index))
-	for ip, v := range s.index {
+	entries := make([]entry, 0, len(index.score))
+	for ip, v := range index.score {
 		entries = append(entries, entry{ip, v})
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -291,40 +272,40 @@ func (s *MemoryStore) evict() {
 	victims := make([]string, 0, removeCount)
 	for i := 0; i < removeCount && i < len(entries); i++ {
 		victims = append(victims, entries[i].ip)
-		delete(s.index, entries[i].ip)
+		delete(index.score, entries[i].ip)
 	}
-	s.mu.Unlock()
+	index.mu.Unlock()
 	for _, ip := range victims {
-		_ = s.store.Delete(ip)
+		_ = store.Delete(ip)
 	}
 }
 
-func (s *MemoryStore) startDecay(rate float64, blockDuration time.Duration, blockThreshold float64, stop <-chan struct{}) {
+func startDecay(store kv.Store, index *indexState, rate float64, blockDuration time.Duration, blockThreshold float64, stop <-chan struct{}) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			s.decayOnce(rate, blockDuration, blockThreshold)
+			decayOnce(store, index, rate, blockDuration, blockThreshold)
 		case <-stop:
 			return
 		}
 	}
 }
 
-func (s *MemoryStore) decayOnce(rate float64, blockDuration time.Duration, blockThreshold float64) {
-	s.mu.Lock()
-	ips := make([]string, 0, len(s.index))
-	for ip := range s.index {
+func decayOnce(store kv.Store, index *indexState, rate float64, blockDuration time.Duration, blockThreshold float64) {
+	index.mu.Lock()
+	ips := make([]string, 0, len(index.score))
+	for ip := range index.score {
 		ips = append(ips, ip)
 	}
-	s.mu.Unlock()
+	index.mu.Unlock()
 
 	now := time.Now()
 	for _, ip := range ips {
 		var removed, changed bool
 		var newValue float64
-		err := s.store.Mutate(ip, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		err := store.Mutate(ip, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
 			if !exists {
 				removed = true
 				return nil, 0, false, nil
@@ -356,15 +337,15 @@ func (s *MemoryStore) decayOnce(rate float64, blockDuration time.Duration, block
 		if err != nil {
 			continue
 		}
-		s.mu.Lock()
+		index.mu.Lock()
 		if removed {
-			delete(s.index, ip)
+			delete(index.score, ip)
 		} else if changed {
-			s.index[ip] = newValue
+			index.score[ip] = newValue
 		}
-		s.mu.Unlock()
+		index.mu.Unlock()
 		if removed {
-			_ = s.store.Delete(ip)
+			_ = store.Delete(ip)
 		}
 	}
 }

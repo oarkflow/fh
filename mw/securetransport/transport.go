@@ -13,10 +13,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
 	protocol "github.com/oarkflow/fh/pkg/securetransport"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 const (
@@ -51,9 +53,9 @@ type Config struct {
 	Limits                  protocol.Limits
 	MaxReplayEntries        int
 
-	DeviceStore  DeviceStore
-	SessionStore SessionStore
-	ReplayStore  ReplayStore
+	DeviceStore  kv.Store
+	SessionStore kv.Store
+	ReplayStore  kv.Store
 
 	// AuthorizeDeviceRegistration must authenticate/authorize registration and
 	// may return the application principal bound to the device. A nil callback
@@ -95,6 +97,7 @@ type Transport struct {
 	publicKey     [32]byte
 	allowedOrigin map[string]struct{}
 	preserveOuter map[string]struct{}
+	replayMu      sync.Mutex
 }
 
 func New(config Config) (*Transport, error) {
@@ -118,13 +121,13 @@ func New(config Config) (*Transport, error) {
 		config.MaxClockSkew = 30 * time.Second
 	}
 	if config.DeviceStore == nil {
-		config.DeviceStore = NewMemoryDeviceStore()
+		config.DeviceStore = kv.NewMemoryStore()
 	}
 	if config.SessionStore == nil {
-		config.SessionStore = NewMemorySessionStore()
+		config.SessionStore = kv.NewMemoryStore()
 	}
 	if config.ReplayStore == nil {
-		config.ReplayStore = NewMemoryReplayStore(config.MaxReplayEntries)
+		config.ReplayStore = kv.NewMemoryStore()
 	}
 	// Hiding application metadata is the safe default. ExposeResponseHeaders
 	// is an explicit compatibility escape hatch.
@@ -250,7 +253,7 @@ func (t *Transport) handleSecure(c fh.Ctx) error {
 		t.event(c, "malformed_envelope", "", "", "", "request envelope rejected")
 		return t.authFailure()
 	}
-	session, err := t.cfg.SessionStore.Get(meta.SessionID)
+	session, err := getSession(t.cfg.SessionStore, meta.SessionID)
 	if err != nil || !session.ExpiresAt.After(time.Now()) {
 		t.event(c, "unknown_session", "", protocol.EncodeID(meta.SessionID), protocol.EncodeID(meta.RequestID), "session unavailable")
 		return t.authFailure()
@@ -264,7 +267,7 @@ func (t *Transport) handleSecure(c fh.Ctx) error {
 		return t.authFailure()
 	}
 	if !t.cfg.SkipDeviceStatusCheck {
-		if _, err := t.cfg.DeviceStore.Get(session.DeviceID); err != nil {
+		if _, err := getDevice(t.cfg.DeviceStore, session.DeviceID); err != nil {
 			t.event(c, "revoked_device_rejected", protocol.EncodeID(session.DeviceID), protocol.EncodeID(session.ID), protocol.EncodeID(meta.RequestID), "device is revoked or unavailable")
 			return t.authFailure()
 		}
@@ -279,7 +282,7 @@ func (t *Transport) handleSecure(c fh.Ctx) error {
 	}
 	replayExpiry := time.UnixMilli(decoded.ExpiresAt).Add(t.cfg.MaxClockSkew)
 	sequenceKey := "request-sequence:" + protocol.EncodeID(session.ID) + ":" + strconv.FormatUint(decoded.Sequence, 10)
-	accepted, err := t.cfg.ReplayStore.CheckAndStore(sequenceKey, replayExpiry)
+	accepted, err := checkAndStoreReplay(t.cfg.ReplayStore, &t.replayMu, t.cfg.MaxReplayEntries, sequenceKey, replayExpiry)
 	if err != nil {
 		return fh.NewHTTPError(fh.StatusServiceUnavailable, "FH_SECURE_REPLAY_STORE", "secure request could not be accepted")
 	}
@@ -288,7 +291,7 @@ func (t *Transport) handleSecure(c fh.Ctx) error {
 		return fh.NewHTTPError(fh.StatusConflict, "FH_SECURE_REPLAY", "request replay detected")
 	}
 	requestIDKey := "request-id:" + protocol.EncodeID(session.ID) + ":" + protocol.EncodeID(decoded.RequestID)
-	accepted, err = t.cfg.ReplayStore.CheckAndStore(requestIDKey, replayExpiry)
+	accepted, err = checkAndStoreReplay(t.cfg.ReplayStore, &t.replayMu, t.cfg.MaxReplayEntries, requestIDKey, replayExpiry)
 	if err != nil {
 		return fh.NewHTTPError(fh.StatusServiceUnavailable, "FH_SECURE_REPLAY_STORE", "secure request could not be accepted")
 	}
@@ -316,7 +319,7 @@ func (t *Transport) handleSecure(c fh.Ctx) error {
 	c.Locals(LocalSession, info)
 	c.Locals(LocalDevice, session.DeviceID)
 	c.Locals(LocalRequest, decoded.RequestID)
-	_ = t.cfg.DeviceStore.Touch(session.DeviceID, time.Now())
+	_ = touchDevice(t.cfg.DeviceStore, session.DeviceID, time.Now())
 	if t.cfg.ValidateSession != nil {
 		if err := t.cfg.ValidateSession(c, info); err != nil {
 			return err
@@ -502,7 +505,7 @@ func (t *Transport) registerDevice(c fh.Ctx) error {
 		return fh.NewHTTPError(fh.StatusForbidden, "FH_DEVICE_REGISTRATION_DISABLED", "device registration is not authorized")
 	}
 	replayKey := "device-registration:" + base64.RawURLEncoding.EncodeToString(request.Nonce[:])
-	accepted, err := t.cfg.ReplayStore.CheckAndStore(replayKey, now.Add(t.cfg.HandshakeTTL))
+	accepted, err := checkAndStoreReplay(t.cfg.ReplayStore, &t.replayMu, t.cfg.MaxReplayEntries, replayKey, now.Add(t.cfg.HandshakeTTL))
 	if err != nil || !accepted {
 		return fh.NewHTTPError(fh.StatusConflict, "FH_DEVICE_REPLAY", "device registration request was already used")
 	}
@@ -511,7 +514,7 @@ func (t *Transport) registerDevice(c fh.Ctx) error {
 		return err
 	}
 	device := Device{ID: id, PublicKey: request.PublicKey, Name: request.Name, Principal: principal, CreatedAt: now, LastSeen: now}
-	if err := t.cfg.DeviceStore.Register(device); err != nil {
+	if err := registerDevice(t.cfg.DeviceStore, device); err != nil {
 		return err
 	}
 	response, _ := (protocol.DeviceRegistrationResponse{DeviceID: id, CreatedAt: now.UnixMilli()}).Encode()
@@ -535,7 +538,7 @@ func (t *Transport) createSession(c fh.Ctx) error {
 	if err := protocol.ValidateTime(hello.IssuedAt, hello.ExpiresAt, now, t.cfg.MaxClockSkew); err != nil || time.UnixMilli(hello.ExpiresAt).Sub(time.UnixMilli(hello.IssuedAt)) > t.cfg.HandshakeTTL {
 		return t.authFailure()
 	}
-	device, err := t.cfg.DeviceStore.Get(hello.DeviceID)
+	device, err := getDevice(t.cfg.DeviceStore, hello.DeviceID)
 	if err != nil {
 		return t.authFailure()
 	}
@@ -545,7 +548,7 @@ func (t *Transport) createSession(c fh.Ctx) error {
 		return t.authFailure()
 	}
 	replayKey := "handshake:" + protocol.EncodeID(hello.DeviceID) + ":" + base64.RawURLEncoding.EncodeToString(hello.Nonce[:])
-	accepted, err := t.cfg.ReplayStore.CheckAndStore(replayKey, time.UnixMilli(hello.ExpiresAt).Add(t.cfg.MaxClockSkew))
+	accepted, err := checkAndStoreReplay(t.cfg.ReplayStore, &t.replayMu, t.cfg.MaxReplayEntries, replayKey, time.UnixMilli(hello.ExpiresAt).Add(t.cfg.MaxClockSkew))
 	if err != nil || !accepted {
 		return fh.NewHTTPError(fh.StatusConflict, "FH_SESSION_REPLAY", "session request was already used")
 	}
@@ -587,7 +590,7 @@ func (t *Transport) createSession(c fh.Ctx) error {
 	keys := protocol.DeriveSessionKeys(combinedShared, clientRaw, serverCore)
 	serverHello.Proof = protocol.ServerProof(keys.ServerToClient, clientRaw, serverCore)
 	session := Session{ID: sessionID, DeviceID: device.ID, Principal: device.Principal, Keys: keys, CreatedAt: now, ExpiresAt: expires, KeyID: t.cfg.KeyID}
-	if err := t.cfg.SessionStore.Create(session); err != nil {
+	if err := createSession(t.cfg.SessionStore, session); err != nil {
 		zeroSession(&session)
 		wipe(keys.ClientToServer[:])
 		wipe(keys.ServerToClient[:])
@@ -609,7 +612,7 @@ func (t *Transport) revokeSession(c fh.Ctx) error {
 	if !ok {
 		return t.authFailure()
 	}
-	if err := t.cfg.SessionStore.Delete(session.ID); err != nil {
+	if err := deleteSession(t.cfg.SessionStore, session.ID); err != nil {
 		return err
 	}
 	t.event(c, "session_revoked", protocol.EncodeID(session.DeviceID), protocol.EncodeID(session.ID), "", "")

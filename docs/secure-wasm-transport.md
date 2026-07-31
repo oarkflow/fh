@@ -206,9 +206,9 @@ The included example uses `mw/session`: `POST /auth/login` creates the normal FH
 
 ## Distributed deployment
 
-The default stores are process-local and bounded. Multi-instance production deployments must provide shared implementations:
+The default stores are process-local and bounded. Multi-instance production deployments must provide shared `kv.Store` implementations:
 
-- `ReplayStore`: Redis/Valkey or another atomic compare-and-set TTL store.
+- `ReplayStore`: Redis/Valkey or another atomic TTL-capable store.
 - `SessionStore`: encrypted distributed session records or sticky sessions with explicit failover policy.
 - `DeviceStore`: durable SQL/NoSQL device registry with revocation and audit fields.
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 // hexID returns a valid-looking 64-hex-char session ID (validSessionID
@@ -19,18 +21,19 @@ func hexID(n int) string {
 // until GC reclaimed expired ones.
 func TestMemoryStoreBoundedByMaxSessions(t *testing.T) {
 	const maxSessions = 50
-	store := NewMemoryStore(0, maxSessions)
+	store := kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(maxSessions))
 
 	for i := 0; i < 1000; i++ {
 		s := &Session{ID: hexID(i + 1), Data: map[string]any{}, ExpiresAt: time.Now().Add(time.Hour)}
-		if err := store.Set(s); err != nil {
+		if err := SetSession(store, s); err != nil {
 			t.Fatalf("unexpected error at i=%d: %v", i, err)
 		}
 	}
 
-	store.mu.RLock()
-	size := len(store.sessions)
-	store.mu.RUnlock()
+	size, err := store.Len()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if size > maxSessions {
 		t.Fatalf("expected store bounded at %d sessions after 1000 inserts, got %d", maxSessions, size)
@@ -41,9 +44,9 @@ func TestMemoryStoreBoundedByMaxSessions(t *testing.T) {
 // explicit maxSessions argument) still applies a bound rather than growing
 // forever.
 func TestMemoryStoreDefaultBoundIsSane(t *testing.T) {
-	store := NewMemoryStore(0)
-	if store.maxSize != defaultMaxSessions {
-		t.Fatalf("expected default maxSize=%d, got %d", defaultMaxSessions, store.maxSize)
+	store := kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(defaultMaxSessions))
+	if store == nil {
+		t.Fatal("expected default kv session store")
 	}
 }
 
@@ -51,25 +54,25 @@ func TestMemoryStoreDefaultBoundIsSane(t *testing.T) {
 // an already-expired session is reclaimed in preference to evicting a live
 // one.
 func TestMemoryStoreEvictsExpiredBeforeArbitrary(t *testing.T) {
-	store := NewMemoryStore(0, 2)
+	store := kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(2))
 	live := &Session{ID: hexID(1), Data: map[string]any{}, ExpiresAt: time.Now().Add(time.Hour)}
 	expired := &Session{ID: hexID(2), Data: map[string]any{}, ExpiresAt: time.Now().Add(-time.Minute)}
-	if err := store.Set(live); err != nil {
+	if err := SetSession(store, live); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Set(expired); err != nil {
+	if err := SetSession(store, expired); err != nil {
 		t.Fatal(err)
 	}
 
 	newSession := &Session{ID: hexID(3), Data: map[string]any{}, ExpiresAt: time.Now().Add(time.Hour)}
-	if err := store.Set(newSession); err != nil {
+	if err := SetSession(store, newSession); err != nil {
 		t.Fatal(err)
 	}
 
-	if got, err := store.Get(live.ID); err != nil || got == nil {
+	if got, err := GetSession(store, live.ID); err != nil || got == nil {
 		t.Fatalf("expected live session to survive eviction, got %v err=%v", got, err)
 	}
-	if got, _ := store.Get(expired.ID); got != nil {
+	if got, _ := GetSession(store, expired.ID); got != nil {
 		t.Fatal("expected expired session to be evicted, not the live one")
 	}
 }

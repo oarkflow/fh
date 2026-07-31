@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func TestCookieSecurityValidation(t *testing.T) {
@@ -48,7 +49,7 @@ func TestParseCookieUsesFirstDuplicate(t *testing.T) {
 func TestSessionTokenRotationTamperingAndBinding(t *testing.T) {
 	oldKey := []byte("old-key-32-bytes-long-for-testing!!")
 	newKey := []byte("new-key-32-bytes-long-for-testing!!")
-	store := NewMemoryStore(0)
+	store := kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(defaultMaxSessions))
 	oldManager := NewSessionManager(store, SessionCookieName("sid"), SessionSecrets(oldKey))
 	s := oldManager.NewSession()
 	s.Set("user", "alice")
@@ -98,7 +99,7 @@ func TestSessionTokenRotationTamperingAndBinding(t *testing.T) {
 }
 
 func TestSessionRegenerateDestroyAndStoreSnapshots(t *testing.T) {
-	store := NewMemoryStore(0)
+	store := kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(defaultMaxSessions))
 	manager := NewSessionManager(store, SessionSecrets([]byte("0123456789abcdef0123456789abcdef")))
 	s := manager.NewSession()
 	s.Set("role", "admin")
@@ -113,11 +114,11 @@ func TestSessionRegenerateDestroyAndStoreSnapshots(t *testing.T) {
 	if s.ID == oldID {
 		t.Fatal("session ID did not rotate")
 	}
-	if old, _ := store.Get(oldID); old != nil {
+	if old, _ := GetSession(store, oldID); old != nil {
 		t.Fatal("old session survived regeneration")
 	}
 
-	stored, _ := store.Get(s.ID)
+	stored, _ := GetSession(store, s.ID)
 	s.Set("role", "changed-after-save")
 	if stored.Get("role") != "admin" {
 		t.Fatal("memory store leaked a mutable session pointer")
@@ -129,26 +130,34 @@ func TestSessionRegenerateDestroyAndStoreSnapshots(t *testing.T) {
 	if err := manager.Save(ctx, s); err != nil {
 		t.Fatal(err)
 	}
-	if resurrected, _ := store.Get(s.ID); resurrected != nil {
+	if resurrected, _ := GetSession(store, s.ID); resurrected != nil {
 		t.Fatal("destroyed session was recreated")
 	}
 }
 
 func TestFileStoreAtomicRoundTripAndValidation(t *testing.T) {
-	store := NewFileStore(t.TempDir(), 0)
+	dir := t.TempDir()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
 	s := &Session{ID: strings.Repeat("a", 64), Data: map[string]any{"user": "alice"}, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}
-	if err := store.Set(s); err != nil {
+	if err := SetSession(store, s); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := store.Get(s.ID)
+	loaded, err := GetSession(store, s.ID)
 	if err != nil || loaded.Get("user") != "alice" {
 		t.Fatalf("loaded=%#v err=%v", loaded, err)
 	}
-	info, err := os.Stat(store.path(s.ID))
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("entries=%d err=%v", len(entries), err)
+	}
+	info, err := entries[0].Info()
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("mode=%v err=%v", info.Mode().Perm(), err)
 	}
-	if _, err := store.Get("../../escape"); err == nil {
+	if _, err := GetSession(store, "../../escape"); err == nil {
 		t.Fatal("accepted unsafe session ID")
 	}
 }

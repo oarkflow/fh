@@ -25,53 +25,12 @@ import (
 	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
-// Store holds per-key sliding window state for the rate limiter and decides
-// whether a request for key is allowed right now. Rate, burst and window
-// size are configured once when the Store is constructed (they are
-// properties of a single limiter instance, not per-call parameters), so
-// Allow only needs the key.
-//
-// Returns (allowed, remaining, retryAfter) with the same semantics as the
-// former Limiter.Allow: remaining is the number of requests still permitted
-// in the current window when allowed is true (0 otherwise), and retryAfter
-// is how long the caller should wait before retrying when allowed is false.
-type Store interface {
-	Allow(key string) (allowed bool, remaining int, retryAfter time.Duration)
-}
-
 // windowState is the JSON-encoded value held per key inside the underlying
 // kv.Store: the sorted, already-trimmed timestamps of requests still inside
 // the sliding window as of the last Allow call for that key.
 type windowState struct {
 	Timestamps []time.Time `json:"timestamps"`
 }
-
-// MemoryStore is the default Store: a thin adapter over kv.MemoryStore, the
-// shared in-process map+shard+mutex primitive used by every middleware
-// package in this module. Per-key sliding-window state (the compacting log
-// of in-window request timestamps) is JSON-encoded and mutated race-free via
-// kv.Store.Mutate, reproducing the exact admission decision (rate, burst,
-// retry-after) this package has always computed. Key cardinality (MaxKeys)
-// and idle-key cleanup (CleanupInterval) are delegated to kv.MemoryStore's
-// own WithMaxEntries/WithGCInterval options rather than reimplemented here.
-//
-// Limiter is kept as an alias so existing callers of NewLimiter keep
-// compiling unchanged. Because state now lives inside the wrapped
-// kv.MemoryStore rather than as directly-addressable unexported fields, code
-// that used to construct a Limiter/MemoryStore as a struct literal or reach
-// into l.mu/l.windows can no longer do so; see slidingwindow_test.go, which
-// was updated to go through the public New/Allow/Len API instead.
-type MemoryStore struct {
-	store      *kv.MemoryStore
-	windowSize time.Duration
-	rate       int
-	burst      int
-	maxKeys    int
-}
-
-// Limiter is the historical name for MemoryStore, preserved for backward
-// compatibility.
-type Limiter = MemoryStore
 
 // Config holds configuration for the sliding window rate limiter.
 type Config struct {
@@ -106,12 +65,10 @@ type Config struct {
 	// OnLimitReached is called when a request is rate-limited.
 	OnLimitReached func(ctx fh.Ctx, key string, remaining int)
 
-	// Store holds per-key sliding window state. Defaults to a new
-	// MemoryStore built from this Config (i.e. NewLimiter(cfg)), which
-	// reproduces the exact behavior this package has always had. Set Store
-	// to a FileStore (see file_store.go) to persist window state across
-	// restarts.
-	Store Store
+	// Store holds per-key sliding window state. Defaults to a new kv.MemoryStore.
+	// Pass any kv.Store implementation, such as kv.NewFileStore, when creating
+	// the middleware.
+	Store kv.Store
 }
 
 // DefaultConfig returns the default configuration.
@@ -123,6 +80,13 @@ var DefaultConfig = Config{
 	CleanupInterval: time.Minute,
 	Message:         "Rate limit exceeded",
 	StatusCode:      429,
+}
+
+type Limiter struct {
+	store      kv.Store
+	windowSize time.Duration
+	rate       int
+	burst      int
 }
 
 // NewLimiter creates a new sliding window rate limiter.
@@ -147,7 +111,7 @@ func NewLimiter(config ...Config) *Limiter {
 		}
 	}
 
-	l := &MemoryStore{
+	return &Limiter{
 		// A single shard (rather than kv.MemoryStore's default 16) is
 		// deliberate: WithMaxEntries splits its cap evenly across shards, so
 		// a small, user-configured MaxKeys (as in this package's tests, e.g.
@@ -166,16 +130,13 @@ func NewLimiter(config ...Config) *Limiter {
 		windowSize: cfg.Window,
 		rate:       cfg.Rate,
 		burst:      cfg.Burst,
-		maxKeys:    cfg.MaxKeys,
 	}
-
-	return l
 }
 
 // Allow checks if a request with the given key is allowed.
 // Returns (allowed, remaining, retryAfter).
-func (l *MemoryStore) Allow(key string) (bool, int, time.Duration) {
-	allowed, remaining, retryAfter, err := allowViaStore(l.store, key, l.rate, l.burst, l.windowSize)
+func (l *Limiter) Allow(key string) (bool, int, time.Duration) {
+	allowed, remaining, retryAfter, err := Allow(l.store, key, l.rate, l.burst, l.windowSize)
 	if err != nil {
 		// kv.Store.Mutate only errors on ErrClosed or a marshal failure,
 		// neither of which the Store.Allow signature (no error return) can
@@ -190,7 +151,7 @@ func (l *MemoryStore) Allow(key string) (bool, int, time.Duration) {
 // pass-through to the underlying kv.MemoryStore, exposed so callers (and
 // this package's own tests) can observe the MaxKeys cardinality bound
 // without reaching into unexported fields.
-func (l *MemoryStore) Len() (int, error) {
+func (l *Limiter) Len() (int, error) {
 	return l.store.Len()
 }
 
@@ -205,7 +166,7 @@ func (l *MemoryStore) Len() (int, error) {
 // Mutate call, since kv.Store already reallocates on every write and the
 // ring buffer's head/count bookkeeping has nothing left to optimize once
 // that's true.
-func allowViaStore(store kv.Store, key string, rate, burst int, windowSize time.Duration) (allowed bool, remaining int, retryAfter time.Duration, err error) {
+func Allow(store kv.Store, key string, rate, burst int, windowSize time.Duration) (allowed bool, remaining int, retryAfter time.Duration, err error) {
 	now := time.Now()
 	err = store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
 		var ws windowState
@@ -310,9 +271,13 @@ func New(config ...Config) fh.HandlerFunc {
 		}
 	}
 
-	var store Store = cfg.Store
+	store := cfg.Store
 	if store == nil {
-		store = NewLimiter(cfg)
+		store = kv.NewMemoryStore(
+			kv.WithShardCount(1),
+			kv.WithMaxEntries(cfg.MaxKeys),
+			kv.WithGCInterval(cfg.CleanupInterval),
+		)
 	}
 
 	return func(ctx fh.Ctx) error {
@@ -331,7 +296,10 @@ func New(config ...Config) fh.HandlerFunc {
 			return ctx.Next()
 		}
 
-		allowed, remaining, retryAfter := store.Allow(key)
+		allowed, remaining, retryAfter, err := Allow(store, key, cfg.Rate, cfg.Burst, cfg.Window)
+		if err != nil {
+			return err
+		}
 
 		// Always set rate limit headers.
 		ctx.Set("X-RateLimit-Limit", strconv.Itoa(cfg.Rate))

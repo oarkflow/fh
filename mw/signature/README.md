@@ -38,7 +38,6 @@ Use timestamp skew limits, key IDs, key rotation, constant-time comparison, and 
 
 ## Replay protection
 
-Replay protection is on by default: `Config.Replay` falls back to a bounded in-memory store if unset, so a captured signature cannot be resent within `Tolerance`. This default store is process-local — for multi-instance deployments behind a load balancer, supply a shared `ReplayStore` (e.g. Redis-backed) so replay detection works across instances.
+Replay protection is on by default: `Config.Replay` falls back to a bounded `kv.Store` if unset, so a captured signature cannot be resent within `Tolerance`. This default store is process-local — for multi-instance deployments behind a load balancer, supply a shared `kv.Store` (e.g. Redis-backed) so replay detection works across instances.
 
-For a single-node deployment where replay markers should survive a process restart, use `signature.NewFileStore(dir, gcInterval)` as `Config.Replay`. It persists one file per hashed key under `dir` (atomic writes, optional background GC) and fails safe: any file I/O error is treated as a replay (`Seen` returns `true`) rather than silently allowing a request through.
-
+For a single-node deployment where replay markers should survive a process restart, construct `kv.NewFileStore(dir, kv.WithFileGCInterval(gcInterval))` and pass it as `Config.Replay`. Storage errors fail closed rather than silently allowing a replay.

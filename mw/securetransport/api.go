@@ -78,8 +78,8 @@ func RequestIDFromContext(c fh.Ctx) (protocol.ID16, bool) {
 
 // RevokeDevice invalidates the device and every active session bound to it.
 func (t *Transport) RevokeDevice(id protocol.ID16) error {
-	if err := t.cfg.DeviceStore.Revoke(id, time.Now()); err != nil {
+	if err := revokeDevice(t.cfg.DeviceStore, id, time.Now()); err != nil {
 		return err
 	}
-	return t.cfg.SessionStore.DeleteByDevice(id)
+	return deleteSessionsByDevice(t.cfg.SessionStore, id)
 }

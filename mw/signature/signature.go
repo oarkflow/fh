@@ -15,12 +15,6 @@ import (
 
 type SecretResolver func(ctx fh.Ctx, keyID string) [][]byte
 
-// ReplayStore records signatures already seen within their tolerance
-// window so a captured (signature, timestamp) pair cannot be replayed.
-type ReplayStore interface {
-	Seen(key string, ttl time.Duration) bool
-}
-
 type Config struct {
 	Secrets          [][]byte
 	Secret           []byte
@@ -33,10 +27,9 @@ type Config struct {
 	MaxReplayEntries int
 	SignedPayload    func(fh.Ctx, string) []byte
 	// Replay guards against a captured signature being resent within the
-	// tolerance window. Defaults to a bounded in-memory store; supply a
-	// distributed ReplayStore (e.g. Redis-backed) for multi-instance
-	// deployments where process-local state is insufficient.
-	Replay ReplayStore
+	// tolerance window. Defaults to a bounded in-memory kv.Store; supply a
+	// distributed kv.Store for multi-instance deployments.
+	Replay kv.Store
 	Next   func(fh.Ctx) bool
 }
 
@@ -54,8 +47,9 @@ func New(config Config) fh.HandlerFunc {
 		config.Tolerance = 5 * time.Minute
 	}
 	if config.Replay == nil {
-		config.Replay = newMemoryReplayStore(config.MaxReplayEntries)
+		config.Replay = kv.NewMemoryStore(kv.WithShardCount(1))
 	}
+	var replayMu sync.Mutex
 	return func(c fh.Ctx) error {
 		if config.Next != nil && config.Next(c) {
 			return c.Next()
@@ -107,7 +101,7 @@ func New(config Config) fh.HandlerFunc {
 			mac.Write(payload)
 			if hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
 				replayTTL := time.Until(when.Add(config.Tolerance))
-				if replayTTL <= 0 || config.Replay.Seen(sig+":"+ts, replayTTL) {
+				if replayTTL <= 0 || Seen(config.Replay, &replayMu, sig+":"+ts, replayTTL, config.MaxReplayEntries) {
 					return fh.NewHTTPError(fh.StatusConflict, "SIGNATURE_REPLAYED", "signature has already been used")
 				}
 				return c.Next()
@@ -117,65 +111,28 @@ func New(config Config) fh.HandlerFunc {
 	}
 }
 
-// memoryReplayStore is the default ReplayStore used when Config.Replay is
-// unset. It is process-local; deployments running multiple instances behind
-// a load balancer should supply a shared store instead.
-//
-// It is a thin wrapper over kv.MemoryStore rather than a hand-rolled map: kv
-// provides the sharded storage/expiry mechanics, while capacity admission is
-// enforced here (not via kv's own WithMaxEntries/eviction, which would evict
-// an arbitrary live entry to admit a new one) because Seen's contract is to
-// fail closed at capacity and never evict a still-valid marker.
-type memoryReplayStore struct {
-	kv         *kv.MemoryStore
-	maxEntries int
-	mu         sync.Mutex
-}
-
-func newMemoryReplayStore(maxEntries ...int) *memoryReplayStore {
+func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxEntries ...int) bool {
 	maxSize := 100000
 	if len(maxEntries) > 0 && maxEntries[0] > 0 {
 		maxSize = maxEntries[0]
 	}
-	return &memoryReplayStore{kv: kv.NewMemoryStore(), maxEntries: maxSize}
-}
-
-// Seen implements ReplayStore. On any underlying store error (including
-// capacity exhaustion) it fails safe by returning true (treat as already
-// seen/replayed), per this package's existing fail-safe convention.
-func (s *memoryReplayStore) Seen(key string, ttl time.Duration) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.maxEntries > 0 {
-		if _, exists, _ := s.kv.Get(key); !exists {
-			// Len() sweeps expired entries as a side effect, reclaiming
-			// capacity the same way the original map-based implementation's
-			// opportunistic cleanup-on-full pass did.
-			n, err := s.kv.Len()
-			if err != nil {
-				return true
-			}
-			if n >= s.maxEntries {
-				// Fail closed: never evict a still-valid replay marker.
-				return true
-			}
-		}
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
 	}
-
-	var seen bool
-	err := s.kv.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
-		if exists {
-			seen = true
-			return nil, 0, false, nil
-		}
-		seen = false
-		return []byte{1}, ttl, true, nil
-	})
-	if err != nil {
+	if _, exists, err := store.Get(key); err != nil {
+		return true
+	} else if exists {
 		return true
 	}
-	return seen
+	n, err := store.Len()
+	if err != nil || n >= maxSize {
+		return true
+	}
+	if err := store.Set(key, []byte{1}, ttl); err != nil {
+		return true
+	}
+	return false
 }
 
 func parseCombinedSignature(value string) (timestamp, signature string, ok bool) {

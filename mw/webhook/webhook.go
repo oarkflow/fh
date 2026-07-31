@@ -9,6 +9,7 @@ import (
 	"hash"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
@@ -16,9 +17,6 @@ import (
 )
 
 type SecretFunc func(fh.Ctx) ([]byte, error)
-type ReplayStore interface {
-	Seen(key string, ttl time.Duration) bool
-}
 type ErrorHandler func(fh.Ctx, error) error
 
 type Config struct {
@@ -29,7 +27,7 @@ type Config struct {
 	Tolerance        time.Duration
 	Prefix           string
 	Algorithm        string
-	Replay           ReplayStore
+	Replay           kv.Store
 	Error            ErrorHandler
 	RequireTimestamp bool
 }
@@ -48,12 +46,7 @@ func New(cfg Config) fh.HandlerFunc {
 		cfg.Algorithm = "sha256"
 	}
 	if cfg.Replay == nil {
-		// Without a replay store, a captured (signature, timestamp) pair
-		// can be resent as many times as an attacker likes within the
-		// tolerance window. Default to a bounded in-memory store so replay
-		// protection applies out of the box; pass a distributed ReplayStore
-		// (e.g. Redis-backed) for multi-instance deployments.
-		cfg.Replay = newMemoryReplayStore()
+		cfg.Replay = kv.NewMemoryStore()
 	}
 	if cfg.Error == nil {
 		cfg.Error = func(c fh.Ctx, err error) error {
@@ -123,7 +116,7 @@ func Verify(c fh.Ctx, cfg Config) error {
 		return fmt.Errorf("signature mismatch for algorithm %s", cfg.Algorithm)
 	}
 	if cfg.Replay != nil && ts != "" {
-		if cfg.Replay.Seen(sig+":"+ts, cfg.Tolerance) {
+		if Seen(cfg.Replay, nil, sig+":"+ts, cfg.Tolerance) {
 			return fmt.Errorf("signature replayed: seen within %v tolerance", cfg.Tolerance)
 		}
 	}
@@ -134,24 +127,13 @@ func Verify(c fh.Ctx, cfg Config) error {
 // its presence and TTL matter, never its content.
 var replayMarker = []byte{1}
 
-// memoryReplayStore is the default ReplayStore used when Config.Replay is
-// unset. It is process-local; deployments running multiple instances behind
-// a load balancer should supply a shared store (e.g. Redis-backed) instead.
-//
-// It is a thin adapter over kv.MemoryStore, which supplies the actual
-// map/TTL/expiry mechanics; the check-then-record happens atomically via
-// kv.Store.Mutate.
-type memoryReplayStore struct {
-	store *kv.MemoryStore
-}
-
-func newMemoryReplayStore() *memoryReplayStore {
-	return &memoryReplayStore{store: kv.NewMemoryStore()}
-}
-
-func (s *memoryReplayStore) Seen(key string, ttl time.Duration) bool {
+func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration) bool {
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
 	var seen bool
-	err := s.store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+	err := store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
 		if exists {
 			seen = true
 			return nil, 0, false, nil

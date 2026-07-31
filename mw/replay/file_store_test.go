@@ -1,16 +1,22 @@
 package replay
 
 import (
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func TestFileStoreSeenBasic(t *testing.T) {
 	dir := t.TempDir()
-	store := NewFileStore(dir, 0)
-	defer store.StopGC()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	var mu sync.Mutex
 
-	seen, err := store.Seen("nonce-1", time.Minute)
+	seen, err := Seen(store, &mu, "nonce-1", time.Minute, 100)
 	if err != nil {
 		t.Fatalf("Seen: %v", err)
 	}
@@ -18,7 +24,7 @@ func TestFileStoreSeenBasic(t *testing.T) {
 		t.Fatalf("first sighting should not be seen")
 	}
 
-	seen, err = store.Seen("nonce-1", time.Minute)
+	seen, err = Seen(store, &mu, "nonce-1", time.Minute, 100)
 	if err != nil {
 		t.Fatalf("Seen: %v", err)
 	}
@@ -29,19 +35,22 @@ func TestFileStoreSeenBasic(t *testing.T) {
 
 func TestFileStoreTTLExpiry(t *testing.T) {
 	dir := t.TempDir()
-	store := NewFileStore(dir, 0)
-	defer store.StopGC()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	var mu sync.Mutex
 
 	ttl := 20 * time.Millisecond
 
-	seen, err := store.Seen("short-lived", ttl)
+	seen, err := Seen(store, &mu, "short-lived", ttl, 100)
 	if err != nil || seen {
 		t.Fatalf("first sighting: seen=%v err=%v", seen, err)
 	}
 
 	time.Sleep(ttl + 15*time.Millisecond)
 
-	seen, err = store.Seen("short-lived", ttl)
+	seen, err = Seen(store, &mu, "short-lived", ttl, 100)
 	if err != nil {
 		t.Fatalf("Seen: %v", err)
 	}
@@ -52,19 +61,22 @@ func TestFileStoreTTLExpiry(t *testing.T) {
 
 func TestFileStoreKeysDoNotCollide(t *testing.T) {
 	dir := t.TempDir()
-	store := NewFileStore(dir, 0)
-	defer store.StopGC()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	var mu sync.Mutex
 
-	seenA, err := store.Seen("keyA", time.Minute)
+	seenA, err := Seen(store, &mu, "keyA", time.Minute, 100)
 	if err != nil || seenA {
 		t.Fatalf("keyA first sighting: seen=%v err=%v", seenA, err)
 	}
-	seenB, err := store.Seen("keyB", time.Minute)
+	seenB, err := Seen(store, &mu, "keyB", time.Minute, 100)
 	if err != nil || seenB {
 		t.Fatalf("keyB first sighting: seen=%v err=%v", seenB, err)
 	}
 
-	seenA2, err := store.Seen("keyA", time.Minute)
+	seenA2, err := Seen(store, &mu, "keyA", time.Minute, 100)
 	if err != nil {
 		t.Fatalf("Seen: %v", err)
 	}

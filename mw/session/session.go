@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 var (
@@ -32,6 +33,8 @@ type Session struct {
 }
 
 const flashKey = "__fh_flash"
+
+const defaultMaxSessions = 100000
 
 // Flash stores a value for the next request. Called without a value, it
 // retrieves and consumes the stored value.
@@ -136,19 +139,9 @@ func (s *Session) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// SessionStore is the persistent backend for session data.
-type SessionStore interface {
-	// Get retrieves a session by ID. Returns nil, nil if not found.
-	Get(id string) (*Session, error)
-	// Set persists a session.
-	Set(session *Session) error
-	// Delete removes a session by ID.
-	Delete(id string) error
-}
-
 // SessionManager handles session lifecycle: create, load, save, destroy.
 type SessionManager struct {
-	store          SessionStore
+	store          kv.Store
 	cookieName     string
 	secrets        [][]byte
 	maxAge         time.Duration
@@ -222,7 +215,7 @@ func SessionAutoRegenerate(v bool) SessionOption {
 	return func(m *SessionManager) { m.autoRegenerate = v }
 }
 
-func NewSessionManager(store SessionStore, opts ...SessionOption) *SessionManager {
+func NewSessionManager(store kv.Store, opts ...SessionOption) *SessionManager {
 	if store == nil {
 		panic("fh: nil session store")
 	}
@@ -272,7 +265,7 @@ func generateSessionID() string {
 func (m *SessionManager) CookieName() string { return m.cookieName }
 
 // Store returns the underlying session store.
-func (m *SessionManager) Store() SessionStore { return m.store }
+func (m *SessionManager) Store() kv.Store { return m.store }
 
 // Begin serializes a request against other requests carrying the same session
 // token and returns a one-shot completion hook that persists and unlocks it.
@@ -358,13 +351,13 @@ func (m *SessionManager) Load(ctx fh.Ctx) (*Session, error) {
 		return m.NewSession(), nil
 	}
 
-	session, err := m.store.Get(id)
+	session, err := GetSession(m.store, id)
 	if err != nil {
 		return nil, fmt.Errorf("fh: load session %s: %w", id[:8], err)
 	}
 	if session == nil || session.Expired() {
 		if session != nil {
-			if err := m.store.Delete(session.ID); err != nil {
+			if err := DeleteSession(m.store, session.ID); err != nil {
 				return nil, fmt.Errorf("fh: delete expired session %s: %w", session.ID[:8], err)
 			}
 		}
@@ -391,7 +384,7 @@ func (m *SessionManager) Save(ctx fh.Ctx, session *Session) error {
 	session.ExpiresAt = time.Now().Add(m.maxAge)
 	expires := session.ExpiresAt
 	session.mu.Unlock()
-	if err := m.store.Set(session); err != nil {
+	if err := SetSession(m.store, session); err != nil {
 		return err
 	}
 	val := m.signToken(id)
@@ -420,7 +413,7 @@ func (m *SessionManager) Destroy(ctx fh.Ctx, session *Session) error {
 	if !validSessionID(id) {
 		return ErrInvalidSession
 	}
-	if err := m.store.Delete(id); err != nil {
+	if err := DeleteSession(m.store, id); err != nil {
 		return err
 	}
 	session.mu.Lock()
@@ -462,7 +455,48 @@ func (m *SessionManager) Regenerate(ctx fh.Ctx, session *Session) error {
 		session.mu.Unlock()
 		return err
 	}
-	return m.store.Delete(oldID)
+	return DeleteSession(m.store, oldID)
+}
+
+func GetSession(store kv.Store, id string) (*Session, error) {
+	if !validSessionID(id) {
+		return nil, ErrInvalidSession
+	}
+	data, ok, err := store.Get(id)
+	if err != nil || !ok {
+		return nil, err
+	}
+	var session Session
+	if err := json.Unmarshal(data, &session); err != nil {
+		return nil, err
+	}
+	return &session, nil
+}
+
+func SetSession(store kv.Store, session *Session) error {
+	if session == nil {
+		return ErrInvalidSession
+	}
+	snapshot := session.snapshot()
+	if !validSessionID(snapshot.ID) {
+		return ErrInvalidSession
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	ttl := time.Until(snapshot.ExpiresAt)
+	if ttl <= 0 {
+		ttl = time.Nanosecond
+	}
+	return store.Set(snapshot.ID, data, ttl)
+}
+
+func DeleteSession(store kv.Store, id string) error {
+	if !validSessionID(id) {
+		return ErrInvalidSession
+	}
+	return store.Delete(id)
 }
 
 func (m *SessionManager) signToken(id string) string {

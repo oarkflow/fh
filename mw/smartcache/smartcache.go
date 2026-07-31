@@ -14,12 +14,18 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
 	"github.com/oarkflow/fh/pkg/storage/kv"
 )
+
+// maxCacheEntrySize bounds how large the full JSON-serialized Response
+// (headers + body + kv's own entry envelope) may be before a store that
+// enforces entry-size limits refuses to persist it. Pass this via
+// kv.WithMaxEntrySize when constructing a file-backed store for use with
+// this package.
+const maxCacheEntrySize = 16 << 20 // 16MB
 
 // CacheControl directives parsed from Cache-Control header.
 type CacheControl struct {
@@ -48,19 +54,13 @@ type Response struct {
 	Stored     time.Time
 }
 
-// Store defines the interface for cache storage backends.
-type Store interface {
-	Get(key string) (*Response, bool)
-	Set(key string, resp *Response, ttl time.Duration)
-	Delete(key string)
-	Purge()
-	Len() int
-}
-
 // Config holds configuration for the smartcache middleware.
 type Config struct {
-	// Store is the cache backend. Default: in-memory LRU.
-	Store Store
+	// Store is the cache backend. Default: kv.NewMemoryStore sized to
+	// MaxSize. Pass any kv.Store implementation when constructing the
+	// middleware; file-backed stores should be constructed with
+	// kv.WithMaxEntrySize(maxCacheEntrySize) to bound persisted entry size.
+	Store kv.Store
 
 	// Methods is the list of HTTP methods to cache. Default: ["GET"].
 	Methods []string
@@ -142,7 +142,11 @@ func New(config ...Config) fh.HandlerFunc {
 	}
 
 	if cfg.Store == nil {
-		cfg.Store = NewMemoryStore(cfg.MaxSize)
+		maxSize := cfg.MaxSize
+		if maxSize <= 0 {
+			maxSize = 10000
+		}
+		cfg.Store = kv.NewMemoryStore(kv.WithMaxEntries(maxSize))
 	}
 
 	methodSet := make(map[string]bool, len(cfg.Methods))
@@ -183,7 +187,7 @@ func New(config ...Config) fh.HandlerFunc {
 		}
 
 		// Check cache for existing response.
-		if cached, ok := cfg.Store.Get(key); ok {
+		if cached, ok := Get(cfg.Store, key); ok {
 			// Handle conditional requests (If-None-Match / If-Modified-Since).
 			if handleConditional(ctx, cached) {
 				return ctx.SendStatus(304)
@@ -275,7 +279,7 @@ func New(config ...Config) fh.HandlerFunc {
 			}
 		}
 
-		cfg.Store.Set(key, resp, ttl)
+		Set(cfg.Store, key, resp, ttl)
 		return nil
 	}
 }
@@ -435,37 +439,19 @@ func generateETag(body []byte) string {
 	return fmt.Sprintf(`"%x"`, h[:8])
 }
 
-// ── In-memory store ────────────────────────────────────────────────────────
+// ── Domain operations over a kv.Store ──────────────────────────────────────
+//
+// Get/Set/Delete/Len are thin adapters over whatever kv.Store Config.Store
+// holds: they JSON-encode/decode *Response around the shared kv.Store
+// mechanics (sharded locking or atomic file writes, TTL expiry, soft
+// capacity) instead of reimplementing them. Every function fails safe — any
+// underlying kv error (in practice only ever ErrClosed, or ErrTooLarge/
+// ErrCapacityExceeded on Set) is treated as a miss/no-op rather than
+// surfaced, matching the previous Store interface's behavior of having no
+// error return.
 
-// MemoryStore is a thin adapter over kv.MemoryStore: it JSON-encodes/decodes
-// *Response around the shared kv.Store mechanics (sharded locking, TTL
-// expiry, soft entry-count capacity) instead of reimplementing them. Every
-// method here fails safe — any underlying kv error (which in practice only
-// ever means ErrClosed, since MemoryStore.Get/Set never otherwise error) is
-// treated as a miss/no-op rather than surfaced, since the Store interface
-// this adapts to has no error return.
-type MemoryStore struct {
-	mu      sync.RWMutex
-	store   kv.Store
-	maxSize int
-}
-
-// NewMemoryStore creates a new in-memory cache store.
-func NewMemoryStore(maxSize int) *MemoryStore {
-	if maxSize <= 0 {
-		maxSize = 10000
-	}
-	return &MemoryStore{
-		store:   kv.NewMemoryStore(kv.WithMaxEntries(maxSize)),
-		maxSize: maxSize,
-	}
-}
-
-func (s *MemoryStore) Get(key string) (*Response, bool) {
-	s.mu.RLock()
-	store := s.store
-	s.mu.RUnlock()
-
+// Get looks up key in store and decodes it back into a *Response.
+func Get(store kv.Store, key string) (*Response, bool) {
 	data, ok, err := store.Get(key)
 	if err != nil || !ok {
 		return nil, false
@@ -477,7 +463,10 @@ func (s *MemoryStore) Get(key string) (*Response, bool) {
 	return &resp, true
 }
 
-func (s *MemoryStore) Set(key string, resp *Response, ttl time.Duration) {
+// Set JSON-encodes resp and stores it in store under key with the given TTL.
+// Store-level errors are swallowed because caches are best-effort: callers
+// observe a later miss rather than request failure.
+func Set(store kv.Store, key string, resp *Response, ttl time.Duration) {
 	if resp == nil {
 		return
 	}
@@ -485,37 +474,16 @@ func (s *MemoryStore) Set(key string, resp *Response, ttl time.Duration) {
 	if err != nil {
 		return
 	}
-	s.mu.RLock()
-	store := s.store
-	s.mu.RUnlock()
 	_ = store.Set(key, data, ttl)
 }
 
-func (s *MemoryStore) Delete(key string) {
-	s.mu.RLock()
-	store := s.store
-	s.mu.RUnlock()
+// Delete removes key from store.
+func Delete(store kv.Store, key string) {
 	_ = store.Delete(key)
 }
 
-// Purge discards every cached entry. kv.Store has no "delete everything"
-// operation (by design — it's not a hot-path need for rate limiters/replay
-// guards/etc.), so since Purge is not itself a hot-path call, the simplest
-// correct implementation is to close the current in-memory kv.Store and swap
-// in a brand-new one under the write lock; the old one (and everything in
-// it) is simply dropped for the GC to reclaim.
-func (s *MemoryStore) Purge() {
-	s.mu.Lock()
-	old := s.store
-	s.store = kv.NewMemoryStore(kv.WithMaxEntries(s.maxSize))
-	s.mu.Unlock()
-	_ = old.Close()
-}
-
-func (s *MemoryStore) Len() int {
-	s.mu.RLock()
-	store := s.store
-	s.mu.RUnlock()
+// Len reports the number of live entries in store.
+func Len(store kv.Store) int {
 	n, err := store.Len()
 	if err != nil {
 		return 0

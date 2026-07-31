@@ -1,12 +1,16 @@
 package ipwhitelist
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 var ErrForbidden = errors.New("ipwhitelist: forbidden")
@@ -15,16 +19,14 @@ type KeyFunc func(ctx fh.Ctx) string
 
 type ForbiddenHandler func(ctx fh.Ctx) error
 
-type Store interface {
-	Allowed(ip net.IP) bool
-}
+const listKey = "ipwhitelist:list"
 
 type Config struct {
 	Allowed []string
 	Blocked []string
 
-	Store      Store
-	BlockStore Store
+	Store      kv.Store
+	BlockStore kv.Store
 
 	KeyFunc KeyFunc
 
@@ -59,11 +61,11 @@ func NewWithConfig(config Config) fh.HandlerFunc {
 			return cfg.Forbidden(ctx)
 		}
 
-		if cfg.BlockStore != nil && cfg.BlockStore.Allowed(ip) {
+		if cfg.BlockStore != nil && AllowedIP(cfg.BlockStore, ip) {
 			return cfg.Forbidden(ctx)
 		}
 
-		if cfg.Store == nil || cfg.Store.Allowed(ip) {
+		if cfg.Store == nil || AllowedIP(cfg.Store, ip) {
 			return ctx.Next()
 		}
 
@@ -76,15 +78,15 @@ func normalize(cfg Config) (Config, error) {
 		cfg.Forbidden = DefaultForbiddenHandler
 	}
 	if cfg.Store == nil && len(cfg.Allowed) > 0 {
-		store, err := NewMemoryStore(cfg.Allowed...)
-		if err != nil {
+		store := kv.NewMemoryStore()
+		if err := SaveList(store, cfg.Allowed...); err != nil {
 			return cfg, err
 		}
 		cfg.Store = store
 	}
 	if cfg.BlockStore == nil && len(cfg.Blocked) > 0 {
-		store, err := NewMemoryStore(cfg.Blocked...)
-		if err != nil {
+		store := kv.NewMemoryStore()
+		if err := SaveList(store, cfg.Blocked...); err != nil {
 			return cfg, err
 		}
 		cfg.BlockStore = store
@@ -97,33 +99,92 @@ func DefaultForbiddenHandler(ctx fh.Ctx) error {
 	return ctx.Status(403).SendString("Forbidden")
 }
 
-// -----------------------------------------------------------------------------
-// In-memory whitelist store
-// -----------------------------------------------------------------------------
-
-type MemoryStore struct {
-	mu       sync.RWMutex
-	ips      []net.IP
-	networks []*net.IPNet
+func SaveList(store kv.Store, allowed ...string) error {
+	if _, _, err := parseEntries(allowed...); err != nil {
+		return err
+	}
+	data, err := json.Marshal(allowed)
+	if err != nil {
+		return err
+	}
+	return store.Set(listKey, data, 0)
 }
 
-func NewMemoryStore(allowed ...string) (*MemoryStore, error) {
-	s := &MemoryStore{}
-	if err := s.Set(allowed...); err != nil {
+func LoadFile(store kv.Store, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("ipwhitelist: failed to read store file %q: %w", path, err)
+	}
+	var entries []string
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return fmt.Errorf("ipwhitelist: failed to parse store file %q: %w", path, err)
+	}
+	if err := SaveList(store, entries...); err != nil {
+		return fmt.Errorf("ipwhitelist: invalid entry in store file %q: %w", path, err)
+	}
+	return nil
+}
+
+func StartFileWatcher(store kv.Store, path string, interval time.Duration) (func(), error) {
+	if err := LoadFile(store, path); err != nil {
 		return nil, err
 	}
-	return s, nil
-}
-
-func MustMemoryStore(allowed ...string) *MemoryStore {
-	s, err := NewMemoryStore(allowed...)
-	if err != nil {
-		panic(err)
+	if interval <= 0 {
+		return func() {}, nil
 	}
-	return s
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = LoadFile(store, path)
+			case <-stop:
+				return
+			}
+		}
+	}()
+	var stopped bool
+	return func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		close(stop)
+		<-done
+	}, nil
 }
 
-func (s *MemoryStore) Set(allowed ...string) error {
+func AllowedIP(store kv.Store, ip net.IP) bool {
+	data, ok, err := store.Get(listKey)
+	if err != nil || !ok {
+		return false
+	}
+	var entries []string
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return false
+	}
+	ips, networks, err := parseEntries(entries...)
+	if err != nil {
+		return false
+	}
+	for _, allowed := range ips {
+		if allowed.Equal(ip) {
+			return true
+		}
+	}
+	for _, network := range networks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseEntries(allowed ...string) ([]net.IP, []*net.IPNet, error) {
 	ips := make([]net.IP, 0, len(allowed))
 	networks := make([]*net.IPNet, 0, len(allowed))
 
@@ -136,7 +197,7 @@ func (s *MemoryStore) Set(allowed ...string) error {
 		if strings.Contains(item, "/") {
 			ip, network, err := net.ParseCIDR(item)
 			if err != nil {
-				return err
+				return nil, nil, err
 			}
 			network.IP = ip
 			networks = append(networks, network)
@@ -145,35 +206,11 @@ func (s *MemoryStore) Set(allowed ...string) error {
 
 		ip := net.ParseIP(item)
 		if ip == nil {
-			return errors.New("ipwhitelist: invalid IP: " + item)
+			return nil, nil, errors.New("ipwhitelist: invalid IP: " + item)
 		}
 
 		ips = append(ips, ip)
 	}
 
-	s.mu.Lock()
-	s.ips = ips
-	s.networks = networks
-	s.mu.Unlock()
-
-	return nil
-}
-
-func (s *MemoryStore) Allowed(ip net.IP) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	for _, allowed := range s.ips {
-		if allowed.Equal(ip) {
-			return true
-		}
-	}
-
-	for _, network := range s.networks {
-		if network.Contains(ip) {
-			return true
-		}
-	}
-
-	return false
+	return ips, networks, nil
 }

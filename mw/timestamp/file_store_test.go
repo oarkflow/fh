@@ -3,18 +3,23 @@ package timestamp
 import (
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func TestFileStoreSeenBasic(t *testing.T) {
-	s := NewFileStore(t.TempDir(), 0)
-	seen, err := s.Seen("key-a", time.Minute)
+	s, err := kv.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	seen, err := Seen(s, "key-a", time.Minute, 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if seen {
 		t.Fatal("expected first sighting to report not seen")
 	}
-	seen, err = s.Seen("key-a", time.Minute)
+	seen, err = Seen(s, "key-a", time.Minute, 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -24,8 +29,11 @@ func TestFileStoreSeenBasic(t *testing.T) {
 }
 
 func TestFileStoreExpiry(t *testing.T) {
-	s := NewFileStore(t.TempDir(), 0)
-	seen, err := s.Seen("key-expiring", 20*time.Millisecond)
+	s, err := kv.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	seen, err := Seen(s, "key-expiring", 20*time.Millisecond, 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -33,7 +41,7 @@ func TestFileStoreExpiry(t *testing.T) {
 		t.Fatal("expected first sighting to report not seen")
 	}
 	time.Sleep(50 * time.Millisecond)
-	seen, err = s.Seen("key-expiring", time.Minute)
+	seen, err = Seen(s, "key-expiring", time.Minute, 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -43,11 +51,14 @@ func TestFileStoreExpiry(t *testing.T) {
 }
 
 func TestFileStoreDifferentKeysDoNotCollide(t *testing.T) {
-	s := NewFileStore(t.TempDir(), 0)
-	if seen, err := s.Seen("key-one", time.Minute); err != nil || seen {
+	s, err := kv.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	if seen, err := Seen(s, "key-one", time.Minute, 100); err != nil || seen {
 		t.Fatalf("key-one: seen=%v err=%v", seen, err)
 	}
-	seen, err := s.Seen("key-two", time.Minute)
+	seen, err := Seen(s, "key-two", time.Minute, 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,7 +66,7 @@ func TestFileStoreDifferentKeysDoNotCollide(t *testing.T) {
 		t.Fatal("expected key-two to be unseen despite key-one being recorded")
 	}
 	// key-one should still be recognized as seen.
-	seen, err = s.Seen("key-one", time.Minute)
+	seen, err = Seen(s, "key-one", time.Minute, 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -66,24 +77,20 @@ func TestFileStoreDifferentKeysDoNotCollide(t *testing.T) {
 
 func TestFileStoreGC(t *testing.T) {
 	dir := t.TempDir()
-	s := NewFileStore(dir, 0)
-	if _, err := s.Seen("gc-key", 10*time.Millisecond); err != nil {
+	s, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	if _, err := Seen(s, "gc-key", 10*time.Millisecond, 100); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	time.Sleep(30 * time.Millisecond)
-	s.GC()
-	seen, err := s.Seen("gc-key", time.Minute)
+	_, _ = s.Len()
+	seen, err := Seen(s, "gc-key", time.Minute, 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if seen {
 		t.Fatal("expected expired key removed by GC to report unseen")
 	}
-}
-
-func TestFileStoreStopGC(t *testing.T) {
-	s := NewFileStore(t.TempDir(), 5*time.Millisecond)
-	s.StopGC()
-	// Calling StopGC twice must not panic.
-	s.StopGC()
 }

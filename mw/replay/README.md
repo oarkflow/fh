@@ -12,11 +12,12 @@ package main
 import (
 	"github.com/oarkflow/fh"
 	"github.com/oarkflow/fh/mw/replay"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func main() {
 	app := fh.New()
-	app.Use(replay.New(replay.Config{Store: replay.NewMemoryStore()}))
+	app.Use(replay.New(replay.Config{Store: kv.NewMemoryStore()}))
 
 	app.Get("/", func(c fh.Ctx) error {
 		return c.String(fh.StatusOK, "ok")
@@ -38,5 +39,4 @@ Use a distributed store for multi-node deployments. Include timestamp skew valid
 
 ## Persistent storage
 
-`NewMemoryStore` remains the default. For replay markers that must survive a process restart on a single node, use `replay.NewFileStore(dir, gcInterval)`, which persists one file per hashed key under `dir` (atomic writes, optional background GC). It is not a substitute for a distributed store across multiple nodes.
-
+`Config.Store` is a `kv.Store` and defaults to `kv.NewMemoryStore`. For replay markers that must survive a process restart on a single node, construct a `kv.NewFileStore(dir, kv.WithFileGCInterval(gcInterval))` and pass it as `Config.Store`. It is not a substitute for a distributed store across multiple nodes.

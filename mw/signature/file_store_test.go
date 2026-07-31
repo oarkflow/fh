@@ -2,53 +2,65 @@ package signature
 
 import (
 	"os"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func TestFileStoreSeenBasic(t *testing.T) {
 	dir := t.TempDir()
-	store := NewFileStore(dir, 0)
-	defer store.StopGC()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	var mu sync.Mutex
 
-	if store.Seen("sig-1", time.Minute) {
+	if Seen(store, &mu, "sig-1", time.Minute) {
 		t.Fatalf("first sighting should not be seen")
 	}
-	if !store.Seen("sig-1", time.Minute) {
+	if !Seen(store, &mu, "sig-1", time.Minute) {
 		t.Fatalf("replay of sig-1 should be detected")
 	}
 }
 
 func TestFileStoreTTLExpiry(t *testing.T) {
 	dir := t.TempDir()
-	store := NewFileStore(dir, 0)
-	defer store.StopGC()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	var mu sync.Mutex
 
 	ttl := 20 * time.Millisecond
 
-	if store.Seen("short-lived", ttl) {
+	if Seen(store, &mu, "short-lived", ttl) {
 		t.Fatalf("first sighting should not be seen")
 	}
 
 	time.Sleep(ttl + 15*time.Millisecond)
 
-	if store.Seen("short-lived", ttl) {
+	if Seen(store, &mu, "short-lived", ttl) {
 		t.Fatalf("expired key should not be reported as seen")
 	}
 }
 
 func TestFileStoreKeysDoNotCollide(t *testing.T) {
 	dir := t.TempDir()
-	store := NewFileStore(dir, 0)
-	defer store.StopGC()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
+	var mu sync.Mutex
 
-	if store.Seen("keyA", time.Minute) {
+	if Seen(store, &mu, "keyA", time.Minute) {
 		t.Fatalf("keyA first sighting should not be seen")
 	}
-	if store.Seen("keyB", time.Minute) {
+	if Seen(store, &mu, "keyB", time.Minute) {
 		t.Fatalf("keyB first sighting should not be seen")
 	}
-	if !store.Seen("keyA", time.Minute) {
+	if !Seen(store, &mu, "keyA", time.Minute) {
 		t.Fatalf("keyA should now be reported as seen")
 	}
 }
@@ -62,10 +74,11 @@ func TestFileStoreFailsSafeOnBadDir(t *testing.T) {
 	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	store := NewFileStore(blocker+"/sub", 0)
-	defer store.StopGC()
-
-	if !store.Seen("anything", time.Minute) {
-		t.Fatalf("expected fail-safe seen=true when store dir is unusable")
+	store, err := kv.NewFileStore(blocker + "/sub")
+	if err == nil {
+		_ = store.Close()
+		t.Fatalf("expected kv.NewFileStore to fail")
 	}
+
+	_ = err
 }

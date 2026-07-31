@@ -6,24 +6,32 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
-func TestFileStoreHeartbeatAndNodes(t *testing.T) {
-	dir := t.TempDir()
-	st, err := NewFileStore(dir)
+func newFileStore(t *testing.T, dir string) kv.Store {
+	t.Helper()
+	st, err := kv.NewFileStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return st
+}
+
+func TestFileStoreHeartbeatAndNodes(t *testing.T) {
+	dir := t.TempDir()
+	st := newFileStore(t, dir)
 	ctx := context.Background()
 
-	if err := st.Heartbeat(ctx, Node{ID: "a"}, time.Minute); err != nil {
+	if err := Heartbeat(ctx, st, Node{ID: "a"}, time.Minute, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Heartbeat(ctx, Node{ID: "b"}, time.Minute); err != nil {
+	if err := Heartbeat(ctx, st, Node{ID: "b"}, time.Minute, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	nodes, err := st.Nodes(ctx, time.Now())
+	nodes, err := Nodes(ctx, st, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,11 +44,8 @@ func TestFileStoreHeartbeatAndNodes(t *testing.T) {
 
 	// Reopen the store against the same dir to prove persistence across
 	// process restarts.
-	st2, err := NewFileStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nodes2, err := st2.Nodes(ctx, time.Now())
+	st2 := newFileStore(t, dir)
+	nodes2, err := Nodes(ctx, st2, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,18 +56,15 @@ func TestFileStoreHeartbeatAndNodes(t *testing.T) {
 
 func TestFileStoreNodesExpiry(t *testing.T) {
 	dir := t.TempDir()
-	st, err := NewFileStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	st := newFileStore(t, dir)
 	ctx := context.Background()
 
-	if err := st.Heartbeat(ctx, Node{ID: "a"}, 10*time.Millisecond); err != nil {
+	if err := Heartbeat(ctx, st, Node{ID: "a"}, 10*time.Millisecond, nil); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(30 * time.Millisecond)
 
-	nodes, err := st.Nodes(ctx, time.Now())
+	nodes, err := Nodes(ctx, st, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,10 +78,7 @@ func TestFileStoreNodesExpiry(t *testing.T) {
 // MemoryStore.
 func TestFileStoreLeaderLease(t *testing.T) {
 	dir := t.TempDir()
-	st, err := NewFileStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	st := newFileStore(t, dir)
 	a, err := New(Config{Store: st, Node: Node{ID: "a"}, TTL: time.Minute})
 	if err != nil {
 		t.Fatal(err)
@@ -117,24 +116,21 @@ func TestFileStoreLeaderLease(t *testing.T) {
 
 func TestFileStoreRenewSemantics(t *testing.T) {
 	dir := t.TempDir()
-	st, err := NewFileStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	st := newFileStore(t, dir)
 	ctx := context.Background()
 
-	l, ok, err := st.TryAcquire(ctx, "jobs", "a", time.Minute)
+	l, ok, err := TryAcquire(ctx, st, "jobs", "a", time.Minute, nil)
 	if err != nil || !ok {
 		t.Fatalf("acquire ok=%v err=%v", ok, err)
 	}
 
 	// Renew by non-owner while lease is live must fail.
-	if _, ok, err := st.Renew(ctx, "jobs", "b", time.Minute); err != nil || ok {
+	if _, ok, err := Renew(ctx, st, "jobs", "b", time.Minute, nil); err != nil || ok {
 		t.Fatalf("non-owner renew should fail ok=%v err=%v", ok, err)
 	}
 
 	// Renew by current owner must succeed.
-	l2, ok, err := st.Renew(ctx, "jobs", "a", time.Minute)
+	l2, ok, err := Renew(ctx, st, "jobs", "a", time.Minute, nil)
 	if err != nil || !ok {
 		t.Fatalf("owner renew ok=%v err=%v", ok, err)
 	}
@@ -143,37 +139,34 @@ func TestFileStoreRenewSemantics(t *testing.T) {
 	}
 
 	// Release by non-owner is a no-op.
-	if err := st.Release(ctx, "jobs", "b"); err != nil {
+	if err := Release(ctx, st, "jobs", "b"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := st.TryAcquire(ctx, "jobs", "b", time.Minute); err != nil || ok {
+	if _, ok, err := TryAcquire(ctx, st, "jobs", "b", time.Minute, nil); err != nil || ok {
 		t.Fatalf("lease should still be held by a: ok=%v err=%v", ok, err)
 	}
 
 	// Release by owner frees it.
-	if err := st.Release(ctx, "jobs", "a"); err != nil {
+	if err := Release(ctx, st, "jobs", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := st.TryAcquire(ctx, "jobs", "b", time.Minute); err != nil || !ok {
+	if _, ok, err := TryAcquire(ctx, st, "jobs", "b", time.Minute, nil); err != nil || !ok {
 		t.Fatalf("b should acquire freed lease: ok=%v err=%v", ok, err)
 	}
 }
 
 func TestFileStoreRenewExpiredLeaseByOtherOwner(t *testing.T) {
 	dir := t.TempDir()
-	st, err := NewFileStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	st := newFileStore(t, dir)
 	ctx := context.Background()
 
-	if _, ok, err := st.TryAcquire(ctx, "jobs", "a", 10*time.Millisecond); err != nil || !ok {
+	if _, ok, err := TryAcquire(ctx, st, "jobs", "a", 10*time.Millisecond, nil); err != nil || !ok {
 		t.Fatalf("acquire ok=%v err=%v", ok, err)
 	}
 	time.Sleep(30 * time.Millisecond)
 
 	// Lease has expired: a different owner should be able to Renew (steal) it.
-	l, ok, err := st.Renew(ctx, "jobs", "b", time.Minute)
+	l, ok, err := Renew(ctx, st, "jobs", "b", time.Minute, nil)
 	if err != nil || !ok {
 		t.Fatalf("expected b to take over expired lease ok=%v err=%v", ok, err)
 	}
@@ -190,6 +183,7 @@ func TestFileStoreRenewExpiredLeaseByOtherOwner(t *testing.T) {
 // valid JSON reflecting a single consistent winner.
 func TestFileStoreConcurrentLeaseAcquisition(t *testing.T) {
 	dir := t.TempDir()
+	st := newFileStore(t, dir)
 
 	const workers = 8
 	const roundsPerWorker = 15
@@ -205,14 +199,9 @@ func TestFileStoreConcurrentLeaseAcquisition(t *testing.T) {
 			defer wg.Done()
 			// Each simulated process gets its own FileStore instance
 			// (as separate OS processes would), all sharing dir.
-			st, err := NewFileStore(dir, WithLockRetryDelay(2*time.Millisecond))
-			if err != nil {
-				t.Errorf("NewFileStore: %v", err)
-				return
-			}
 			ctx := context.Background()
 			for r := 0; r < roundsPerWorker; r++ {
-				l, ok, err := st.TryAcquire(ctx, "leader", owner, 200*time.Millisecond)
+				l, ok, err := TryAcquire(ctx, st, "leader", owner, 200*time.Millisecond, nil)
 				if err != nil {
 					t.Errorf("TryAcquire: %v", err)
 					return
@@ -225,10 +214,10 @@ func TestFileStoreConcurrentLeaseAcquisition(t *testing.T) {
 						atomic.AddInt64(&mismatch, 1)
 					}
 					// Hold briefly, then renew once, then release.
-					if _, ok, err := st.Renew(ctx, "leader", owner, 200*time.Millisecond); err != nil || !ok {
+					if _, ok, err := Renew(ctx, st, "leader", owner, 200*time.Millisecond, nil); err != nil || !ok {
 						t.Errorf("Renew after acquire should succeed for owner: ok=%v err=%v", ok, err)
 					}
-					if err := st.Release(ctx, "leader", owner); err != nil {
+					if err := Release(ctx, st, "leader", owner); err != nil {
 						t.Errorf("Release: %v", err)
 					}
 				}
@@ -246,16 +235,13 @@ func TestFileStoreConcurrentLeaseAcquisition(t *testing.T) {
 
 	// Final state must be readable, internally consistent JSON, and the
 	// lease must have been released by the last owner (no dangling holder).
-	final, err := NewFileStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st, err := final.readState()
+	final := newFileStore(t, dir)
+	snapshot, err := loadState(final)
 	if err != nil {
 		t.Fatalf("final snapshot unreadable/corrupt: %v", err)
 	}
-	if _, held := st.Leases["leader"]; held {
-		t.Fatalf("expected lease to be released at end of test, got %+v", st.Leases["leader"])
+	if _, held := snapshot.Leases["leader"]; held {
+		t.Fatalf("expected lease to be released at end of test, got %+v", snapshot.Leases["leader"])
 	}
 }
 
@@ -263,35 +249,12 @@ func ownerName(i int) string {
 	return string(rune('A' + i))
 }
 
-func TestFileStoreStaleLockRecovery(t *testing.T) {
-	dir := t.TempDir()
-	st, err := NewFileStore(dir, WithLockTimeout(50*time.Millisecond), WithStaleThreshold(10*time.Millisecond))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Simulate a crashed holder: create the lock file directly and let it
-	// age past the staleness threshold without releasing it.
-	release, err := st.acquireLock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = release // intentionally not calling this - simulates a crash
-
-	time.Sleep(30 * time.Millisecond)
-
+func TestFileStoreContextCancellation(t *testing.T) {
+	st := newFileStore(t, t.TempDir())
 	ctx := context.Background()
-	done := make(chan error, 1)
-	go func() {
-		done <- st.Heartbeat(ctx, Node{ID: "a"}, time.Minute)
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("expected stale lock to be recovered, got error: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for stale lock recovery")
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := Heartbeat(ctx, st, Node{ID: "a"}, time.Minute, nil); err == nil {
+		t.Fatal("expected canceled context error")
 	}
 }

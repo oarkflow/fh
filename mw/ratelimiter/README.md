@@ -38,5 +38,4 @@ Use distributed stores for multi-node deployments. Return clear `429` responses 
 
 ## Persistent storage
 
-`NewMemoryStore` remains the default. For counters that must survive a process restart on a single node, use `ratelimiter.NewFileStore(dir, gcInterval)`, which persists one JSON file per hashed key under `dir` (atomic writes, optional background GC). It is not a substitute for a distributed store across multiple nodes.
-
+`Config.Store` is a `kv.Store` and defaults to `kv.NewMemoryStore`. For counters that must survive a process restart on a single node, construct `kv.NewFileStore(dir, kv.WithFileGCInterval(gcInterval))` and pass it as `Config.Store`. It is not a substitute for a distributed store across multiple nodes.

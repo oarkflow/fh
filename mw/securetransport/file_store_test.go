@@ -4,10 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
 	protocol "github.com/oarkflow/fh/pkg/securetransport"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func randID16(t *testing.T) protocol.ID16 {
@@ -21,9 +23,9 @@ func randID16(t *testing.T) protocol.ID16 {
 
 func TestFileDeviceStore_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewFileDeviceStore(dir)
+	store, err := kv.NewFileStore(dir)
 	if err != nil {
-		t.Fatalf("NewFileDeviceStore: %v", err)
+		t.Fatalf("kv.NewFileStore: %v", err)
 	}
 
 	id := randID16(t)
@@ -31,14 +33,14 @@ func TestFileDeviceStore_RoundTrip(t *testing.T) {
 		ID: id, PublicKey: [32]byte{1, 2, 3}, Name: "laptop", Principal: "user-1",
 		CreatedAt: time.Now().Truncate(time.Second),
 	}
-	if err := store.Register(dev); err != nil {
+	if err := registerDevice(store, dev); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if err := store.Register(dev); err == nil {
+	if err := registerDevice(store, dev); err == nil {
 		t.Fatalf("expected duplicate id error on second Register")
 	}
 
-	got, err := store.Get(id)
+	got, err := getDevice(store, id)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -47,10 +49,10 @@ func TestFileDeviceStore_RoundTrip(t *testing.T) {
 	}
 
 	touchAt := time.Now().Add(time.Minute).Truncate(time.Second)
-	if err := store.Touch(id, touchAt); err != nil {
+	if err := touchDevice(store, id, touchAt); err != nil {
 		t.Fatalf("Touch: %v", err)
 	}
-	got, err = store.Get(id)
+	got, err = getDevice(store, id)
 	if err != nil {
 		t.Fatalf("Get after touch: %v", err)
 	}
@@ -59,32 +61,31 @@ func TestFileDeviceStore_RoundTrip(t *testing.T) {
 	}
 
 	revokeAt := time.Now().Truncate(time.Second)
-	if err := store.Revoke(id, revokeAt); err != nil {
+	if err := revokeDevice(store, id, revokeAt); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	if _, err := store.Get(id); err != ErrDeviceRevoked {
+	if _, err := getDevice(store, id); err != ErrDeviceRevoked {
 		t.Fatalf("expected ErrDeviceRevoked, got %v", err)
 	}
 
 	unknown := randID16(t)
-	if _, err := store.Get(unknown); err != ErrDeviceNotFound {
+	if _, err := getDevice(store, unknown); err != ErrDeviceNotFound {
 		t.Fatalf("expected ErrDeviceNotFound, got %v", err)
 	}
-	if err := store.Touch(unknown, time.Now()); err != ErrDeviceNotFound {
+	if err := touchDevice(store, unknown, time.Now()); err != ErrDeviceNotFound {
 		t.Fatalf("expected ErrDeviceNotFound on Touch, got %v", err)
 	}
-	if err := store.Revoke(unknown, time.Now()); err != ErrDeviceNotFound {
+	if err := revokeDevice(store, unknown, time.Now()); err != ErrDeviceNotFound {
 		t.Fatalf("expected ErrDeviceNotFound on Revoke, got %v", err)
 	}
 }
 
 func TestFileSessionStore_RoundTripAndPermissions(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewFileSessionStore(dir, 0)
+	store, err := kv.NewFileStore(dir)
 	if err != nil {
-		t.Fatalf("NewFileSessionStore: %v", err)
+		t.Fatalf("kv.NewFileStore: %v", err)
 	}
-	defer store.StopGC()
 
 	sessID := randID16(t)
 	devID := randID16(t)
@@ -95,14 +96,14 @@ func TestFileSessionStore_RoundTripAndPermissions(t *testing.T) {
 		ExpiresAt: time.Now().Add(time.Hour).Truncate(time.Second),
 		KeyID:     "server-v1",
 	}
-	if err := store.Create(sess); err != nil {
+	if err := createSession(store, sess); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := store.Create(sess); err == nil {
+	if err := createSession(store, sess); err == nil {
 		t.Fatalf("expected duplicate session id error")
 	}
 
-	got, err := store.Get(sessID)
+	got, err := getSession(store, sessID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -147,10 +148,10 @@ func TestFileSessionStore_RoundTripAndPermissions(t *testing.T) {
 		}
 	}
 
-	if err := store.Delete(sessID); err != nil {
+	if err := deleteSession(store, sessID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if _, err := store.Get(sessID); err != ErrSessionNotFound {
+	if _, err := getSession(store, sessID); err != ErrSessionNotFound {
 		t.Fatalf("expected ErrSessionNotFound after delete, got %v", err)
 	}
 
@@ -158,24 +159,23 @@ func TestFileSessionStore_RoundTripAndPermissions(t *testing.T) {
 	sess2ID := randID16(t)
 	sess2 := sess
 	sess2.ID = sess2ID
-	if err := store.Create(sess2); err != nil {
+	if err := createSession(store, sess2); err != nil {
 		t.Fatalf("Create sess2: %v", err)
 	}
-	if err := store.DeleteByDevice(devID); err != nil {
+	if err := deleteSessionsByDevice(store, devID); err != nil {
 		t.Fatalf("DeleteByDevice: %v", err)
 	}
-	if _, err := store.Get(sess2ID); err != ErrSessionNotFound {
+	if _, err := getSession(store, sess2ID); err != ErrSessionNotFound {
 		t.Fatalf("expected ErrSessionNotFound after DeleteByDevice, got %v", err)
 	}
 }
 
 func TestFileSessionStore_ExpiryTriggersNotFound(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewFileSessionStore(dir, 0)
+	store, err := kv.NewFileStore(dir)
 	if err != nil {
-		t.Fatalf("NewFileSessionStore: %v", err)
+		t.Fatalf("kv.NewFileStore: %v", err)
 	}
-	defer store.StopGC()
 
 	id := randID16(t)
 	sess := Session{
@@ -184,44 +184,45 @@ func TestFileSessionStore_ExpiryTriggersNotFound(t *testing.T) {
 		CreatedAt: time.Now().Add(-time.Hour),
 		ExpiresAt: time.Now().Add(-time.Minute), // already expired
 	}
-	if err := store.Create(sess); err != nil {
+	if err := createSession(store, sess); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := store.Get(id); err != ErrSessionNotFound {
+	if _, err := getSession(store, id); err != ErrSessionNotFound {
 		t.Fatalf("expected ErrSessionNotFound for expired session, got %v", err)
 	}
 	// File should be gone after lazy expiry on Get.
-	if _, err := store.Get(id); err != ErrSessionNotFound {
+	if _, err := getSession(store, id); err != ErrSessionNotFound {
 		t.Fatalf("expected ErrSessionNotFound on second Get, got %v", err)
 	}
 }
 
 func TestFileReplayStore_AcceptRejectCapacity(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewFileReplayStore(dir, 2)
+	store, err := kv.NewFileStore(dir)
 	if err != nil {
-		t.Fatalf("NewFileReplayStore: %v", err)
+		t.Fatalf("kv.NewFileStore: %v", err)
 	}
+	var replayMu sync.Mutex
 
 	future := time.Now().Add(time.Hour)
 
-	ok, err := store.CheckAndStore("key-1", future)
+	ok, err := checkAndStoreReplay(store, &replayMu, 2, "key-1", future)
 	if err != nil || !ok {
 		t.Fatalf("expected accept for key-1, got ok=%v err=%v", ok, err)
 	}
 
-	ok, err = store.CheckAndStore("key-1", future)
+	ok, err = checkAndStoreReplay(store, &replayMu, 2, "key-1", future)
 	if err != nil || ok {
 		t.Fatalf("expected reject (replay) for key-1, got ok=%v err=%v", ok, err)
 	}
 
-	ok, err = store.CheckAndStore("key-2", future)
+	ok, err = checkAndStoreReplay(store, &replayMu, 2, "key-2", future)
 	if err != nil || !ok {
 		t.Fatalf("expected accept for key-2, got ok=%v err=%v", ok, err)
 	}
 
 	// Capacity is now exhausted (maxEntries=2, both non-expired).
-	_, err = store.CheckAndStore("key-3", future)
+	_, err = checkAndStoreReplay(store, &replayMu, 2, "key-3", future)
 	if err == nil {
 		t.Fatalf("expected capacity exhausted error for key-3")
 	}
@@ -229,13 +230,14 @@ func TestFileReplayStore_AcceptRejectCapacity(t *testing.T) {
 
 func TestFileReplayStore_ExpiredEntriesEvicted(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewFileReplayStore(dir, 1)
+	store, err := kv.NewFileStore(dir)
 	if err != nil {
-		t.Fatalf("NewFileReplayStore: %v", err)
+		t.Fatalf("kv.NewFileStore: %v", err)
 	}
+	var replayMu sync.Mutex
 
 	past := time.Now().Add(-time.Minute)
-	ok, err := store.CheckAndStore("expiring-key", past)
+	ok, err := checkAndStoreReplay(store, &replayMu, 1, "expiring-key", past)
 	if err != nil || !ok {
 		t.Fatalf("expected accept for expiring-key, got ok=%v err=%v", ok, err)
 	}
@@ -243,7 +245,7 @@ func TestFileReplayStore_ExpiredEntriesEvicted(t *testing.T) {
 	future := time.Now().Add(time.Hour)
 	// Capacity is 1 and full, but the existing entry is expired so it should
 	// be evicted opportunistically, making room for the new key.
-	ok, err = store.CheckAndStore("new-key", future)
+	ok, err = checkAndStoreReplay(store, &replayMu, 1, "new-key", future)
 	if err != nil || !ok {
 		t.Fatalf("expected accept for new-key after eviction, got ok=%v err=%v", ok, err)
 	}

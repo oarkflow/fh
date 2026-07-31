@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 type AdaptiveConfig struct {
@@ -22,7 +23,7 @@ type AdaptiveConfig struct {
 
 func NewAdaptive(cfg AdaptiveConfig) (fh.HandlerFunc, func()) {
 	if cfg.BaseConfig.Store == nil {
-		cfg.BaseConfig.Store = NewMemoryStore(256)
+		cfg.BaseConfig.Store = kv.NewMemoryStore(kv.WithShardCount(256))
 	}
 	if cfg.BaseConfig.Max <= 0 {
 		cfg.BaseConfig.Max = 100
@@ -105,7 +106,7 @@ func NewAdaptive(cfg AdaptiveConfig) (fh.HandlerFunc, func()) {
 
 		limit := int(currentLimit.Load())
 		now := time.Now()
-		result, err := cfg.BaseConfig.Store.Allow(key, limit, cfg.BaseConfig.Window, now)
+		result, err := Allow(cfg.BaseConfig.Store, key, limit, cfg.BaseConfig.Window, now)
 		if err != nil {
 			return err
 		}
@@ -140,7 +141,7 @@ type LoadAwareLimiter struct {
 	scaleUp     float64
 	minLimit    int
 	maxLimit    int
-	store       Store
+	store       kv.Store
 	window      time.Duration
 	keyFunc     KeyFunc
 	sendHeaders bool
@@ -151,7 +152,7 @@ type LoadAwareLimiter struct {
 
 func NewLoadAware(baseCfg Config, highWater int64) *LoadAwareLimiter {
 	if baseCfg.Store == nil {
-		baseCfg.Store = NewMemoryStore(256)
+		baseCfg.Store = kv.NewMemoryStore(kv.WithShardCount(256))
 	}
 	if baseCfg.Max <= 0 {
 		baseCfg.Max = 100
@@ -216,7 +217,7 @@ func (l *LoadAwareLimiter) Middleware() fh.HandlerFunc {
 		l.mu.RUnlock()
 
 		now := time.Now()
-		result, err := l.store.Allow(key, limit, l.window, now)
+		result, err := Allow(l.store, key, limit, l.window, now)
 		if err != nil {
 			return err
 		}

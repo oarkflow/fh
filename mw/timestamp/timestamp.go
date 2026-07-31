@@ -16,16 +16,12 @@ type Config struct {
 	MaxSkew        time.Duration
 	MaxSize        int
 	MaxNonceLength int
-	Store          ReplayStore
+	Store          kv.Store
 	KeyFunc        func(fh.Ctx) string
 	Reject         func(fh.Ctx, string) error
 	Skip           func(fh.Ctx) bool
 	Required       bool
 	RequireNonce   bool
-}
-
-type ReplayStore interface {
-	Seen(key string, ttl time.Duration) (bool, error)
 }
 
 var ErrReplayStoreFull = errors.New("timestamp: replay store capacity exhausted")
@@ -39,9 +35,11 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 		for {
 			select {
 			case <-ticker.C:
-				if ms, ok := cfg.Store.(*MemoryStore); ok {
-					ms.cleanup()
-				}
+				// Len sweeps expired entries as a side effect for both
+				// kv.MemoryStore and kv.FileStore, so this periodic call is a
+				// store-agnostic replacement for the old MemoryStore-only
+				// cleanup hook.
+				_, _ = cfg.Store.Len()
 			case <-stop:
 				return
 			}
@@ -88,7 +86,7 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 			if ttl <= 0 {
 				return cfg.Reject(c, "request timestamp outside acceptable window")
 			}
-			seen, err := cfg.Store.Seen(key, ttl)
+			seen, err := Seen(cfg.Store, key, ttl, cfg.MaxSize)
 			if err != nil {
 				return err
 			}
@@ -122,7 +120,11 @@ func normalize(cfg Config) Config {
 		cfg.MaxNonceLength = 128
 	}
 	if cfg.Store == nil {
-		cfg.Store = NewMemoryStore(cfg.MaxSize)
+		// A single shard mirrors the original MemoryStore's design: capacity
+		// accounting for Seen's reject-when-full policy is exact via Len()
+		// regardless of shard count, but a single shard keeps every access
+		// serialized the same way the original's own mutex did.
+		cfg.Store = kv.NewMemoryStore(kv.WithShardCount(1))
 	}
 	if cfg.KeyFunc == nil {
 		cfg.KeyFunc = func(c fh.Ctx) string {
@@ -144,36 +146,11 @@ func normalize(cfg Config) Config {
 // presence and TTL matter, never its content.
 var seenMarker = []byte{1}
 
-// MemoryStore is an in-process ReplayStore. It is a thin adapter over
-// kv.MemoryStore for the actual map/TTL/expiry mechanics; MemoryStore itself
-// only adds the "reject when at capacity rather than evict a live marker"
-// policy that kv.Store's generic capacity handling does not provide (see
-// package doc note in file_store.go for details on that gap).
-type MemoryStore struct {
-	mu      sync.Mutex
-	store   *kv.MemoryStore
-	maxSize int
-}
-
-func NewMemoryStore(maxSize int) *MemoryStore {
+func Seen(store kv.Store, key string, ttl time.Duration, maxSize int) (bool, error) {
 	if maxSize <= 0 {
 		maxSize = 100000
 	}
-	// A single shard mirrors the original design's single mutex-guarded map:
-	// MemoryStore serializes all access itself (see Seen below), so there is
-	// no concurrency benefit to sharding here, and a single shard keeps
-	// capacity accounting exact rather than spread unevenly across shards.
-	return &MemoryStore{
-		store:   kv.NewMemoryStore(kv.WithShardCount(1)),
-		maxSize: maxSize,
-	}
-}
-
-func (s *MemoryStore) Seen(key string, ttl time.Duration) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, exists, err := s.store.Get(key)
+	_, exists, err := store.Get(key)
 	if err != nil {
 		return false, err
 	}
@@ -183,22 +160,16 @@ func (s *MemoryStore) Seen(key string, ttl time.Duration) (bool, error) {
 
 	// Len() sweeps expired entries as a side effect, mirroring the original
 	// evictExpired-then-recheck sequence.
-	n, err := s.store.Len()
+	n, err := store.Len()
 	if err != nil {
 		return false, err
 	}
-	if n >= s.maxSize {
+	if n >= maxSize {
 		return false, ErrReplayStoreFull
 	}
 
-	if err := s.store.Set(key, seenMarker, ttl); err != nil {
+	if err := store.Set(key, seenMarker, ttl); err != nil {
 		return false, err
 	}
 	return false, nil
-}
-
-func (s *MemoryStore) cleanup() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, _ = s.store.Len()
 }

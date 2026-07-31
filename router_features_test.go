@@ -11,6 +11,7 @@ import (
 
 	"github.com/oarkflow/fh"
 	"github.com/oarkflow/fh/mw/session"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func TestCompiledRoutePatternUsesRouterSemantics(t *testing.T) {
@@ -93,7 +94,7 @@ func TestRedirectBackRejectsCrossOriginReferer(t *testing.T) {
 }
 
 func TestFlashPersistsForOneRequest(t *testing.T) {
-	manager := session.NewSessionManager(session.NewMemoryStore(time.Minute),
+	manager := session.NewSessionManager(kv.NewMemoryStore(kv.WithGCInterval(time.Minute)),
 		session.SessionSecret([]byte("0123456789abcdef0123456789abcdef")),
 		session.SessionSecure(false),
 	)

@@ -6,20 +6,23 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 const (
 	LocalKeyRecord = "api_key_record"
 	LocalKeyID     = "api_key_id"
+	registryKey    = "registry"
 )
+
+const maxRegistryFileSize = 32 << 20
 
 type LookupFunc func(ctx fh.Ctx, key string) bool
 type ErrorHandler func(ctx fh.Ctx) error
@@ -38,9 +41,6 @@ type KeyRecord struct {
 	AllowedIPs  []string
 }
 
-type Store interface {
-	Lookup(ctx fh.Ctx, id string) (KeyRecord, bool, error)
-}
 type UsageHook func(ctx fh.Ctx, rec KeyRecord)
 
 type Config struct {
@@ -56,7 +56,7 @@ type Config struct {
 	Keys       []string
 	Lookup     LookupFunc
 	HashedKeys map[string]string
-	Store      Store
+	Store      kv.Store
 	// RequiredScopes is enforced uniformly across every auth path. Keys
 	// authenticated via Lookup/Keys/HashedKeys carry no scope metadata, so
 	// they are rejected whenever RequiredScopes is non-empty rather than
@@ -97,7 +97,7 @@ func New(config Config) fh.HandlerFunc {
 		if config.Store != nil {
 			id, _ := SplitKey(key)
 			if id != "" {
-				r, exists, err := config.Store.Lookup(c, id)
+				r, exists, err := Lookup(config.Store, id)
 				if err != nil {
 					return fh.InternalError(fmt.Errorf("api key store lookup: %w", err))
 				}
@@ -212,48 +212,88 @@ func Generate(prefix string, secretBytes int) (key string, hash string, err erro
 	return key, HashKey(key), nil
 }
 
-type MemoryStore struct {
-	mu   sync.RWMutex
-	keys map[string]KeyRecord
+func Lookup(store kv.Store, id string) (KeyRecord, bool, error) {
+	data, ok, err := store.Get(registryKey)
+	if err != nil || !ok {
+		return KeyRecord{}, false, err
+	}
+	records, err := decodeRegistry(data)
+	if err != nil {
+		return KeyRecord{}, false, err
+	}
+	for _, rec := range records {
+		if rec.ID == id {
+			return rec, true, nil
+		}
+	}
+	return KeyRecord{}, false, nil
 }
 
-func NewMemoryStore(records ...KeyRecord) *MemoryStore {
-	s := &MemoryStore{keys: map[string]KeyRecord{}}
-	for _, r := range records {
-		s.Set(r)
+func SaveRegistry(store kv.Store, records []KeyRecord) error {
+	data, err := json.Marshal(records)
+	if err != nil {
+		return err
 	}
-	return s
+	return store.Set(registryKey, data, 0)
 }
-func (s *MemoryStore) Set(rec KeyRecord) {
-	if s == nil || rec.ID == "" {
-		return
+
+func Set(store kv.Store, rec KeyRecord) error {
+	if rec.ID == "" {
+		return nil
 	}
-	s.mu.Lock()
-	s.keys[rec.ID] = rec
-	s.mu.Unlock()
+	records, err := loadRegistry(store)
+	if err != nil {
+		return err
+	}
+	for i := range records {
+		if records[i].ID == rec.ID {
+			records[i] = rec
+			return SaveRegistry(store, records)
+		}
+	}
+	records = append(records, rec)
+	return SaveRegistry(store, records)
 }
-func (s *MemoryStore) Revoke(id string) error {
-	if s == nil {
-		return errors.New("nil api key store")
+
+func Revoke(store kv.Store, id string) error {
+	records, err := loadRegistry(store)
+	if err != nil {
+		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.keys[id]
+	for i := range records {
+		if records[i].ID == id {
+			records[i].Revoked = true
+			return SaveRegistry(store, records)
+		}
+	}
+	return fmt.Errorf("api key not found")
+}
+
+func loadRegistry(store kv.Store) ([]KeyRecord, error) {
+	data, ok, err := store.Get(registryKey)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
-		return errors.New("api key not found")
+		return nil, nil
 	}
-	rec.Revoked = true
-	s.keys[id] = rec
-	return nil
+	return decodeRegistry(data)
 }
-func (s *MemoryStore) Lookup(ctx fh.Ctx, id string) (KeyRecord, bool, error) {
-	if s == nil {
-		return KeyRecord{}, false, nil
+
+func decodeRegistry(data []byte) ([]KeyRecord, error) {
+	var records []KeyRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, err
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rec, ok := s.keys[id]
-	return rec, ok, nil
+	return records, nil
+}
+
+func NewKVStore(records ...KeyRecord) (kv.Store, error) {
+	store := kv.NewMemoryStore()
+	if err := SaveRegistry(store, records); err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 func hasScopes(have, need []string) bool {
 	if len(need) == 0 {

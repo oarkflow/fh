@@ -19,6 +19,7 @@ import (
 	"github.com/oarkflow/fh/mw/security"
 	"github.com/oarkflow/fh/mw/session"
 	"github.com/oarkflow/fh/mw/timeout"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 // testServer starts the app on a random port and returns the address.
@@ -461,7 +462,7 @@ func TestCooperativeTimeout(t *testing.T) {
 }
 
 func TestSessionMiddlewarePersistsBeforeResponseAndDestroys(t *testing.T) {
-	store := session.NewMemoryStore(0)
+	store := kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(100000))
 	manager := session.NewSessionManager(store,
 		session.SessionCookieName("sid"),
 		session.SessionSecrets([]byte("0123456789abcdef0123456789abcdef")),

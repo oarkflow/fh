@@ -84,7 +84,10 @@ func TestStoreKeyWithSufficientScopeStillWorks(t *testing.T) {
 		t.Fatal(err)
 	}
 	id, _ := SplitKey(key)
-	store := NewMemoryStore(KeyRecord{ID: id, Hash: hash, Scopes: []string{"admin", "read"}})
+	store, err := NewKVStore(KeyRecord{ID: id, Hash: hash, Scopes: []string{"admin", "read"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	app := newApp(Config{Store: store, RequiredScopes: []string{"admin"}})
 	addr := testServer(t, app)
 	if code := doRequest(t, addr, key); code != 200 {
@@ -101,7 +104,10 @@ func TestStoreKeyWithInsufficientScopeStillRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	id, _ := SplitKey(key)
-	store := NewMemoryStore(KeyRecord{ID: id, Hash: hash, Scopes: []string{"read"}})
+	store, err := NewKVStore(KeyRecord{ID: id, Hash: hash, Scopes: []string{"read"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	app := newApp(Config{Store: store, RequiredScopes: []string{"admin"}})
 	addr := testServer(t, app)
 	if code := doRequest(t, addr, key); code == 200 {

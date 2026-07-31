@@ -317,10 +317,13 @@ See [Configuration](docs/configuration.md) for the full field reference, and [St
 ## Sessions
 
 ```go
-import "github.com/oarkflow/fh/mw/session"
+import (
+    "github.com/oarkflow/fh/mw/session"
+    "github.com/oarkflow/fh/pkg/storage/kv"
+)
 
 smw := session.New(session.Config{
-    Store:  session.NewMemoryStore(),
+    Store:  kv.NewMemoryStore(),
     Secret: "your-256-bit-secret",
 })
 app.Use(smw.Middleware)
@@ -511,5 +514,5 @@ fh is production-ready for HTTP/1.1, HTTP/2, and WebSocket workloads on a single
 
 - **No HTTP/3 / QUIC.** Only HTTP/1.1 and HTTP/2 are implemented. Terminate HTTP/3 at an edge proxy (e.g. a CDN) in front of fh if you need it.
 - **No OpenTelemetry (OTLP) export.** `mw/tracing` propagates/parses `traceparent` headers and `mw/metrics` exposes a hand-rolled Prometheus text endpoint, but neither ships an OTLP exporter to a collector (Grafana Tempo/Datadog/etc.). Bridge these yourself, or scrape the Prometheus endpoint and configure trace propagation compatible with your existing collector.
-- **In-memory-only distributed backends.** `mw/ratelimiter`, `mw/slidingwindow`, `mw/ipthrottle`, `mw/ipreputation`, `mw/timestamp`, `mw/cache`, `mw/session`, and `pkg/cluster` each define a pluggable `Store` interface but ship only a `MemoryStore`/in-process implementation. Behind multiple instances of fh, rate limits, caches, sessions, and replay protection are enforced per-instance, not globally — implement the relevant `Store` interface against your own shared backend (Redis, SQL, Consul, etc.) if you need cluster-wide consistency.
+- **Process-local defaults.** Middleware and cluster state use the shared `pkg/storage/kv.Store` interface. Defaults are in-process, so rate limits, caches, sessions, replay markers, and cluster leases are per instance unless you provide a shared `kv.Store` backend (Redis, SQL, Consul, etc.).
 - **No gRPC or GraphQL protocol handlers.** Only MIME-type constants exist for GraphQL; there's no built-in gRPC server. Both are addressable via a reverse-proxy route (`mw/proxy`) to a dedicated service if needed.

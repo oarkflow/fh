@@ -3,17 +3,21 @@ package ratelimiter
 import (
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 func TestFileStoreAllowBasic(t *testing.T) {
 	dir := t.TempDir()
-	store := NewFileStore(dir, 0)
-	defer store.StopGC()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
 
 	now := time.Now()
 
 	for i := 0; i < 3; i++ {
-		res, err := store.Allow("alice", 3, time.Minute, now)
+		res, err := Allow(store, "alice", 3, time.Minute, now)
 		if err != nil {
 			t.Fatalf("Allow: %v", err)
 		}
@@ -22,7 +26,7 @@ func TestFileStoreAllowBasic(t *testing.T) {
 		}
 	}
 
-	res, err := store.Allow("alice", 3, time.Minute, now)
+	res, err := Allow(store, "alice", 3, time.Minute, now)
 	if err != nil {
 		t.Fatalf("Allow: %v", err)
 	}
@@ -36,13 +40,15 @@ func TestFileStoreAllowBasic(t *testing.T) {
 
 func TestFileStoreWindowExpiry(t *testing.T) {
 	dir := t.TempDir()
-	store := NewFileStore(dir, 0)
-	defer store.StopGC()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
 
 	window := 20 * time.Millisecond
 	now := time.Now()
 
-	res, err := store.Allow("bob", 1, window, now)
+	res, err := Allow(store, "bob", 1, window, now)
 	if err != nil {
 		t.Fatalf("Allow: %v", err)
 	}
@@ -50,7 +56,7 @@ func TestFileStoreWindowExpiry(t *testing.T) {
 		t.Fatalf("first request should be allowed")
 	}
 
-	res, err = store.Allow("bob", 1, window, now)
+	res, err = Allow(store, "bob", 1, window, now)
 	if err != nil {
 		t.Fatalf("Allow: %v", err)
 	}
@@ -61,7 +67,7 @@ func TestFileStoreWindowExpiry(t *testing.T) {
 	// Advance past the window using a later `now` rather than sleeping the
 	// wall clock, since Allow is driven entirely by the now parameter.
 	later := now.Add(window + 5*time.Millisecond)
-	res, err = store.Allow("bob", 1, window, later)
+	res, err = Allow(store, "bob", 1, window, later)
 	if err != nil {
 		t.Fatalf("Allow: %v", err)
 	}
@@ -72,21 +78,23 @@ func TestFileStoreWindowExpiry(t *testing.T) {
 
 func TestFileStoreKeysDoNotCollide(t *testing.T) {
 	dir := t.TempDir()
-	store := NewFileStore(dir, 0)
-	defer store.StopGC()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
 
 	now := time.Now()
 
-	res1, err := store.Allow("keyA", 1, time.Minute, now)
+	res1, err := Allow(store, "keyA", 1, time.Minute, now)
 	if err != nil || !res1.Allowed {
 		t.Fatalf("keyA first request: res=%+v err=%v", res1, err)
 	}
-	res2, err := store.Allow("keyB", 1, time.Minute, now)
+	res2, err := Allow(store, "keyB", 1, time.Minute, now)
 	if err != nil || !res2.Allowed {
 		t.Fatalf("keyB first request: res=%+v err=%v", res2, err)
 	}
 
-	res1b, err := store.Allow("keyA", 1, time.Minute, now)
+	res1b, err := Allow(store, "keyA", 1, time.Minute, now)
 	if err != nil {
 		t.Fatalf("keyA second request: %v", err)
 	}
@@ -97,12 +105,14 @@ func TestFileStoreKeysDoNotCollide(t *testing.T) {
 
 func TestFileStoreGCRemovesExpiredBuckets(t *testing.T) {
 	dir := t.TempDir()
-	store := NewFileStore(dir, 0)
-	defer store.StopGC()
+	store, err := kv.NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("kv.NewFileStore: %v", err)
+	}
 
 	window := 10 * time.Millisecond
 	now := time.Now()
-	if _, err := store.Allow("gone", 1, window, now); err != nil {
+	if _, err := Allow(store, "gone", 1, window, now); err != nil {
 		t.Fatalf("Allow: %v", err)
 	}
 
@@ -112,7 +122,7 @@ func TestFileStoreGCRemovesExpiredBuckets(t *testing.T) {
 	// and GC doesn't remove a fresh bucket.
 	store.GC()
 
-	res, err := store.Allow("gone", 1, window, now)
+	res, err := Allow(store, "gone", 1, window, now)
 	if err != nil {
 		t.Fatalf("Allow: %v", err)
 	}
