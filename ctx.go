@@ -920,6 +920,36 @@ func (c *DefaultCtx) Set(key, value string) {
 	c.flags |= ctxFlagHasExtraResp
 }
 
+// setStaticHeader mirrors Set's dedup/storage behavior for a header whose key
+// and value are pre-validated, immutable byte slices shared across requests
+// (e.g. hardcoded security headers built once at middleware construction).
+// It skips the []byte conversions, forbidden-header blocklist scan, and
+// validToken/ContainsAny checks Set performs for arbitrary caller input,
+// since the caller already guarantees name is a safe, non-reserved token and
+// value contains no control characters. Callers must never mutate k or v
+// afterward since the backing array may be reused across requests.
+func (c *DefaultCtx) setStaticHeader(k, v []byte) {
+	for i := 0; i < c.chCount; i++ {
+		if bytesEqualFold(c.customHeaders[i].Key, k) {
+			c.customHeaders[i].Value = v
+			return
+		}
+	}
+	for i := range c.extraHeaders {
+		if bytesEqualFold(c.extraHeaders[i].Key, k) {
+			c.extraHeaders[i].Value = v
+			return
+		}
+	}
+	if c.chCount < len(c.customHeaders) {
+		c.customHeaders[c.chCount] = Header{Key: k, Value: v}
+		c.chCount++
+	} else {
+		c.extraHeaders = append(c.extraHeaders, Header{Key: k, Value: v})
+	}
+	c.flags |= ctxFlagHasExtraResp
+}
+
 // Append adds a comma-separated response header value without replacing an
 // existing value. It is useful for fields such as Vary.
 func (c *DefaultCtx) Append(key, value string) {

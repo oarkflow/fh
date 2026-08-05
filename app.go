@@ -1552,6 +1552,38 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			return
 		}
 
+		// A keep-alive connection's response buffer (state.writeBuf) is never
+		// returned to the shared bytesPool — it is reused directly across every
+		// request on this connection to avoid a sync.Pool round trip (see the
+		// writeBufPooled comment on DefaultCtx). That means a single very large
+		// response (a big JSON dump, an echoed upload) permanently inflates the
+		// backing array, and that oversized buffer then sits allocated for the
+		// remaining idle lifetime of the connection, and is reused for every
+		// small response after it. Drop it back to a small buffer once it grows
+		// past the same ceiling putBytes uses for the shared pool, so idle
+		// keep-alive connections don't each pin a multi-MB buffer.
+		if state != nil && cap(state.writeBuf) > maxPooledBytesCap {
+			state.writeBuf = make([]byte, 0, 4096)
+		}
+
+		// The read buffer grows (via make, not the pool) to fit an oversized
+		// request line/header block or a body larger than the pooled size class.
+		// That grown array is otherwise carried for the rest of this keep-alive
+		// connection's life, including idle time between requests. Once any
+		// pending pipelined bytes still fit in the original pooled-sized buffer,
+		// drop back down to it instead of pinning the oversized one.
+		if cap(buf) > cap(*rawBuf) {
+			var leftoverLen int
+			if chunkedBody {
+				leftoverLen = len(nextData)
+			} else if nextStart := bodyStart + bodyLen; nextStart < len(accumulated) {
+				leftoverLen = len(accumulated) - nextStart
+			}
+			if leftoverLen <= cap(*rawBuf) {
+				buf = *rawBuf
+			}
+		}
+
 		if chunkedBody {
 			if len(nextData) > cap(buf) {
 				buf = make([]byte, len(nextData))

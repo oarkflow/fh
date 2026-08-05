@@ -46,16 +46,36 @@ func (r *Redactor) RedactMap(in map[string]any) map[string]any {
 			out[k] = r.Replacement
 			continue
 		}
-		switch vv := v.(type) {
-		case map[string]any:
-			out[k] = r.RedactMap(vv)
-		case string:
-			out[k] = r.RedactString(vv)
-		default:
-			out[k] = vv
-		}
+		out[k] = r.redactValue(v)
 	}
 	return out
+}
+
+// redactValue recurses into nested maps and slices so secrets are not missed
+// when they appear inside arrays, e.g. {"users":[{"password":"x"}]}. Without
+// this, RedactMap only inspected direct map values: slice/array elements were
+// passed through unredacted into audit logs and other redacted output.
+func (r *Redactor) redactValue(v any) any {
+	switch vv := v.(type) {
+	case map[string]any:
+		return r.RedactMap(vv)
+	case string:
+		return r.RedactString(vv)
+	case []any:
+		out := make([]any, len(vv))
+		for i, item := range vv {
+			out[i] = r.redactValue(item)
+		}
+		return out
+	case []map[string]any:
+		out := make([]map[string]any, len(vv))
+		for i, item := range vv {
+			out[i] = r.RedactMap(item)
+		}
+		return out
+	default:
+		return vv
+	}
 }
 
 func (r *Redactor) RedactHeaders(in map[string][]string) map[string][]string {

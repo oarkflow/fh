@@ -106,10 +106,19 @@ func defaultHardeningMiddleware(cfg Config) HandlerFunc {
 		)
 	}
 
+	// Pre-encode the fixed header set once at build time. These names/values
+	// are hardcoded constants above, never caller input, so it is safe to skip
+	// Set's per-call []byte conversions, blocklist scan, and token validation
+	// on every request and reuse the same immutable byte slices instead.
+	staticHeaders := make([]Header, len(headers))
+	for i, header := range headers {
+		staticHeaders[i] = Header{Key: []byte(header[0]), Value: []byte(header[1])}
+	}
+
 	return func(c Ctx) error {
 		if dc, ok := c.(*DefaultCtx); ok {
-			for _, header := range headers {
-				dc.Set(header[0], header[1])
+			for _, h := range staticHeaders {
+				dc.setStaticHeader(h.Key, h.Value)
 			}
 		} else {
 			for _, header := range headers {
