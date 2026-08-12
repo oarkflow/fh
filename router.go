@@ -6,7 +6,9 @@ import (
 	"math/bits"
 	"net/url"
 	"reflect"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,10 +73,121 @@ var (
 	ErrRouteParamMissing = errors.New("fh: required route parameter missing")
 )
 
+type constraintKind uint8
+
+const (
+	constraintNone constraintKind = iota
+	constraintInt
+	constraintUint
+	constraintAlpha
+	constraintAlphanumeric
+	constraintUUID
+	constraintRegex
+)
+
+type paramConstraint struct {
+	kind  constraintKind
+	regex *regexp.Regexp
+	raw   string
+}
+
+func parseParamConstraint(name string) (cleanName string, constraint paramConstraint, isOptional bool) {
+	cleanName = name
+	if strings.HasSuffix(cleanName, "?") {
+		isOptional = true
+		cleanName = strings.TrimSuffix(cleanName, "?")
+	}
+	start := strings.IndexByte(cleanName, '<')
+	end := strings.LastIndexByte(cleanName, '>')
+	if start > 0 && end > start {
+		cStr := cleanName[start+1 : end]
+		cleanName = cleanName[:start]
+		switch strings.ToLower(cStr) {
+		case "int":
+			constraint = paramConstraint{kind: constraintInt, raw: cStr}
+		case "uint":
+			constraint = paramConstraint{kind: constraintUint, raw: cStr}
+		case "alpha":
+			constraint = paramConstraint{kind: constraintAlpha, raw: cStr}
+		case "alphanumeric":
+			constraint = paramConstraint{kind: constraintAlphanumeric, raw: cStr}
+		case "uuid", "guid":
+			constraint = paramConstraint{kind: constraintUUID, raw: cStr}
+		default:
+			re, err := regexp.Compile("^" + cStr + "$")
+			if err == nil {
+				constraint = paramConstraint{kind: constraintRegex, regex: re, raw: cStr}
+			}
+		}
+	}
+	return cleanName, constraint, isOptional
+}
+
+func (pc paramConstraint) Match(val string) bool {
+	switch pc.kind {
+	case constraintNone:
+		return true
+	case constraintInt:
+		_, err := strconv.Atoi(val)
+		return err == nil
+	case constraintUint:
+		_, err := strconv.ParseUint(val, 10, 64)
+		return err == nil
+	case constraintAlpha:
+		if len(val) == 0 {
+			return false
+		}
+		for i := 0; i < len(val); i++ {
+			c := val[i]
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+				return false
+			}
+		}
+		return true
+	case constraintAlphanumeric:
+		if len(val) == 0 {
+			return false
+		}
+		for i := 0; i < len(val); i++ {
+			c := val[i]
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+				return false
+			}
+		}
+		return true
+	case constraintUUID:
+		if len(val) != 36 {
+			return false
+		}
+		for i := 0; i < len(val); i++ {
+			c := val[i]
+			if i == 8 || i == 13 || i == 18 || i == 23 {
+				if c != '-' {
+					return false
+				}
+			} else {
+				if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+					return false
+				}
+			}
+		}
+		return true
+	case constraintRegex:
+		if pc.regex != nil {
+			return pc.regex.MatchString(val)
+		}
+		return true
+	default:
+		return true
+	}
+}
+
 type node struct {
 	static map[string]*node
 
-	param *node
+	param            *node
+	paramConstraints []*node
+	constraint       paramConstraint
 
 	wild     *node
 	wildName string
@@ -897,7 +1010,11 @@ func buildParamShortcut(segments []string, h HandlerFunc) (paramShortcut, bool) 
 	if len(param) < 2 || param[0] != ':' {
 		return paramShortcut{}, false
 	}
-	return paramShortcut{prefix: "/" + segments[0] + "/", paramKey: param[1:], fn: h}, true
+	cleanName, constraint, isOptional := parseParamConstraint(param[1:])
+	if constraint.kind != constraintNone || isOptional {
+		return paramShortcut{}, false
+	}
+	return paramShortcut{prefix: "/" + segments[0] + "/", paramKey: cleanName, fn: h}, true
 }
 
 func (r *Router) addParamShortcut(method string, fr paramShortcut) {
@@ -1061,16 +1178,40 @@ func insertRoute(
 
 	switch {
 	case seg[0] == ':':
-		name := seg[1:]
+		rawName := seg[1:]
+		name, constraint, isOptional := parseParamConstraint(rawName)
 
 		validateParamName(method, fullPath, name)
 
-		if n.param == nil {
-			n.param = &node{}
+		var target *node
+		if constraint.kind != constraintNone {
+			for _, child := range n.paramConstraints {
+				if child.constraint.kind == constraint.kind && child.constraint.raw == constraint.raw {
+					target = child
+					break
+				}
+			}
+			if target == nil {
+				target = &node{constraint: constraint}
+				n.paramConstraints = append(n.paramConstraints, target)
+			}
+		} else {
+			if n.param == nil {
+				n.param = &node{}
+			}
+			target = n.param
 		}
 
 		paramKeys = append(paramKeys, name)
-		insertRoute(n.param, method, fullPath, segments, index+1, h, paramKeys)
+
+		if isOptional && index == len(segments)-1 {
+			n.handler = &routeEndpoint{
+				fn:        h,
+				paramKeys: append([]string(nil), paramKeys[:len(paramKeys)-1]...),
+			}
+		}
+
+		insertRoute(target, method, fullPath, segments, index+1, h, paramKeys)
 
 	case seg[0] == '*':
 		name := seg[1:]
@@ -1161,7 +1302,22 @@ func match(n *node, path []byte, params *[]Param, unsafeParams bool) HandlerFunc
 		}
 	}
 
-	// 2. Param second.
+	// 2. Param second (constrained params first, then unconstrained).
+	if len(n.paramConstraints) > 0 && len(seg) > 0 {
+		segStr := b2s(seg)
+		for _, child := range n.paramConstraints {
+			if child.constraint.Match(segStr) {
+				mark := len(*params)
+				*params = append(*params, Param{
+					Value: paramValue(seg, unsafeParams),
+				})
+				if h := match(child, rest, params, unsafeParams); h != nil {
+					return h
+				}
+				*params = (*params)[:mark]
+			}
+		}
+	}
 	if n.param != nil && len(seg) > 0 {
 		mark := len(*params)
 
@@ -1206,6 +1362,14 @@ func matchesPath(n *node, path []byte) bool {
 	if len(n.static) > 0 {
 		if child := n.static[b2s(seg)]; child != nil && matchesPath(child, rest) {
 			return true
+		}
+	}
+	if len(n.paramConstraints) > 0 && len(seg) > 0 {
+		segStr := b2s(seg)
+		for _, child := range n.paramConstraints {
+			if child.constraint.Match(segStr) && matchesPath(child, rest) {
+				return true
+			}
 		}
 	}
 	if n.param != nil && len(seg) > 0 && matchesPath(n.param, rest) {
@@ -1478,4 +1642,24 @@ func (c *DefaultCtx) canRouteStaticPrebuilt() bool {
 		c.Header.KeepAlive &&
 		!c.forceClose &&
 		!c.server.cfg.SendDateHeader && !c.server.cfg.SendKeepAliveHeader
+}
+
+// URLWithQuery builds a URL for a named route using path params and appends URL-encoded query parameters.
+func (r *Router) URLWithQuery(name string, params map[string]any, query map[string]any) (string, error) {
+	strParams := make(map[string]string, len(params))
+	for k, v := range params {
+		strParams[k] = fmt.Sprint(v)
+	}
+	basePath, err := r.URL(name, strParams)
+	if err != nil {
+		return "", err
+	}
+	if len(query) == 0 {
+		return basePath, nil
+	}
+	values := url.Values{}
+	for k, v := range query {
+		values.Add(k, fmt.Sprint(v))
+	}
+	return basePath + "?" + values.Encode(), nil
 }

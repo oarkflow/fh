@@ -305,3 +305,83 @@ func TestOutboundClientInsecureTLSRequiresExplicitOptOut(t *testing.T) {
 		t.Fatalf("MinVersion = %x, want TLS 1.2", client.cfg.TLSConfig.MinVersion)
 	}
 }
+
+func TestRouteSecurityEnforcesScopesAndRolesSequentially(t *testing.T) {
+	cfg := RouteSecurityConfig{
+		AuthRequired: true,
+		Scopes:       []string{"read"},
+		Roles:        []string{"admin"},
+	}
+	secMW := RouteSecurity(cfg)
+
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	// Case 1: Has scope "read", but missing role "admin" -> MUST return 403 ROLE_DENIED
+	app := New()
+	c := &DefaultCtx{server: app, conn: serverConn}
+	c.reset()
+	SetPrincipal(c, Principal{ID: "u1", Type: "user", Scopes: []string{"read"}, Roles: []string{"user"}})
+
+	err := secMW(c)
+	if err == nil {
+		t.Fatal("expected error when user has scope but missing required role")
+	}
+	he, ok := err.(*HTTPError)
+	if !ok || he.Status != StatusForbidden || he.Code != "ROLE_DENIED" {
+		t.Fatalf("expected 403 ROLE_DENIED, got: %v", err)
+	}
+
+	// Case 2: Has both scope "read" AND role "admin" -> MUST pass
+	c2 := &DefaultCtx{server: app, conn: serverConn}
+	c2.reset()
+	SetPrincipal(c2, Principal{ID: "u2", Type: "user", Scopes: []string{"read"}, Roles: []string{"admin"}})
+
+	err = secMW(c2)
+	if err != nil {
+		t.Fatalf("expected success when user has both scope and role, got err: %v", err)
+	}
+}
+
+type sampleUserStruct struct {
+	Username string
+	Password string
+	Token    string
+}
+
+func TestRedactorScrubsCustomStructs(t *testing.T) {
+	redactor := NewRedactor(DefaultRedactionConfig())
+	input := map[string]any{
+		"user": sampleUserStruct{
+			Username: "alice",
+			Password: "super-secret-password",
+			Token:    "secret-token-123",
+		},
+		"list": []sampleUserStruct{
+			{Username: "bob", Password: "bob-password"},
+		},
+	}
+
+	redacted := redactor.RedactMap(input)
+
+	userMap, ok := redacted["user"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected struct to be converted to redacted map, got: %#v", redacted["user"])
+	}
+	if userMap["Password"] != "[REDACTED]" || userMap["Token"] != "[REDACTED]" {
+		t.Fatalf("struct fields were not redacted: %#v", userMap)
+	}
+	if userMap["Username"] != "alice" {
+		t.Fatalf("non-sensitive field was mutated: %v", userMap["Username"])
+	}
+
+	listSlice, ok := redacted["list"].([]any)
+	if !ok || len(listSlice) != 1 {
+		t.Fatalf("expected typed slice to be redacted, got: %#v", redacted["list"])
+	}
+	elemMap, ok := listSlice[0].(map[string]any)
+	if !ok || elemMap["Password"] != "[REDACTED]" {
+		t.Fatalf("slice struct element was not redacted: %#v", listSlice[0])
+	}
+}

@@ -66,6 +66,7 @@ const (
 
 	maxContinuationFrames  = 64
 	maxRSTStreamPerMinute  = 60
+	maxControlFramesPerMin = 1000
 	windowsUpdateThreshold = h2InitialWindow / 2
 )
 
@@ -124,6 +125,10 @@ type h2Conn struct {
 	// Rapid reset protection
 	resetCount       int
 	resetWindowStart time.Time
+
+	// Control frame flood protection
+	controlFrameCount       int
+	controlFrameWindowStart time.Time
 
 	// SETTINGS ACK timeout
 	settingsTimer *time.Timer
@@ -416,6 +421,9 @@ func (h *h2Conn) handleFrame(f h2Frame) error {
 			return h2ConnError{h2FrameSizeError}
 		}
 		if f.flags&h2FlagAck == 0 {
+			if !h.allowControlFrame() {
+				return h2ConnError{h2EnhanceYourCalm}
+			}
 			return h.writeFrame(h2Ping, h2FlagAck, 0, f.payload)
 		}
 	case h2RSTStream:
@@ -477,6 +485,9 @@ func (h *h2Conn) handleSettings(f h2Frame) error {
 			return h2ConnError{h2ProtocolError}
 		}
 		return nil
+	}
+	if !h.allowControlFrame() {
+		return h2ConnError{h2EnhanceYourCalm}
 	}
 	if len(f.payload)%6 != 0 {
 		return h2ConnError{h2FrameSizeError}
@@ -1609,6 +1620,16 @@ func (h *h2Conn) allowRST() bool {
 	}
 	h.resetCount++
 	return h.resetCount <= maxRSTStreamPerMinute
+}
+
+func (h *h2Conn) allowControlFrame() bool {
+	now := time.Now()
+	if now.Sub(h.controlFrameWindowStart) > time.Minute {
+		h.controlFrameCount = 0
+		h.controlFrameWindowStart = now
+	}
+	h.controlFrameCount++
+	return h.controlFrameCount <= maxControlFramesPerMin
 }
 
 func (h *h2Conn) resetStream(id uint32) {

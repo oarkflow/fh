@@ -61,12 +61,12 @@ func New(config ...Config) fh.HandlerFunc {
 		cfg = mergeConfig(cfg, config[0])
 	}
 
-	if err := validateConfig(cfg); err != nil {
-		panic(err)
-	}
-
 	if cfg.OriginStore == nil {
 		cfg.OriginStore = NewMemoryOriginStore(cfg.AllowOrigins...)
+	}
+
+	if err := validateConfig(cfg); err != nil {
+		panic(err)
 	}
 
 	methods := strings.Join(cfg.AllowMethods, ", ")

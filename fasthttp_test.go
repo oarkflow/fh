@@ -329,7 +329,10 @@ func TestSecurityHeaders(t *testing.T) {
 	})
 	addr := testServer(t, app)
 
-	conn, _ := net.Dial("tcp", addr)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer conn.Close()
 	conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
 	resp, _ := io.ReadAll(conn)
@@ -368,7 +371,10 @@ func TestSecurityHeadersCustom(t *testing.T) {
 	})
 	addr := testServer(t, app)
 
-	conn, _ := net.Dial("tcp", addr)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer conn.Close()
 	conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
 	resp, _ := io.ReadAll(conn)
@@ -393,7 +399,10 @@ func TestCORS(t *testing.T) {
 	})
 	addr := testServer(t, app)
 
-	conn, _ := net.Dial("tcp", addr)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer conn.Close()
 	conn.Write([]byte("OPTIONS / HTTP/1.1\r\nHost: localhost\r\nOrigin: https://example.com\r\nConnection: close\r\n\r\n"))
 	resp, _ := io.ReadAll(conn)
@@ -410,7 +419,10 @@ func TestRequestID(t *testing.T) {
 	})
 	addr := testServer(t, app)
 
-	conn, _ := net.Dial("tcp", addr)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer conn.Close()
 	conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
 	resp, _ := io.ReadAll(conn)
@@ -583,7 +595,10 @@ func BenchmarkHelloWorld(b *testing.B) {
 	defer app.Shutdown()
 
 	addr := ln.Addr().String()
-	conn, _ := net.Dial("tcp", addr)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer conn.Close()
 
 	req := []byte("GET /bench HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
@@ -617,7 +632,11 @@ func BenchmarkParallelRequests(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
-		conn, _ := net.Dial("tcp", addr)
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			pb.Next()
+			return
+		}
 		defer conn.Close()
 		req := []byte("GET /bench HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
 		buf := make([]byte, 4096)
@@ -640,7 +659,10 @@ func BenchmarkRouteWithParams(b *testing.B) {
 	defer app.Shutdown()
 
 	addr := ln.Addr().String()
-	conn, _ := net.Dial("tcp", addr)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer conn.Close()
 
 	req := []byte("GET /users/42/posts/7 HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")

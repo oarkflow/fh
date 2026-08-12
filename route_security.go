@@ -29,16 +29,34 @@ func RouteSecurity(cfg RouteSecurityConfig) HandlerFunc {
 			}
 		}
 		if len(cfg.Scopes) > 0 {
-			if err := RequireScope(cfg.Scopes...)(c); err != nil {
+			values, ok, err := extractStrings(c, PrincipalScopesExtractor())
+			if err != nil {
 				return err
 			}
-			return nil
+			if !ok {
+				return NewHTTPError(StatusUnauthorized, "AUTH_REQUIRED", "authentication is required")
+			}
+			for _, want := range cfg.Scopes {
+				if !hasString(values, want) {
+					EmitSecurityEvent(c, "authz.scope_denied", map[string]any{"value": want})
+					return NewHTTPError(StatusForbidden, "SCOPE_DENIED", "required scope is missing")
+				}
+			}
 		}
 		if len(cfg.Roles) > 0 {
-			if err := RequireRole(cfg.Roles...)(c); err != nil {
+			values, ok, err := extractStrings(c, PrincipalRolesExtractor())
+			if err != nil {
 				return err
 			}
-			return nil
+			if !ok {
+				return NewHTTPError(StatusUnauthorized, "AUTH_REQUIRED", "authentication is required")
+			}
+			for _, want := range cfg.Roles {
+				if !hasString(values, want) {
+					EmitSecurityEvent(c, "authz.role_denied", map[string]any{"value": want})
+					return NewHTTPError(StatusForbidden, "ROLE_DENIED", "required role is missing")
+				}
+			}
 		}
 		return c.Next()
 	}

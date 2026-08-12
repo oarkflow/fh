@@ -137,6 +137,13 @@ type Ctx interface {
 	GetCookie(name string) string
 	DelCookie(name string)
 	Problem(p Problem) error
+	ProblemDetails(status int, title, detail, typeURI string) error
+	Bind(v any) error
+	BindJSON(v any) error
+	BindQuery(v any) error
+	BindForm(v any) error
+	BindHeader(v any) error
+	SSEvent(event string, data any) error
 	ErrorReport(err error) ErrorReport
 	ErrorResponse(err error) error
 	SafeErrorResponse(err error) error
@@ -1072,10 +1079,9 @@ func (c *DefaultCtx) Send(b []byte) error { return c.SendBytes(b) }
 // implement JSONAppender are encoded directly into the response buffer, avoiding
 // a marshal allocation and a second response-copy on the normal hot path.
 func (c *DefaultCtx) JSON(v any) error {
-	if c.contentType != nil && !isJSONContentTypeBytes(c.contentType) && c.server != nil && c.server.logger != nil {
-		c.server.logger.Debug("JSON() overriding content-type", "previous", string(c.contentType), "path", c.Path())
+	if c.contentType == nil || !isJSONContentTypeBytes(c.contentType) {
+		c.contentType = jsonCT
 	}
-	c.contentType = jsonCT
 	if app, ok := v.(JSONAppender); ok {
 		return c.writeJSONAppender(app)
 	}
@@ -2061,3 +2067,13 @@ func init() {
 }
 
 var jsonCT = []byte("application/json")
+
+func (c *DefaultCtx) Bind(v any) error                                               { return Bind(c, v) }
+func (c *DefaultCtx) BindJSON(v any) error                                           { return BindJSON(c, v) }
+func (c *DefaultCtx) BindQuery(v any) error                                          { return BindQuery(c, v) }
+func (c *DefaultCtx) BindForm(v any) error                                           { return BindForm(c, v) }
+func (c *DefaultCtx) BindHeader(v any) error                                         { return BindHeader(c, v) }
+func (c *DefaultCtx) SSEvent(event string, data any) error                          { return SSEvent(c, event, data) }
+func (c *DefaultCtx) ProblemDetails(status int, title, detail, typeURI string) error {
+	return ProblemDetails(c, status, title, detail, typeURI)
+}

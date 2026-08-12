@@ -99,7 +99,7 @@ func (a *App) acceptConnection(conn net.Conn) bool {
 		return false
 	}
 	a.activeConn.Add(1)
-	a.conns[conn] = &connState{writeBuf: make([]byte, 0, 4096)}
+	a.conns[conn] = &connState{}
 	a.connMu.Unlock()
 	a.kernelCounters.accepted.Add(1)
 	active := a.kernelCounters.active.Add(1)

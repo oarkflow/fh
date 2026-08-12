@@ -138,3 +138,27 @@ func validOrigin(c fh.Ctx, trusted map[string]struct{}, requireOrigin bool) bool
 	}
 	return strings.EqualFold(u.Host, string(c.RequestHeader().Host))
 }
+
+// RotateToken generates a fresh CSRF token, updates the response cookie, and sets the request local variable.
+func RotateToken(c fh.Ctx, config ...Config) (string, error) {
+	cfg := DefaultConfig
+	if len(config) > 0 {
+		merge(&cfg, config[0])
+	}
+	token, err := newToken()
+	if err != nil {
+		return "", err
+	}
+	c.SetCookie(&fh.Cookie{
+		Name:     cfg.CookieName,
+		Value:    token,
+		Path:     cfg.CookiePath,
+		Domain:   cfg.CookieDomain,
+		MaxAge:   int(cfg.CookieMaxAge.Seconds()),
+		Secure:   cfg.CookieSecure,
+		HttpOnly: false,
+		SameSite: cfg.CookieSameSite,
+	})
+	c.Locals("csrf_token", token)
+	return token, nil
+}

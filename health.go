@@ -2,75 +2,132 @@ package fh
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
-// HealthCheck validates one dependency or invariant needed for readiness. Checks
-// should be fast and respect ctx deadlines.
-type HealthCheck func(context.Context) error
+type HealthCheckResult struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"` // "ok" or "error"
+	Latency string `json:"latency,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
 
 type registeredHealthCheck struct {
-	Name    string
-	Timeout time.Duration
-	Check   HealthCheck
+	name    string
+	timeout time.Duration
+	fn      func(context.Context) error
 }
 
-// HealthCheckResult is returned by /ready and RuntimeInfo dependency checks.
-type HealthCheckResult struct {
-	Name      string        `json:"name"`
-	Status    string        `json:"status"`
-	Latency   time.Duration `json:"latency"`
-	Error     string        `json:"error,omitempty"`
-	CheckedAt time.Time     `json:"checked_at"`
+type HealthProbe func() bool
+
+type HealthConfig struct {
+	Probes map[string]HealthProbe
 }
 
-// AddHealthCheck registers a readiness dependency check. It is safe to call
-// before or after startup. Duplicate names replace the previous check.
-func (a *App) AddHealthCheck(name string, timeout time.Duration, check HealthCheck) *App {
-	if a == nil || name == "" || check == nil {
-		return a
-	}
-	if timeout <= 0 {
-		timeout = time.Second
-	}
+type HealthResponse struct {
+	Status string          `json:"status"`
+	Probes map[string]bool `json:"probes,omitempty"`
+}
+
+// AddHealthCheck adds a named health check function with a timeout to App.
+func (a *App) AddHealthCheck(name string, timeout time.Duration, fn func(context.Context) error) *App {
 	a.healthMu.Lock()
 	defer a.healthMu.Unlock()
-	for i := range a.healthChecks {
-		if a.healthChecks[i].Name == name {
-			a.healthChecks[i] = registeredHealthCheck{Name: name, Timeout: timeout, Check: check}
+	for i, hc := range a.healthChecks {
+		if hc.name == name {
+			a.healthChecks[i] = registeredHealthCheck{name: name, timeout: timeout, fn: fn}
 			return a
 		}
 	}
-	a.healthChecks = append(a.healthChecks, registeredHealthCheck{Name: name, Timeout: timeout, Check: check})
+	a.healthChecks = append(a.healthChecks, registeredHealthCheck{name: name, timeout: timeout, fn: fn})
 	return a
 }
 
-// HealthStatus runs registered checks and returns readiness status.
+// HealthStatus runs all registered health checks and returns overall readiness and individual results.
 func (a *App) HealthStatus(ctx context.Context) (bool, []HealthCheckResult) {
-	if a == nil {
-		return false, nil
-	}
 	a.healthMu.RLock()
-	checks := make([]registeredHealthCheck, len(a.healthChecks))
-	copy(checks, a.healthChecks)
+	checks := append([]registeredHealthCheck(nil), a.healthChecks...)
 	a.healthMu.RUnlock()
-	ready := !a.IsDraining()
-	results := make([]HealthCheckResult, 0, len(checks))
-	for _, chk := range checks {
-		started := time.Now()
-		checkCtx, cancel := context.WithTimeout(ctx, chk.Timeout)
-		err := chk.Check(checkCtx)
-		cancel()
-		res := HealthCheckResult{Name: chk.Name, Status: "ok", Latency: time.Since(started), CheckedAt: time.Now().UTC()}
-		if err != nil {
-			res.Status = "error"
-			res.Error = err.Error()
-			ready = false
-			if a.logger != nil {
-				a.logger.Error("health check failed", "check", chk.Name, "error", err, "latency", res.Latency)
-			}
-		}
-		results = append(results, res)
+
+	if len(checks) == 0 {
+		return true, nil
 	}
-	return ready, results
+
+	results := make([]HealthCheckResult, len(checks))
+	allOk := true
+	var wg sync.WaitGroup
+
+	for i, hc := range checks {
+		wg.Add(1)
+		go func(idx int, c registeredHealthCheck) {
+			defer wg.Done()
+			start := time.Now()
+			tCtx, cancel := context.WithTimeout(ctx, c.timeout)
+			defer cancel()
+			err := c.fn(tCtx)
+			dur := time.Since(start).String()
+			if err != nil {
+				results[idx] = HealthCheckResult{
+					Name:    c.name,
+					Status:  "error",
+					Latency: dur,
+					Error:   err.Error(),
+				}
+				allOk = false
+			} else {
+				results[idx] = HealthCheckResult{
+					Name:    c.name,
+					Status:  "ok",
+					Latency: dur,
+				}
+			}
+		}(i, hc)
+	}
+	wg.Wait()
+	return allOk, results
+}
+
+// HealthCheck registers a health check endpoint at path with configured probes.
+func (a *App) HealthCheck(path string, config HealthConfig) *App {
+	a.Get(path, func(c Ctx) error {
+		results := make(map[string]bool, len(config.Probes))
+		allPass := true
+
+		if len(config.Probes) > 0 {
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			for name, probe := range config.Probes {
+				if probe == nil {
+					continue
+				}
+				wg.Add(1)
+				go func(n string, p HealthProbe) {
+					defer wg.Done()
+					pass := p()
+					mu.Lock()
+					results[n] = pass
+					if !pass {
+						allPass = false
+					}
+					mu.Unlock()
+				}(name, probe)
+			}
+			wg.Wait()
+		}
+
+		resp := HealthResponse{
+			Probes: results,
+		}
+		if allPass {
+			resp.Status = "UP"
+			c.Status(StatusOK)
+		} else {
+			resp.Status = "DOWN"
+			c.Status(StatusServiceUnavailable)
+		}
+
+		return c.JSON(resp)
+	})
+	return a
 }

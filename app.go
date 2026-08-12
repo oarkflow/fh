@@ -649,7 +649,11 @@ func (a *App) Add(method, path string, handlers ...HandlerFunc) *App {
 		}
 	}
 	a.router.Add(method, path, routeHandler)
-	a.registerRouteInfo(RouteInfo{Method: strings.ToUpper(strings.TrimSpace(method)), Path: normalizeRoutePath(strings.ToUpper(strings.TrimSpace(method)), path)})
+	a.registerRouteInfo(RouteInfo{
+		Method:   strings.ToUpper(strings.TrimSpace(method)),
+		Path:     normalizeRoutePath(strings.ToUpper(strings.TrimSpace(method)), path),
+		Handlers: append([]HandlerFunc(nil), handlers...),
+	})
 	a.lastRoute = namedRoute{method: strings.ToUpper(strings.TrimSpace(method)), path: normalizeRoutePath(strings.ToUpper(strings.TrimSpace(method)), path)}
 	return a
 }
@@ -667,9 +671,94 @@ func (a *App) Name(name string) *App {
 	return a
 }
 
+// Tag attaches tags to the most recently registered route.
+func (a *App) Tag(tags ...string) *App {
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
+	a.assertMutable()
+	if a.lastRoute.method == "" {
+		panic("fh: no route available to tag")
+	}
+	a.updateRouteInfo(a.lastRoute.method, a.lastRoute.path, func(r *RouteInfo) {
+		r.Tags = append(r.Tags, tags...)
+	})
+	return a
+}
+
+// Meta attaches key-value metadata to the most recently registered route.
+func (a *App) Meta(key string, val any) *App {
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
+	a.assertMutable()
+	if a.lastRoute.method == "" {
+		panic("fh: no route available to annotate metadata")
+	}
+	a.updateRouteInfo(a.lastRoute.method, a.lastRoute.path, func(r *RouteInfo) {
+		if r.Meta == nil {
+			r.Meta = make(map[string]any, 2)
+		}
+		r.Meta[key] = val
+	})
+	return a
+}
+
+// Mount mounts a sub-App onto a path prefix, registering all sub-routes, handlers, tags, and metadata.
+func (a *App) Mount(prefix string, sub *App) *App {
+	if sub == nil {
+		return a
+	}
+	cleanPrefix := "/" + strings.Trim(prefix, "/")
+	if cleanPrefix == "/" {
+		cleanPrefix = ""
+	}
+	subRoutes := sub.Routes()
+
+	for _, r := range subRoutes {
+		fullPath := cleanPrefix + r.Path
+		if len(r.Handlers) > 0 {
+			a.Add(r.Method, fullPath, r.Handlers...)
+		}
+		if r.Name != "" {
+			name := r.Name
+			if cleanPrefix != "" {
+				name = strings.TrimPrefix(cleanPrefix, "/") + "." + r.Name
+			}
+			a.Name(name)
+		}
+		if len(r.Tags) > 0 {
+			a.Tag(r.Tags...)
+		}
+		if r.Meta != nil {
+			for k, v := range r.Meta {
+				a.Meta(k, v)
+			}
+		}
+		if r.Security.AuthRequired || len(r.Security.Scopes) > 0 || len(r.Security.Roles) > 0 {
+			a.WithRouteSecurity(r.Security)
+		}
+	}
+	return a
+}
+
 // URL generates a URL path for a named route.
 func (a *App) URL(name string, params ...map[string]string) (string, error) {
 	return a.router.URL(name, params...)
+}
+
+// URLWithQuery builds a URL path for a named route and appends URL-encoded query parameters.
+func (a *App) URLWithQuery(name string, params map[string]any, query map[string]any) (string, error) {
+	return a.router.URLWithQuery(name, params, query)
+}
+
+// RouteTreeString returns an ASCII list representation of registered routes.
+func (a *App) RouteTreeString() string {
+	var sb strings.Builder
+	sb.WriteString("fh Registered Routes:\n")
+	routes := a.Routes()
+	for _, r := range routes {
+		sb.WriteString(fmt.Sprintf("  %-7s %s\n", r.Method, r.Path))
+	}
+	return sb.String()
 }
 
 func (a *App) Get(path string, handlers ...HandlerFunc) *App {

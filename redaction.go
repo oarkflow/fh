@@ -2,6 +2,7 @@ package fh
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -74,7 +75,36 @@ func (r *Redactor) redactValue(v any) any {
 		}
 		return out
 	default:
-		return vv
+		rv := reflect.ValueOf(v)
+		if !rv.IsValid() {
+			return v
+		}
+		if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+			n := rv.Len()
+			out := make([]any, n)
+			for i := 0; i < n; i++ {
+				out[i] = r.redactValue(rv.Index(i).Interface())
+			}
+			return out
+		}
+		if rv.Kind() == reflect.Struct {
+			out := make(map[string]any)
+			rt := rv.Type()
+			for i := 0; i < rt.NumField(); i++ {
+				f := rt.Field(i)
+				if !f.IsExported() {
+					continue
+				}
+				fieldName := f.Name
+				if r != nil && r.isSensitive(fieldName) {
+					out[fieldName] = r.Replacement
+				} else {
+					out[fieldName] = r.redactValue(rv.Field(i).Interface())
+				}
+			}
+			return out
+		}
+		return v
 	}
 }
 

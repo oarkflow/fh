@@ -225,7 +225,11 @@ func isJSONContentTypeBytes(ct []byte) bool {
 			return len(ct) == len("application/json") || ct[len("application/json")] == ';'
 		}
 	}
-	return false
+	s := strings.ToLower(b2s(ct))
+	if idx := strings.IndexByte(s, ';'); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	return strings.HasSuffix(s, "+json")
 }
 
 func jsonLooksObjectOrArray(b []byte) bool {

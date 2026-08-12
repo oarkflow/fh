@@ -322,6 +322,8 @@ type RouteInfo struct {
 	Tags           []string            `json:"tags,omitempty"`
 	Security       RouteSecurityConfig `json:"security,omitempty"`
 	Data           DataPolicy          `json:"data,omitempty"`
+	Meta           map[string]any      `json:"meta,omitempty"`
+	Handlers       []HandlerFunc       `json:"-"`
 }
 
 func (a *App) registerRouteInfo(info RouteInfo) {
