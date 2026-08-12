@@ -328,13 +328,22 @@ type RouteInfo struct {
 
 func (a *App) registerRouteInfo(info RouteInfo) {
 	a.routeMetaMu.Lock()
-	defer a.routeMetaMu.Unlock()
 	for _, r := range a.routeMeta {
 		if r.Method == info.Method && r.Path == info.Path {
+			a.routeMetaMu.Unlock()
 			return
 		}
 	}
 	a.routeMeta = append(a.routeMeta, info)
+	var hooks []func(RouteInfo)
+	if a != nil {
+		hooks = append([]func(RouteInfo){}, a.hooks.onRoute...)
+	}
+	a.routeMetaMu.Unlock()
+
+	for _, fn := range hooks {
+		fn(info)
+	}
 }
 func (a *App) updateRouteInfo(method, path string, fn func(*RouteInfo)) {
 	method = strings.ToUpper(method)

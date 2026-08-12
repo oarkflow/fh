@@ -50,6 +50,7 @@ type Hooks struct {
 	onConnect  []func(net.Conn)
 	onClose    []func(net.Conn)
 	onError    []func(error)
+	onRoute    []func(RouteInfo)
 }
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -434,6 +435,7 @@ type App struct {
 	// for the duration of that call, so Reload can reach the running
 	// supervisor without threading it through every call site.
 	preforkSupervisor atomic.Pointer[preforkSupervisor]
+	metrics           metricsTracker
 }
 
 type connState struct {
@@ -860,6 +862,14 @@ func (a *App) OnClose(fn func(net.Conn)) *App {
 	return a
 }
 
+func (a *App) OnRoute(fn func(RouteInfo)) *App {
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
+	a.assertMutable()
+	a.hooks.onRoute = append(a.hooks.onRoute, fn)
+	return a
+}
+
 func (a *App) OnError(fn func(error)) *App {
 	a.buildMu.Lock()
 	defer a.buildMu.Unlock()
@@ -899,6 +909,11 @@ func (a *App) ListenTLS(addr, certFile, keyFile string) error {
 		return err
 	}
 	return a.Serve(tls.NewListener(ln, tlsConfig))
+}
+
+// Metrics returns a real-time snapshot of server runtime metrics.
+func (a *App) Metrics() ServerMetrics {
+	return a.metrics.snapshot()
 }
 
 // ServeTLS wraps ln with TLS and advertises HTTP/2 through ALPN when enabled.
@@ -1243,8 +1258,11 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		}
 		a.releasePeer(peerIP)
 		a.kernelCounters.active.Add(^uint64(0))
+		a.metrics.activeConns.Add(-1)
 		a.activeConn.Done()
 	}()
+
+	a.metrics.activeConns.Add(1)
 
 	// Connection-level context: cancelled when the TCP connection terminates
 	// (client disconnect, idle close, or I/O error). Per-request contexts are
@@ -1837,6 +1855,12 @@ func (a *App) dispatchCore(ctx *DefaultCtx) {
 	} else if !ctx.responded {
 		_ = ctx.SendStatus(200)
 	}
+
+	status := ctx.status
+	if status == 0 {
+		status = 200
+	}
+	a.metrics.recordRequest(status)
 }
 
 // chain combines global middleware + route-specific handlers into one HandlerFunc.

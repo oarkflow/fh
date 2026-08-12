@@ -47,10 +47,12 @@ func New(config ...Config) fh.HandlerFunc {
 					}
 				}
 
-				err = cfg.Handler(ctx, r, stack)
-			if err == nil {
-				err = fmt.Errorf("panic: %v", r)
-			}
+				hErr := cfg.Handler(ctx, r, stack)
+				if hErr != nil {
+					err = hErr
+				} else if !ctx.Responded() {
+					err = fmt.Errorf("panic: %v", r)
+				}
 			}
 		}()
 
@@ -84,8 +86,7 @@ func mergeConfig(base Config, override Config) Config {
 }
 
 func DefaultHandler(ctx fh.Ctx, recovered any, stack []byte) error {
-	ctx.Set("Content-Type", "text/plain; charset=utf-8")
-	return ctx.Status(500).SendString("Internal Server Error")
+	return ctx.ProblemDetails(500, "Internal Server Error", fmt.Sprintf("An unexpected panic occurred: %v", recovered), "/errors/internal-server-error")
 }
 
 func Error(recovered any) error {

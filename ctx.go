@@ -23,6 +23,7 @@ const (
 	ctxFlagHEAD          = 1 << 4
 	ctxFlagNon200        = 1 << 5 // status != StatusOK
 	ctxFlagH2Connect     = 1 << 6 // RFC 8441 extended CONNECT stream (c.h2.stream.protocol != "")
+	ctxFlagAutoETag      = 1 << 7
 )
 
 var (
@@ -168,6 +169,7 @@ type Ctx interface {
 	RunReliableEndpoint(policy ReliabilityPolicy, endpoint HandlerFunc) error
 	Queue() Queue
 	RequestHeader() *RequestHeader
+	AutoETag() Ctx
 }
 
 type DefaultCtx struct {
@@ -1736,6 +1738,13 @@ func (c *DefaultCtx) writeResponse(body []byte) error {
 	}
 	if err := c.runBeforeResponse(); err != nil {
 		return err
+	}
+	if (c.flags & ctxFlagAutoETag) != 0 {
+		var is304 bool
+		body, is304 = evaluateAutoETag(c, body)
+		if is304 {
+			c.status = 304
+		}
 	}
 	if c.bodyTransform != nil {
 		var err error

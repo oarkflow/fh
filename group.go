@@ -50,6 +50,25 @@ func (g *Group) Name(name string) *Group {
 	return g
 }
 
+// Tag attaches tags to the most recently registered route in this group.
+func (g *Group) Tag(tags ...string) *Group {
+	g.app.Tag(tags...)
+	return g
+}
+
+// Meta attaches key-value metadata to the most recently registered route in this group.
+func (g *Group) Meta(key string, val any) *Group {
+	g.app.Meta(key, val)
+	return g
+}
+
+// Mount mounts a sub-App onto a path prefix inside this group.
+func (g *Group) Mount(prefix string, sub *App) *Group {
+	fullPrefix := g.prefix + prefix
+	g.app.Mount(fullPrefix, sub)
+	return g
+}
+
 func (g *Group) Get(path string, handlers ...HandlerFunc) *Group {
 	return g.add("GET", path, handlers...)
 }
