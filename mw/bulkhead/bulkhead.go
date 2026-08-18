@@ -33,7 +33,6 @@ func New(cfg Config) fh.HandlerFunc {
 	if cfg.Reject == nil {
 		cfg.Reject = DefaultReject
 	}
-	cfg.Headers = true
 	sem := make(chan struct{}, cfg.MaxConcurrent)
 	return func(c fh.Ctx) error {
 		key := "global"

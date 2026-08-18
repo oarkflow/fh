@@ -102,9 +102,15 @@ func New(cfg ...Config) *PrivacyFilter {
 		if len(merge.QueryRedact) > 0 {
 			c.QueryRedact = merge.QueryRedact
 		}
-		c.PathTemplate = merge.PathTemplate
-		c.SecretDetection = merge.SecretDetection
-		c.BodyLogging = merge.BodyLogging
+		if merge.PathTemplate {
+			c.PathTemplate = true
+		}
+		if merge.SecretDetection {
+			c.SecretDetection = true
+		}
+		if merge.BodyLogging {
+			c.BodyLogging = true
+		}
 		if len(merge.HashFields) > 0 {
 			c.HashFields = merge.HashFields
 		}

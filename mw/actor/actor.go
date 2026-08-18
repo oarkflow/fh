@@ -8,10 +8,7 @@ import (
 
 type Config struct{ Key func(fh.Ctx) string }
 
-var registry = struct {
-	sync.Mutex
-	locks map[string]*sync.Mutex
-}{locks: map[string]*sync.Mutex{}}
+var registry sync.Map
 
 func New(cfg Config) fh.HandlerFunc {
 	return func(c fh.Ctx) error {
@@ -22,13 +19,8 @@ func New(cfg Config) fh.HandlerFunc {
 		if key == "" {
 			return c.Next()
 		}
-		registry.Lock()
-		lock := registry.locks[key]
-		if lock == nil {
-			lock = &sync.Mutex{}
-			registry.locks[key] = lock
-		}
-		registry.Unlock()
+		val, _ := registry.LoadOrStore(key, &sync.Mutex{})
+		lock := val.(*sync.Mutex)
 		lock.Lock()
 		defer lock.Unlock()
 		return c.Next()

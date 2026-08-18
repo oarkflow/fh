@@ -134,8 +134,12 @@ func New(config ...Config) fh.HandlerFunc {
 		if config[0].Server != "" {
 			cfg.Server = config[0].Server
 		}
-		cfg.AddTotal = config[0].AddTotal
-		cfg.Opaque = config[0].Opaque
+		if config[0].AddTotal {
+			cfg.AddTotal = true
+		}
+		if config[0].Opaque {
+			cfg.Opaque = true
+		}
 		cfg.Next = config[0].Next
 	}
 

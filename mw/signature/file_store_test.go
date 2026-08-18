@@ -17,10 +17,18 @@ func TestFileStoreSeenBasic(t *testing.T) {
 	}
 	var mu sync.Mutex
 
-	if Seen(store, &mu, "sig-1", time.Minute) {
+	seen, err := Seen(store, &mu, "sig-1", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatalf("first sighting should not be seen")
 	}
-	if !Seen(store, &mu, "sig-1", time.Minute) {
+	seen, err = Seen(store, &mu, "sig-1", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if !seen {
 		t.Fatalf("replay of sig-1 should be detected")
 	}
 }
@@ -35,13 +43,21 @@ func TestFileStoreTTLExpiry(t *testing.T) {
 
 	ttl := 20 * time.Millisecond
 
-	if Seen(store, &mu, "short-lived", ttl) {
+	seen, err := Seen(store, &mu, "short-lived", ttl)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatalf("first sighting should not be seen")
 	}
 
 	time.Sleep(ttl + 15*time.Millisecond)
 
-	if Seen(store, &mu, "short-lived", ttl) {
+	seen, err = Seen(store, &mu, "short-lived", ttl)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatalf("expired key should not be reported as seen")
 	}
 }
@@ -54,13 +70,25 @@ func TestFileStoreKeysDoNotCollide(t *testing.T) {
 	}
 	var mu sync.Mutex
 
-	if Seen(store, &mu, "keyA", time.Minute) {
+	seen, err := Seen(store, &mu, "keyA", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatalf("keyA first sighting should not be seen")
 	}
-	if Seen(store, &mu, "keyB", time.Minute) {
+	seen, err = Seen(store, &mu, "keyB", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatalf("keyB first sighting should not be seen")
 	}
-	if !Seen(store, &mu, "keyA", time.Minute) {
+	seen, err = Seen(store, &mu, "keyA", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if !seen {
 		t.Fatalf("keyA should now be reported as seen")
 	}
 }

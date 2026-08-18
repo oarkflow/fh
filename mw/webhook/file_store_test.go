@@ -13,10 +13,18 @@ func TestWebhookFileStoreSeenBasic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kv.NewFileStore: %v", err)
 	}
-	if Seen(s, nil, "sig-a:1000", time.Minute) {
+	seen, err := Seen(s, nil, "sig-a:1000", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatal("expected first sighting to report not seen")
 	}
-	if !Seen(s, nil, "sig-a:1000", time.Minute) {
+	seen, err = Seen(s, nil, "sig-a:1000", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if !seen {
 		t.Fatal("expected second sighting to report seen")
 	}
 }
@@ -26,11 +34,19 @@ func TestWebhookFileStoreExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kv.NewFileStore: %v", err)
 	}
-	if Seen(s, nil, "sig-expiring", 20*time.Millisecond) {
+	seen, err := Seen(s, nil, "sig-expiring", 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatal("expected first sighting to report not seen")
 	}
 	time.Sleep(50 * time.Millisecond)
-	if Seen(s, nil, "sig-expiring", time.Minute) {
+	seen, err = Seen(s, nil, "sig-expiring", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatal("expected key to be treated as unseen after expiry")
 	}
 }
@@ -40,13 +56,25 @@ func TestWebhookFileStoreDifferentKeysDoNotCollide(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kv.NewFileStore: %v", err)
 	}
-	if Seen(s, nil, "sig-one", time.Minute) {
+	seen, err := Seen(s, nil, "sig-one", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatal("expected sig-one to be unseen on first sight")
 	}
-	if Seen(s, nil, "sig-two", time.Minute) {
+	seen, err = Seen(s, nil, "sig-two", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatal("expected sig-two to be unseen despite sig-one being recorded")
 	}
-	if !Seen(s, nil, "sig-one", time.Minute) {
+	seen, err = Seen(s, nil, "sig-one", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if !seen {
 		t.Fatal("expected sig-one to still be recorded as seen")
 	}
 }
@@ -73,10 +101,14 @@ func TestWebhookFileStoreGC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kv.NewFileStore: %v", err)
 	}
-	Seen(s, nil, "gc-key", 10*time.Millisecond)
+	_, _ = Seen(s, nil, "gc-key", 10*time.Millisecond)
 	time.Sleep(30 * time.Millisecond)
 	s.GC()
-	if Seen(s, nil, "gc-key", time.Minute) {
+	seen, err := Seen(s, nil, "gc-key", time.Minute)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatal("expected expired key removed by GC to report unseen")
 	}
 }

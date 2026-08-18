@@ -11,13 +11,23 @@ import (
 func TestReplayStoreFailsClosedAtCapacity(t *testing.T) {
 	store := kv.NewMemoryStore()
 	var mu sync.Mutex
-	if Seen(store, &mu, "first", time.Minute, 1) {
+	seen, err := Seen(store, &mu, "first", time.Minute, 1)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
 		t.Fatal("first signature was treated as replay")
 	}
-	if !Seen(store, &mu, "second", time.Minute, 1) {
-		t.Fatal("store capacity exhaustion did not fail closed")
+	seen, err = Seen(store, &mu, "second", time.Minute, 1)
+	if err == nil {
+		t.Fatal("store capacity exhaustion should return error")
 	}
-	if !Seen(store, &mu, "first", time.Minute, 1) {
+	_ = seen
+	seen, err = Seen(store, &mu, "first", time.Minute, 1)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if !seen {
 		t.Fatal("live replay marker was evicted")
 	}
 }

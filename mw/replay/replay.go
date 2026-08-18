@@ -42,7 +42,7 @@ func New(config Config) fh.HandlerFunc {
 			key = c.Get(config.Header)
 		}
 		if key == "" {
-			return fh.NewHTTPError(fh.StatusUnauthorized, "REPLAY_KEY_MISSING", "replay nonce is missing")
+			return fh.NewHTTPError(fh.StatusBadRequest, "REPLAY_KEY_MISSING", "replay nonce is missing")
 		}
 		seen, err := Seen(config.Store, &replayMu, key, config.TTL, config.MaxEntries)
 		if err != nil {

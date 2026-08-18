@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -101,7 +102,14 @@ func New(config Config) fh.HandlerFunc {
 			mac.Write(payload)
 			if hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
 				replayTTL := time.Until(when.Add(config.Tolerance))
-				if replayTTL <= 0 || Seen(config.Replay, &replayMu, sig+":"+ts, replayTTL, config.MaxReplayEntries) {
+				if replayTTL <= 0 {
+					return fh.NewHTTPError(fh.StatusConflict, "SIGNATURE_REPLAYED", "signature has already been used")
+				}
+				replayed, err := Seen(config.Replay, &replayMu, sig+":"+ts, replayTTL, config.MaxReplayEntries)
+				if err != nil {
+					return fh.NewHTTPError(fh.StatusServiceUnavailable, "SIGNATURE_STORE_ERROR", "signature replay store error")
+				}
+				if replayed {
 					return fh.NewHTTPError(fh.StatusConflict, "SIGNATURE_REPLAYED", "signature has already been used")
 				}
 				return c.Next()
@@ -111,7 +119,7 @@ func New(config Config) fh.HandlerFunc {
 	}
 }
 
-func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxEntries ...int) bool {
+func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxEntries ...int) (bool, error) {
 	maxSize := 100000
 	if len(maxEntries) > 0 && maxEntries[0] > 0 {
 		maxSize = maxEntries[0]
@@ -121,19 +129,24 @@ func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxEntr
 		defer mu.Unlock()
 	}
 	if _, exists, err := store.Get(key); err != nil {
-		return true
+		return false, err
 	} else if exists {
-		return true
+		return true, nil
 	}
 	n, err := store.Len()
-	if err != nil || n >= maxSize {
-		return true
+	if err != nil {
+		return false, err
+	}
+	if n >= maxSize {
+		return false, ErrStoreFull
 	}
 	if err := store.Set(key, []byte{1}, ttl); err != nil {
-		return true
+		return false, err
 	}
-	return false
+	return false, nil
 }
+
+var ErrStoreFull = errors.New("signature: replay store full")
 
 func parseCombinedSignature(value string) (timestamp, signature string, ok bool) {
 	for _, part := range strings.Split(value, ",") {

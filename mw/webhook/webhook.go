@@ -116,7 +116,11 @@ func Verify(c fh.Ctx, cfg Config) error {
 		return fmt.Errorf("signature mismatch for algorithm %s", cfg.Algorithm)
 	}
 	if cfg.Replay != nil && ts != "" {
-		if Seen(cfg.Replay, nil, sig+":"+ts, cfg.Tolerance) {
+		replayed, err := Seen(cfg.Replay, nil, sig+":"+ts, cfg.Tolerance)
+		if err != nil {
+			return fmt.Errorf("replay store error: %w", err)
+		}
+		if replayed {
 			return fmt.Errorf("signature replayed: seen within %v tolerance", cfg.Tolerance)
 		}
 	}
@@ -127,7 +131,7 @@ func Verify(c fh.Ctx, cfg Config) error {
 // its presence and TTL matter, never its content.
 var replayMarker = []byte{1}
 
-func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration) bool {
+func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration) (bool, error) {
 	if mu != nil {
 		mu.Lock()
 		defer mu.Unlock()
@@ -142,11 +146,9 @@ func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration) bool {
 		return replayMarker, ttl, true, nil
 	})
 	if err != nil {
-		// Fail safe: treat any storage error as "already seen" so a
-		// malfunctioning store rejects rather than silently allows a replay.
-		return true
+		return false, err
 	}
-	return seen
+	return seen, nil
 }
 
 func algo(a string) (func() hash.Hash, bool) {

@@ -24,7 +24,9 @@ func New(config ...Config) fh.HandlerFunc {
 		if o.LocalKey != "" {
 			cfg.LocalKey = o.LocalKey
 		}
-		cfg.TrustIncoming = o.TrustIncoming
+		if o.TrustIncoming {
+			cfg.TrustIncoming = true
+		}
 		if o.Generator != nil {
 			cfg.Generator = o.Generator
 		}
