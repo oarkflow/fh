@@ -31,7 +31,6 @@ func New(cfg Config) fh.HandlerFunc {
 	if cfg.LocalKey == "" {
 		cfg.LocalKey = "trace"
 	}
-	cfg.ResponseHeader = true
 	return func(c fh.Ctx) error {
 		sp := Span{StartedAt: time.Now().UTC()}
 		if cfg.TrustIncoming {

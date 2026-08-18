@@ -499,13 +499,7 @@ func (s PlainProviderStorage) GetUser(username string) (User, bool, error) {
 	}
 	for _, user := range users {
 		if user.Username == username {
-			enabled := true
-			if user.Enabled {
-				enabled = true
-			}
-			if user.Disabled {
-				enabled = false
-			}
+			enabled := !user.Disabled
 			return User{
 				Username:     user.Username,
 				PasswordHash: plainPasswordPrefix + user.Password,

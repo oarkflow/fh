@@ -1,6 +1,7 @@
 package override
 
 import (
+	"net/url"
 	"strings"
 
 	"github.com/oarkflow/fh"
@@ -50,15 +51,8 @@ func New(config ...Config) fh.HandlerFunc {
 				targetMethod = c.Query(cfg.QueryParam)
 			}
 			if targetMethod == "" && cfg.FormParam != "" && len(c.Body()) > 0 {
-				bodyStr := string(c.Body())
-				if strings.Contains(bodyStr, cfg.FormParam+"=") {
-					for _, pair := range strings.Split(bodyStr, "&") {
-						parts := strings.SplitN(pair, "=", 2)
-						if len(parts) == 2 && parts[0] == cfg.FormParam {
-							targetMethod = parts[1]
-							break
-						}
-					}
+				if values, err := url.ParseQuery(string(c.Body())); err == nil {
+					targetMethod = values.Get(cfg.FormParam)
 				}
 			}
 

@@ -115,8 +115,6 @@ func normalize(cfg Config) Config {
 		cfg.LimitReached = DefaultLimitReachedHandler
 	}
 
-	cfg.SendHeaders = true
-
 	return cfg
 }
 

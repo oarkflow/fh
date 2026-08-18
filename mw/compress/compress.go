@@ -136,9 +136,7 @@ func mergeConfig(base Config, override Config) Config {
 	if override.Next != nil {
 		base.Next = override.Next
 	}
-	if override.BreachProtection {
-		base.BreachProtection = override.BreachProtection
-	}
+	base.BreachProtection = override.BreachProtection
 
 	return base
 }

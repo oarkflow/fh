@@ -10,3 +10,4 @@ dagflow/data/*
 *.pem
 *.p12
 *.pfx
+examples/basic/public/gasapp-v1.0.0-universal.apk

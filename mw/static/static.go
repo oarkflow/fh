@@ -2,14 +2,18 @@
 package static
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"html"
+	"io/fs"
 	"mime"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -65,7 +69,9 @@ func New(root string, config ...Config) fh.HandlerFunc {
 			index := path.Join(name, cfg.Index)
 			if candidate, statErr := rootFS.Stat(index); statErr == nil {
 				name, info = index, candidate
-			} else if !cfg.Browse {
+			} else if cfg.Browse {
+				return listDir(c, rootFS, name)
+			} else {
 				return c.SendStatus(fh.StatusForbidden)
 			}
 		}
@@ -127,4 +133,64 @@ func sanitizeFilename(name string) string {
 		}
 	}
 	return b.String()
+}
+
+func listDir(c fh.Ctx, rootFS *os.Root, dir string) error {
+	fsys := rootFS.FS()
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return err
+	}
+
+	visible := entries[:0]
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".") {
+			visible = append(visible, entry)
+		}
+	}
+	entries = visible
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].IsDir() != entries[j].IsDir() {
+			return entries[i].IsDir()
+		}
+		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
+	})
+
+	safePath := html.EscapeString(dir)
+
+	var buf bytes.Buffer
+	buf.WriteString("<!DOCTYPE html><html><head><meta charset=\"utf-8\">")
+	buf.WriteString("<title>Index of ")
+	buf.WriteString(safePath)
+	buf.WriteString("</title></head><body>")
+	buf.WriteString("<h1>Index of ")
+	buf.WriteString(safePath)
+	buf.WriteString("</h1><hr><ul>")
+
+	if dir != "." {
+		buf.WriteString("<li><a href=\"../\">../</a></li>")
+	}
+
+	for _, entry := range entries {
+		name := html.EscapeString(entry.Name())
+		if entry.IsDir() {
+			buf.WriteString("<li><a href=\"")
+			buf.WriteString(name)
+			buf.WriteString("/\"><strong>")
+			buf.WriteString(name)
+			buf.WriteString("/</strong></a></li>")
+		} else {
+			buf.WriteString("<li><a href=\"")
+			buf.WriteString(name)
+			buf.WriteString("\">")
+			buf.WriteString(name)
+			buf.WriteString("</a></li>")
+		}
+	}
+
+	buf.WriteString("</ul><hr></body></html>")
+
+	c.Type("text/html; charset=utf-8")
+	return c.SendBytes(buf.Bytes())
 }

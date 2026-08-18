@@ -30,10 +30,59 @@ type Config struct {
 
 var defaultConfig = Config{HSTSMaxAge: 31536000, HSTSIncludeSubDomains: true, FrameDeny: true, ContentTypeNosniff: true, XSSProtection: "0", ReferrerPolicy: "no-referrer", CrossOriginOpenerPolicy: "same-origin", CrossOriginResourcePolicy: "same-origin", PermissionsPolicy: "geolocation=(), microphone=(), camera=(), payment=(), usb=(), magnetometer=(), accelerometer=(), gyroscope=(), interest-cohort=()"}
 
+func mergeConfig(base Config, override Config) Config {
+	if override.ContentSecurityPolicy != "" {
+		base.ContentSecurityPolicy = override.ContentSecurityPolicy
+	}
+	if override.ContentSecurityPolicyReportOnly != "" {
+		base.ContentSecurityPolicyReportOnly = override.ContentSecurityPolicyReportOnly
+	}
+	if override.CSPNonce {
+		base.CSPNonce = override.CSPNonce
+	}
+	if override.CSPNonceDirectives != nil {
+		base.CSPNonceDirectives = override.CSPNonceDirectives
+	}
+	if override.HSTSMaxAge > 0 {
+		base.HSTSMaxAge = override.HSTSMaxAge
+	}
+	if override.HSTSIncludeSubDomains {
+		base.HSTSIncludeSubDomains = override.HSTSIncludeSubDomains
+	}
+	if override.HSTSPreload {
+		base.HSTSPreload = override.HSTSPreload
+	}
+	if override.FrameDeny {
+		base.FrameDeny = override.FrameDeny
+	}
+	if override.ContentTypeNosniff {
+		base.ContentTypeNosniff = override.ContentTypeNosniff
+	}
+	if override.XSSProtection != "" {
+		base.XSSProtection = override.XSSProtection
+	}
+	if override.CrossOriginOpenerPolicy != "" {
+		base.CrossOriginOpenerPolicy = override.CrossOriginOpenerPolicy
+	}
+	if override.CrossOriginResourcePolicy != "" {
+		base.CrossOriginResourcePolicy = override.CrossOriginResourcePolicy
+	}
+	if override.CrossOriginEmbedderPolicy != "" {
+		base.CrossOriginEmbedderPolicy = override.CrossOriginEmbedderPolicy
+	}
+	if override.ReferrerPolicy != "" {
+		base.ReferrerPolicy = override.ReferrerPolicy
+	}
+	if override.PermissionsPolicy != "" {
+		base.PermissionsPolicy = override.PermissionsPolicy
+	}
+	return base
+}
+
 func New(config ...Config) fh.HandlerFunc {
 	cfg := defaultConfig
 	if len(config) > 0 {
-		cfg = config[0]
+		cfg = mergeConfig(defaultConfig, config[0])
 	}
 	var static [][2]string
 	if cfg.ContentSecurityPolicyReportOnly != "" {

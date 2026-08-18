@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/oarkflow/fh"
@@ -147,12 +148,11 @@ func StartFileWatcher(store kv.Store, path string, interval time.Duration) (func
 			}
 		}
 	}()
-	var stopped bool
+	var stopped atomic.Bool
 	return func() {
-		if stopped {
+		if !stopped.CompareAndSwap(false, true) {
 			return
 		}
-		stopped = true
 		close(stop)
 		<-done
 	}, nil

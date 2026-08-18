@@ -100,9 +100,17 @@ func merge(dst *Config, src Config) {
 	if src.TrustedOrigins != nil {
 		dst.TrustedOrigins = src.TrustedOrigins
 	}
-	dst.CookieSecure = src.CookieSecure || !src.AllowInsecureCookie
+	if src.AllowInsecureCookie {
+		dst.CookieSecure = false
+	} else if src.CookieSecure {
+		dst.CookieSecure = true
+	}
 	dst.CookieSameSite = src.CookieSameSite
-	dst.RequireOriginHeader = src.RequireOriginHeader || !src.AllowMissingOrigin
+	if src.AllowMissingOrigin {
+		dst.RequireOriginHeader = false
+	} else if src.RequireOriginHeader {
+		dst.RequireOriginHeader = true
+	}
 	dst.Next = src.Next
 }
 
