@@ -139,6 +139,60 @@ func BindHeader(c Ctx, v any) error {
 	return nil
 }
 
+// BindCookie parses cookies into target struct v based on `cookie:"name"` tags.
+func BindCookie(c Ctx, v any) error {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+		return ErrInvalidBindTarget
+	}
+	elem := rv.Elem()
+	if elem.Kind() != reflect.Struct {
+		return ErrInvalidBindTarget
+	}
+
+	typ := elem.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		tag := field.Tag.Get("cookie")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		val := c.GetCookie(tag)
+		if val == "" {
+			continue
+		}
+		setBinderField(elem.Field(i), val)
+	}
+	return nil
+}
+
+// BindParams parses named route parameters into target struct v based on `params:"name"` tags.
+func BindParams(c Ctx, v any) error {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+		return ErrInvalidBindTarget
+	}
+	elem := rv.Elem()
+	if elem.Kind() != reflect.Struct {
+		return ErrInvalidBindTarget
+	}
+
+	typ := elem.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		tag := field.Tag.Get("params")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		val := c.Params(tag)
+		if val == "" {
+			continue
+		}
+		setBinderField(elem.Field(i), val)
+	}
+	return nil
+}
+
 func setBinderField(field reflect.Value, strVal string) {
 	if !field.CanSet() {
 		return

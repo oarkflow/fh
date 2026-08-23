@@ -3,8 +3,10 @@ package fh
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
+	"net/http"
 	"net/textproto"
 	"net/url"
 	"path"
@@ -170,6 +172,38 @@ type Ctx interface {
 	Queue() Queue
 	RequestHeader() *RequestHeader
 	AutoETag() Ctx
+
+	// ── Fiber-compatible convenience methods ───────────────────────────
+
+	// QueryBool returns the query parameter as a bool.
+	// "true", "1", "yes" (case-insensitive) → true; everything else → false.
+	QueryBool(key string, def ...bool) bool
+	// QueryInt returns the query parameter parsed as int, or the default value.
+	QueryInt(key string, def ...int) int
+	// QueryFloat returns the query parameter parsed as float64, or the default value.
+	QueryFloat(key string, def ...float64) float64
+	// ParamsInt returns the named route parameter parsed as int, or 0 on error.
+	ParamsInt(key string) (int, error)
+	// AllParams returns all named route parameters as a map.
+	AllParams() map[string]string
+	// CookieParser binds cookie values into a struct using the "cookie" tag.
+	CookieParser(v any) error
+	// ParamsParser binds named route parameters into a struct using the "params" tag.
+	ParamsParser(v any) error
+	// JSONP sends a JSONP response wrapped in the given callback function.
+	JSONP(data any, callback ...string) error
+	// Links joins the given URIs into a Link response header field (RFC 8288).
+	Links(link ...string)
+	// Location sets the Location response header to the given path.
+	Location(path string)
+	// Fresh checks whether the request is fresh based on ETag/If-None-Match
+	// and Last-Modified/If-Modified-Since headers. Returns true when the
+	// client cache is still valid and a 304 may be sent.
+	Fresh() bool
+	// Secure returns true when the connection uses TLS.
+	Secure() bool
+	// IsFromLocal returns true when the request originates from a loopback address.
+	IsFromLocal() bool
 }
 
 type DefaultCtx struct {
@@ -2085,4 +2119,185 @@ func (c *DefaultCtx) BindHeader(v any) error                                    
 func (c *DefaultCtx) SSEvent(event string, data any) error                          { return SSEvent(c, event, data) }
 func (c *DefaultCtx) ProblemDetails(status int, title, detail, typeURI string) error {
 	return ProblemDetails(c, status, title, detail, typeURI)
+}
+
+// ── Fiber-compatible convenience methods ─────────────────────────────────────
+
+// QueryBool returns the query parameter as a bool.
+// "true", "1", "yes" (case-insensitive) → true; everything else → false.
+func (c *DefaultCtx) QueryBool(key string, def ...bool) bool {
+	s := c.Query(key)
+	if s == "" {
+		if len(def) > 0 {
+			return def[0]
+		}
+		return false
+	}
+	switch strings.ToLower(s) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// QueryInt returns the query parameter parsed as int, or the default value.
+func (c *DefaultCtx) QueryInt(key string, def ...int) int {
+	s := c.Query(key)
+	if s == "" {
+		if len(def) > 0 {
+			return def[0]
+		}
+		return 0
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		if len(def) > 0 {
+			return def[0]
+		}
+		return 0
+	}
+	return v
+}
+
+// QueryFloat returns the query parameter parsed as float64, or the default value.
+func (c *DefaultCtx) QueryFloat(key string, def ...float64) float64 {
+	s := c.Query(key)
+	if s == "" {
+		if len(def) > 0 {
+			return def[0]
+		}
+		return 0
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		if len(def) > 0 {
+			return def[0]
+		}
+		return 0
+	}
+	return v
+}
+
+// ParamsInt returns the named route parameter parsed as int, or 0 on error.
+func (c *DefaultCtx) ParamsInt(key string) (int, error) {
+	return strconv.Atoi(c.Params(key))
+}
+
+// AllParams returns all named route parameters as a map.
+func (c *DefaultCtx) AllParams() map[string]string {
+	m := make(map[string]string, len(c.params))
+	for _, p := range c.params {
+		m[p.Key] = p.Value
+	}
+	return m
+}
+
+// CookieParser binds cookie values into a struct using the "cookie" tag.
+func (c *DefaultCtx) CookieParser(v any) error {
+	return BindCookie(c, v)
+}
+
+// ParamsParser binds named route parameters into a struct using the "params" tag.
+func (c *DefaultCtx) ParamsParser(v any) error {
+	return BindParams(c, v)
+}
+
+// JSONP sends a JSONP response wrapped in the given callback function.
+// If no callback is provided, defaults to "callback".
+func (c *DefaultCtx) JSONP(data any, callback ...string) error {
+	cb := "callback"
+	if len(callback) > 0 && callback[0] != "" {
+		cb = callback[0]
+	}
+	b, err := (jsonCodec{}).Marshal(data)
+	if err != nil {
+		return err
+	}
+	c.Set(HeaderContentType, MIMEApplicationJavaScript)
+	buf := getBytes()
+	p := *buf
+	p = append(p, cb...)
+	p = append(p, '(')
+	p = append(p, b...)
+	p = append(p, ");"...)
+	err = c.Send(p)
+	*buf = p
+	putBytes(buf)
+	return err
+}
+
+// Links joins the given URIs into a Link response header field (RFC 8288).
+func (c *DefaultCtx) Links(link ...string) {
+	n := len(link)
+	if n == 0 {
+		return
+	}
+	var b strings.Builder
+	for i, l := range link {
+		if i%2 == 0 {
+			b.WriteByte('<')
+			b.WriteString(l)
+			b.WriteByte('>')
+		} else {
+			b.WriteString("; rel=\"")
+			b.WriteString(l)
+			b.WriteByte('"')
+		}
+		if i < n-1 {
+			b.WriteString(", ")
+		}
+	}
+	c.Set("Link", b.String())
+}
+
+// Location sets the Location response header to the given path.
+func (c *DefaultCtx) Location(path string) {
+	c.Set("Location", path)
+}
+
+// Fresh checks whether the request is fresh based on ETag/If-None-Match
+// and Last-Modified/If-Modified-Since headers.
+func (c *DefaultCtx) Fresh() bool {
+	status := c.status
+	if status >= 200 && status < 300 || status == 304 {
+		etag := c.GetRespHeader("ETag")
+		if etag != "" {
+			match := c.Get("If-None-Match")
+			if match != "" && match == etag {
+				return true
+			}
+		}
+		lastMod := c.GetRespHeader("Last-Modified")
+		if lastMod != "" {
+			modSince := c.Get("If-Modified-Since")
+			if modSince != "" {
+				lastModTime, err1 := http.ParseTime(lastMod)
+				modSinceTime, err2 := http.ParseTime(modSince)
+				if err1 == nil && err2 == nil && !modSinceTime.Before(lastModTime) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// Secure returns true when the connection uses TLS.
+func (c *DefaultCtx) Secure() bool {
+	if c.conn == nil {
+		return false
+	}
+	_, ok := c.conn.(*tls.Conn)
+	return ok
+}
+
+// IsFromLocal returns true when the request originates from a loopback address.
+func (c *DefaultCtx) IsFromLocal() bool {
+	ip := c.IP()
+	if ip == "" {
+		return false
+	}
+	parsed := net.ParseIP(ip)
+	return parsed != nil && parsed.IsLoopback()
 }

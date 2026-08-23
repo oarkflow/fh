@@ -217,6 +217,39 @@ func InternalError(err error) *HTTPError {
 	return WrapHTTPError(err, StatusInternalServerError, "INTERNAL_ERROR", "An internal server error occurred")
 }
 
+// NewError constructs an HTTPError from a numeric status code and message.
+// The error code string is derived automatically from the status reason.
+// This is a Fiber-compatible convenience constructor; prefer the typed
+// factory functions (BadRequest, NotFound, …) in new code.
+func NewError(status int, message ...string) *HTTPError {
+	msg := StatusReason(status)
+	if len(message) > 0 && message[0] != "" {
+		msg = message[0]
+	}
+	return NewHTTPError(status, "", msg)
+}
+
+// Sentinel error variables for direct comparison.
+// These mirror the Fiber error variables so that migration code like
+//   return fiber.ErrNotFound
+// compiles as
+//   return fh.ErrNotFound
+var (
+	ErrBadRequest            = NewHTTPError(StatusBadRequest, "BAD_REQUEST", "Bad Request")
+	ErrUnauthorized          = NewHTTPError(StatusUnauthorized, "UNAUTHORIZED", "Unauthorized")
+	ErrForbidden             = NewHTTPError(StatusForbidden, "FORBIDDEN", "Forbidden")
+	ErrNotFound              = NewHTTPError(StatusNotFound, "NOT_FOUND", "Not Found")
+	ErrMethodNotAllowed      = NewHTTPError(StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Method Not Allowed")
+	ErrConflict              = NewHTTPError(StatusConflict, "CONFLICT", "Conflict")
+	ErrRequestTimeout        = NewHTTPError(StatusRequestTimeout, "REQUEST_TIMEOUT", "Request Timeout")
+	ErrPayloadTooLarge       = NewHTTPError(StatusPayloadTooLarge, "PAYLOAD_TOO_LARGE", "Payload Too Large")
+	ErrUnsupportedMediaType  = NewHTTPError(StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Unsupported Media Type")
+	ErrTooManyRequests       = NewHTTPError(StatusTooManyRequests, "RATE_LIMITED", "Too Many Requests")
+	ErrInternalServerError   = NewHTTPError(StatusInternalServerError, "INTERNAL_ERROR", "Internal Server Error")
+	ErrServiceUnavailable    = NewHTTPError(StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Service Unavailable")
+	ErrGatewayTimeout        = NewHTTPError(StatusGatewayTimeout, "GATEWAY_TIMEOUT", "Gateway Timeout")
+)
+
 // PanicError wraps a recovered panic. Stack is intentionally not returned to clients unless debug exposure is enabled.
 type PanicError struct {
 	Value any
