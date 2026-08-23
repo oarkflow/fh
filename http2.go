@@ -1327,6 +1327,13 @@ func (r *h2Response) beginStream(c *DefaultCtx) error {
 	return nil
 }
 
+func (r *h2Response) sendEarlyHints(c *DefaultCtx, links []string) bool {
+	if r.ended.Load() || c.responded || len(links) == 0 {
+		return false
+	}
+	return r.conn.sendInformationalHeaders(r.stream, StatusEarlyHints, map[string][]string{"link": links}) == nil
+}
+
 func (r *h2Response) writeData(data []byte, end bool) error {
 	if r.ended.Load() {
 		return nil
@@ -1423,6 +1430,34 @@ func (h *h2Conn) sendResponseHeaders(s *h2Stream, c *DefaultCtx, contentLength *
 		h.endLocalStream(s)
 	}
 	return h.writeHeaderBlockLocked(s.id, flags, block)
+}
+
+func (h *h2Conn) sendInformationalHeaders(s *h2Stream, status int, headers map[string][]string) error {
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+	h.encBuf.Reset()
+	fields := []hpack.HeaderField{{Name: ":status", Value: strconv.Itoa(status)}}
+	for name, values := range headers {
+		name = lowerHeaderName([]byte(name))
+		if forbiddenH2ResponseHeader(name) || !validToken([]byte(name)) {
+			return h2ConnError{h2ProtocolError}
+		}
+		for _, value := range values {
+			if !validResponseField(name, []byte(value)) {
+				return h2ConnError{h2ProtocolError}
+			}
+			fields = append(fields, hpack.HeaderField{Name: name, Value: value})
+		}
+	}
+	if status < 100 || status >= 200 || headerListSize(fields) > int(h.peerMaxHeaderList.Load()) {
+		return h2ConnError{h2ProtocolError}
+	}
+	for _, field := range fields {
+		if err := h.enc.WriteField(field); err != nil {
+			return err
+		}
+	}
+	return h.writeHeaderBlockLocked(s.id, h2FlagEndHeaders, h.encBuf.Bytes())
 }
 
 func (h *h2Conn) writeHeaderBlockLocked(streamID uint32, flags uint8, block []byte) error {

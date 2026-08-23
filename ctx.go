@@ -108,6 +108,9 @@ type Ctx interface {
 	Status(code int) Ctx
 	StatusCode() int
 	Set(key, value string)
+	SetAltSvc(value string) Ctx
+	RequestPreference(name string) bool
+	SetPreferenceApplied(value string) Ctx
 	Append(key, value string)
 	Responded() bool
 	Type(mime string) Ctx
@@ -118,6 +121,7 @@ type Ctx interface {
 	HasResponseCookies() bool
 	FirstCookie() string
 	SendString(s string) error
+	HTML(s string) error
 	SendBytes(b []byte) error
 	Send(b []byte) error
 	JSON(v any) error
@@ -178,7 +182,13 @@ type Ctx interface {
 	RunReliableEndpoint(policy ReliabilityPolicy, endpoint HandlerFunc) error
 	Queue() Queue
 	RequestHeader() *RequestHeader
+	RequestPriority() HTTPPriority
+	SetResponsePriority(priority HTTPPriority) Ctx
 	AutoETag() Ctx
+	EarlyHint(uri string) bool
+	EarlyHintsWithHeaders(uri string, attrs map[string]string) bool
+	Send103EarlyHints(links []string) bool
+	SendInformational(status int, headers map[string]string) bool
 
 	// ── Fiber-compatible convenience methods ───────────────────────────
 
@@ -1109,6 +1119,18 @@ func (c *DefaultCtx) SendString(s string) error {
 	if c.contentType == nil {
 		c.contentType = plainTextCT
 	}
+	return c.writeResponseString(s)
+}
+
+func (c *DefaultCtx) SetAltSvc(value string) Ctx {
+	if !strings.ContainsAny(value, "\x00\r\n") {
+		c.Set(HeaderAltSvc, value)
+	}
+	return c
+}
+
+func (c *DefaultCtx) HTML(s string) error {
+	c.contentType = []byte(MIMETextHTMLCharsetUTF8)
 	return c.writeResponseString(s)
 }
 
@@ -2169,12 +2191,12 @@ func init() {
 
 var jsonCT = []byte("application/json")
 
-func (c *DefaultCtx) Bind(v any) error                                               { return Bind(c, v) }
-func (c *DefaultCtx) BindJSON(v any) error                                           { return BindJSON(c, v) }
-func (c *DefaultCtx) BindQuery(v any) error                                          { return BindQuery(c, v) }
-func (c *DefaultCtx) BindForm(v any) error                                           { return BindForm(c, v) }
-func (c *DefaultCtx) BindHeader(v any) error                                         { return BindHeader(c, v) }
-func (c *DefaultCtx) SSEvent(event string, data any) error                          { return SSEvent(c, event, data) }
+func (c *DefaultCtx) Bind(v any) error                     { return Bind(c, v) }
+func (c *DefaultCtx) BindJSON(v any) error                 { return BindJSON(c, v) }
+func (c *DefaultCtx) BindQuery(v any) error                { return BindQuery(c, v) }
+func (c *DefaultCtx) BindForm(v any) error                 { return BindForm(c, v) }
+func (c *DefaultCtx) BindHeader(v any) error               { return BindHeader(c, v) }
+func (c *DefaultCtx) SSEvent(event string, data any) error { return SSEvent(c, event, data) }
 func (c *DefaultCtx) ProblemDetails(status int, title, detail, typeURI string) error {
 	return ProblemDetails(c, status, title, detail, typeURI)
 }

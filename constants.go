@@ -50,6 +50,8 @@ const (
 	HeaderNEL                             = "NEL"
 	HeaderOrigin                          = "Origin"
 	HeaderPragma                          = "Pragma"
+	HeaderPrefer                          = "Prefer"
+	HeaderPreferenceApplied               = "Preference-Applied"
 	HeaderPriority                        = "Priority"
 	HeaderProxyAuthenticate               = "Proxy-Authenticate"
 	HeaderProxyAuthorization              = "Proxy-Authorization"
@@ -459,6 +461,7 @@ var (
 	HeaderNELBytes                             = []byte(HeaderNEL)
 	HeaderOriginBytes                          = []byte(HeaderOrigin)
 	HeaderPragmaBytes                          = []byte(HeaderPragma)
+	HeaderPreferBytes                          = []byte(HeaderPrefer)
 	HeaderPriorityBytes                        = []byte(HeaderPriority)
 	HeaderProxyAuthenticateBytes               = []byte(HeaderProxyAuthenticate)
 	HeaderProxyAuthorizationBytes              = []byte(HeaderProxyAuthorization)

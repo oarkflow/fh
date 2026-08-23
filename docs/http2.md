@@ -14,6 +14,8 @@ fh implements HTTP/2 (RFC 7540 / RFC 9113) entirely from scratch, including HPAC
 - **Server Push** — PUSH_PROMISE support
 - **Connection Management** — SETTINGS exchange, PING keepalive, GOAWAY graceful shutdown
 - **Extended CONNECT (RFC 8441)** — bidirectional-stream tunnels over a single HTTP/2 stream, e.g. WebSocket without falling back to HTTP/1.1
+- **Informational responses** — `Ctx.SendInformational` and `103 Early Hints` use HTTP/2 informational HEADERS frames
+- **RFC 9218 priorities** — request priorities can be read with `RequestPriority` and response priorities set with `SetResponsePriority`
 
 ## Configuration
 

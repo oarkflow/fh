@@ -40,3 +40,16 @@ Set timeouts, max body size, header allow/deny lists, upstream health checks, ci
 
 By default this middleware refuses to dial well-known cloud metadata endpoints (169.254.169.254, 169.254.170.2, fd00:ec2::254) even if `Target` or a custom `Director` ever resolves there — this closes the metadata-credential-theft class of SSRF. The check happens at dial time against the resolved IP (not just the configured hostname), so DNS rebinding cannot bypass it. Set `DisableSSRFGuard: true` only if this proxy intentionally targets a metadata endpoint. Use `DeniedCIDRs` to additionally block private ranges (e.g. `10.0.0.0/8`) if `Target`/`Director` could ever be influenced by request data.
 
+## Forward CONNECT
+
+Use `proxy.Connect` for explicitly authorized HTTP/1.1 tunnels:
+
+```go
+app.All("/", proxy.Connect(proxy.ConnectConfig{
+	AllowTarget: func(target string) bool { return target == "api.example.com:443" },
+	Timeout:     10 * time.Second,
+}))
+```
+
+The handler rejects non-CONNECT requests and denies all targets unless an
+allowlist function is provided.

@@ -2,7 +2,7 @@ package fh
 
 import (
 	"encoding/binary"
-	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -188,22 +188,13 @@ func (h *h2Conn) allocatePushID() uint32 {
 //	    return c.JSON(pageData)
 //	})
 func (c *DefaultCtx) EarlyHint(uri string) bool {
-	if c.responded || c.upgraded {
+	if !validLinkTarget(uri) || c.responded || c.upgraded {
 		return false
 	}
-
-	// Only supported over HTTP/1.1 connections.
 	if c.h2 != nil {
-		return false
+		return c.h2.sendEarlyHints(c, []string{"<" + uri + ">; rel=preload"})
 	}
-
-	// Build 103 Early Hints response.
-	hint := fmt.Sprintf("HTTP/1.1 103 Early Hints\r\nLink: <%s>; rel=preload\r\n\r\n", uri)
-
-	if _, err := c.conn.Write([]byte(hint)); err != nil {
-		return false
-	}
-	return true
+	return c.Send103EarlyHints([]string{uri})
 }
 
 // EarlyHintsWithHeaders sends an HTTP 103 Early Hints with custom Link headers
@@ -215,15 +206,14 @@ func (c *DefaultCtx) EarlyHint(uri string) bool {
 //	    "rel": "preload", "as": "font", "type": "font/woff2", "crossorigin": "",
 //	})
 func (c *DefaultCtx) EarlyHintsWithHeaders(uri string, attrs map[string]string) bool {
-	if c.responded || c.upgraded {
+	if !validLinkTarget(uri) || c.responded || c.upgraded {
 		return false
 	}
-	if c.h2 != nil {
-		return false
-	}
-
 	link := "<" + uri + ">"
 	for k, v := range attrs {
+		if !validLinkParam(k, v) {
+			return false
+		}
 		if v == "" {
 			link += "; " + k
 		} else {
@@ -231,11 +221,10 @@ func (c *DefaultCtx) EarlyHintsWithHeaders(uri string, attrs map[string]string) 
 		}
 	}
 
-	hint := fmt.Sprintf("HTTP/1.1 103 Early Hints\r\nLink: %s\r\n\r\n", link)
-	if _, err := c.conn.Write([]byte(hint)); err != nil {
-		return false
+	if c.h2 != nil {
+		return c.h2.sendEarlyHints(c, []string{link})
 	}
-	return true
+	return c.sendEarlyHintsHTTP1([]string{link})
 }
 
 // Send103EarlyHints writes an HTTP 103 Early Hints response for HTTP/1.1 connections.
@@ -243,8 +232,39 @@ func (c *DefaultCtx) Send103EarlyHints(links []string) bool {
 	if c.responded || c.upgraded || c.h2 != nil {
 		return false
 	}
+	for _, link := range links {
+		if !validLinkTarget(link) {
+			return false
+		}
+	}
+	return c.sendEarlyHintsHTTP1(links)
+}
 
-	var resp []byte
+func (c *DefaultCtx) SendInformational(status int, headers map[string]string) bool {
+	if status < 100 || status >= 200 || c.responded || c.upgraded {
+		return false
+	}
+	if c.h2 != nil {
+		values := make(map[string][]string, len(headers))
+		for name, value := range headers {
+			values[name] = []string{value}
+		}
+		return c.h2.conn.sendInformationalHeaders(c.h2.stream, status, values) == nil
+	}
+	resp := []byte("HTTP/1.1 " + strconv.Itoa(status) + " " + StatusReason(status) + "\r\n")
+	for name, value := range headers {
+		if !validToken([]byte(name)) || strings.ContainsAny(name+value, "\x00\r\n") {
+			return false
+		}
+		resp = append(resp, name+": "+value+"\r\n"...)
+	}
+	resp = append(resp, "\r\n"...)
+	_, err := c.conn.Write(resp)
+	return err == nil
+}
+
+func (c *DefaultCtx) sendEarlyHintsHTTP1(links []string) bool {
+	resp := make([]byte, 0, 64+len(links)*32)
 	resp = append(resp, "HTTP/1.1 103 Early Hints\r\n"...)
 	for _, link := range links {
 		resp = append(resp, "Link: <"...)
@@ -255,6 +275,14 @@ func (c *DefaultCtx) Send103EarlyHints(links []string) bool {
 
 	_, err := c.conn.Write(resp)
 	return err == nil
+}
+
+func validLinkTarget(uri string) bool {
+	return uri != "" && !strings.ContainsAny(uri, "\x00\r\n<>")
+}
+
+func validLinkParam(name, value string) bool {
+	return validToken([]byte(name)) && !strings.ContainsAny(value, "\x00\r\n")
 }
 
 // PushResource pushes resources during HTTP/2 or early hints during HTTP/1.1.

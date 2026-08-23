@@ -94,6 +94,8 @@ func (s *Scheduler) Handler() fh.HandlerFunc {
 		priority := s.cfg.DefaultPriority
 		if s.cfg.PriorityFunc != nil {
 			priority = s.cfg.PriorityFunc(c)
+		} else if c.Get(fh.HeaderPriority) != "" {
+			priority = priorityFromHTTP(c.RequestPriority())
 		}
 
 		if !s.admit(priority) {
@@ -112,6 +114,17 @@ func (s *Scheduler) Handler() fh.HandlerFunc {
 		err := c.Next()
 		s.release(priority)
 		return err
+	}
+}
+
+func priorityFromHTTP(priority fh.HTTPPriority) Priority {
+	switch {
+	case priority.Urgency <= 1:
+		return PriorityHigh
+	case priority.Urgency >= 6:
+		return PriorityLow
+	default:
+		return PriorityNormal
 	}
 }
 
