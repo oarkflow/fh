@@ -42,16 +42,16 @@ type MerkleCheckpoint struct {
 // tree and publishes the root hash, making deletion or modification of historical
 // audit events detectable.
 type MerkleAuditSink struct {
-	mu            sync.Mutex
-	next          AuditSink
-	bucket        []auditLeaf
-	bucketMax     int
-	checkpointFn  func(MerkleCheckpoint)
-	prevRoot      string
-	sequence      uint64
-	serverID      string
-	stopCh        chan struct{}
-	once          sync.Once
+	mu           sync.Mutex
+	next         AuditSink
+	bucket       []auditLeaf
+	bucketMax    int
+	checkpointFn func(MerkleCheckpoint)
+	prevRoot     string
+	sequence     uint64
+	serverID     string
+	stopCh       chan struct{}
+	once         sync.Once
 }
 
 type auditLeaf struct {
@@ -87,12 +87,12 @@ func NewMerkleAuditSink(cfg MerkleConfig) *MerkleAuditSink {
 	}
 
 	s := &MerkleAuditSink{
-		next:        cfg.Sink,
-		bucket:      make([]auditLeaf, 0, cfg.BucketSize),
-		bucketMax:   cfg.BucketSize,
+		next:         cfg.Sink,
+		bucket:       make([]auditLeaf, 0, cfg.BucketSize),
+		bucketMax:    cfg.BucketSize,
 		checkpointFn: cfg.OnCheckpoint,
-		serverID:    cfg.ServerID,
-		stopCh:      make(chan struct{}),
+		serverID:     cfg.ServerID,
+		stopCh:       make(chan struct{}),
 	}
 
 	go s.flushLoop(cfg.CheckpointInterval)
@@ -258,10 +258,10 @@ func MerkleAuditMiddleware(sink *MerkleAuditSink) HandlerFunc {
 		err := c.Next()
 		if err == nil {
 			e := AuditEvent{
-				Action:   "request.completed",
-				Result:   "success",
-				Method:   c.Method(),
-				Path:     c.Path(),
+				Action:    "request.completed",
+				Result:    "success",
+				Method:    c.Method(),
+				Path:      c.Path(),
 				RequestID: c.Get("X-Request-ID"),
 			}
 			_ = sink.WriteAudit(c.Context(), e)

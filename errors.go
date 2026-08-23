@@ -231,23 +231,26 @@ func NewError(status int, message ...string) *HTTPError {
 
 // Sentinel error variables for direct comparison.
 // These mirror the Fiber error variables so that migration code like
-//   return fiber.ErrNotFound
+//
+//	return fiber.ErrNotFound
+//
 // compiles as
-//   return fh.ErrNotFound
+//
+//	return fh.ErrNotFound
 var (
-	ErrBadRequest            = NewHTTPError(StatusBadRequest, "BAD_REQUEST", "Bad Request")
-	ErrUnauthorized          = NewHTTPError(StatusUnauthorized, "UNAUTHORIZED", "Unauthorized")
-	ErrForbidden             = NewHTTPError(StatusForbidden, "FORBIDDEN", "Forbidden")
-	ErrNotFound              = NewHTTPError(StatusNotFound, "NOT_FOUND", "Not Found")
-	ErrMethodNotAllowed      = NewHTTPError(StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Method Not Allowed")
-	ErrConflict              = NewHTTPError(StatusConflict, "CONFLICT", "Conflict")
-	ErrRequestTimeout        = NewHTTPError(StatusRequestTimeout, "REQUEST_TIMEOUT", "Request Timeout")
-	ErrPayloadTooLarge       = NewHTTPError(StatusPayloadTooLarge, "PAYLOAD_TOO_LARGE", "Payload Too Large")
-	ErrUnsupportedMediaType  = NewHTTPError(StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Unsupported Media Type")
-	ErrTooManyRequests       = NewHTTPError(StatusTooManyRequests, "RATE_LIMITED", "Too Many Requests")
-	ErrInternalServerError   = NewHTTPError(StatusInternalServerError, "INTERNAL_ERROR", "Internal Server Error")
-	ErrServiceUnavailable    = NewHTTPError(StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Service Unavailable")
-	ErrGatewayTimeout        = NewHTTPError(StatusGatewayTimeout, "GATEWAY_TIMEOUT", "Gateway Timeout")
+	ErrBadRequest           = NewHTTPError(StatusBadRequest, "BAD_REQUEST", "Bad Request")
+	ErrUnauthorized         = NewHTTPError(StatusUnauthorized, "UNAUTHORIZED", "Unauthorized")
+	ErrForbidden            = NewHTTPError(StatusForbidden, "FORBIDDEN", "Forbidden")
+	ErrNotFound             = NewHTTPError(StatusNotFound, "NOT_FOUND", "Not Found")
+	ErrMethodNotAllowed     = NewHTTPError(StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Method Not Allowed")
+	ErrConflict             = NewHTTPError(StatusConflict, "CONFLICT", "Conflict")
+	ErrRequestTimeout       = NewHTTPError(StatusRequestTimeout, "REQUEST_TIMEOUT", "Request Timeout")
+	ErrPayloadTooLarge      = NewHTTPError(StatusPayloadTooLarge, "PAYLOAD_TOO_LARGE", "Payload Too Large")
+	ErrUnsupportedMediaType = NewHTTPError(StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Unsupported Media Type")
+	ErrTooManyRequests      = NewHTTPError(StatusTooManyRequests, "RATE_LIMITED", "Too Many Requests")
+	ErrInternalServerError  = NewHTTPError(StatusInternalServerError, "INTERNAL_ERROR", "Internal Server Error")
+	ErrServiceUnavailable   = NewHTTPError(StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Service Unavailable")
+	ErrGatewayTimeout       = NewHTTPError(StatusGatewayTimeout, "GATEWAY_TIMEOUT", "Gateway Timeout")
 )
 
 // PanicError wraps a recovered panic. Stack is intentionally not returned to clients unless debug exposure is enabled.

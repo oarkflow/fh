@@ -553,9 +553,9 @@ func TestDecodeHeadersToStruct(t *testing.T) {
 	srv := New()
 	srv.Get("/info", func(c Ctx) error {
 		var s struct {
-			Host         string `header:"Host"`
-			ContentType  string `header:"Content-Type"`
-			XRequestID   string `header:"X-Request-Id"`
+			Host          string `header:"Host"`
+			ContentType   string `header:"Content-Type"`
+			XRequestID    string `header:"X-Request-Id"`
 			Authorization string `header:"Authorization"`
 		}
 		if err := c.HeaderParser(&s); err != nil {

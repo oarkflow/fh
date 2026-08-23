@@ -903,10 +903,10 @@ func parseLogFormat(format string) []logToken {
 				tokens = append(tokens, logToken{typ: logLatency})
 			case "ip":
 				tokens = append(tokens, logToken{typ: logIP})
-		case "error":
-			tokens = append(tokens, logToken{typ: logError})
-		case "request_id":
-			tokens = append(tokens, logToken{typ: logRequestID})
+			case "error":
+				tokens = append(tokens, logToken{typ: logError})
+			case "request_id":
+				tokens = append(tokens, logToken{typ: logRequestID})
 			default:
 				tokens = append(tokens, logToken{typ: logText, text: format[i : i+end+1]})
 			}

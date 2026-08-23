@@ -1,66 +1,18 @@
 package fh
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 )
-
-// SSE support.
-type SSE struct {
-	c   *DefaultCtx
-	buf bytes.Buffer
-	mu  sync.Mutex
-}
-
-func (c *DefaultCtx) SSE(fn func(*SSE) error) error {
-	c.Type("text/event-stream; charset=utf-8")
-	c.Set("Cache-Control", "no-cache")
-	c.Set("Connection", "keep-alive")
-	s := &SSE{c: c}
-	if err := fn(s); err != nil {
-		return err
-	}
-	return c.SendBytes(s.buf.Bytes())
-}
-func (s *SSE) Event(event string, data any) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if strings.ContainsAny(event, "\r\n") {
-		return nil
-	}
-	if event != "" {
-		fmt.Fprintf(&s.buf, "event: %s\n", event)
-	}
-	b, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-	scanner := bufio.NewScanner(bytes.NewReader(b))
-	for scanner.Scan() {
-		fmt.Fprintf(&s.buf, "data: %s\n", scanner.Text())
-	}
-	s.buf.WriteByte('\n')
-	return scanner.Err()
-}
-func (s *SSE) Comment(v string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v = strings.ReplaceAll(v, "\n", "\\n")
-	v = strings.ReplaceAll(v, "\r", "\\r")
-	fmt.Fprintf(&s.buf, ": %s\n\n", v)
-}
 
 type Redactor struct {
 	Keys        []string

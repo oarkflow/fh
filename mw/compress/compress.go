@@ -2,6 +2,7 @@ package compress
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"io"
 	"strconv"
@@ -12,7 +13,8 @@ import (
 )
 
 const (
-	EncodingGzip = "gzip"
+	EncodingGzip    = "gzip"
+	EncodingDeflate = "deflate"
 )
 
 type Encoder interface {
@@ -42,7 +44,6 @@ var DefaultConfig = Config{
 	Level:   gzip.BestSpeed,
 	MinSize: 512,
 	CompressibleTypes: []string{
-		"image/",
 		"text/",
 		"application/json",
 		"application/xml",
@@ -59,21 +60,23 @@ func New(config ...Config) fh.HandlerFunc {
 		cfg = mergeConfig(cfg, config[0])
 	}
 
-	if cfg.Encoder == nil {
-		cfg.Encoder = NewGzipEncoder(cfg.Level)
-	}
-
-	encoding := cfg.Encoder.Encoding()
-
 	return func(ctx fh.Ctx) error {
 		if cfg.Next != nil && cfg.Next(ctx) {
 			return ctx.Next()
 		}
 
 		ae := ctx.Get("Accept-Encoding")
-		if !acceptsEncoding(ae, encoding) {
+
+		// Pick encoder: user-supplied > negotiated best (gzip > deflate).
+		enc := cfg.Encoder
+		if enc == nil {
+			enc = negotiateEncoder(ae, cfg.Level)
+		}
+		if enc == nil || !acceptsEncoding(ae, enc.Encoding()) {
 			return ctx.Next()
 		}
+
+		encoding := enc.Encoding()
 
 		ctx.AddBodyTransform(func(body []byte) ([]byte, error) {
 			if len(body) < cfg.MinSize {
@@ -101,7 +104,7 @@ func New(config ...Config) fh.HandlerFunc {
 			var dst bytes.Buffer
 			dst.Grow(len(body) / 2)
 
-			if err := cfg.Encoder.Encode(&dst, body); err != nil {
+			if err := enc.Encode(&dst, body); err != nil {
 				return nil, err
 			}
 
@@ -118,6 +121,48 @@ func New(config ...Config) fh.HandlerFunc {
 
 		return ctx.Next()
 	}
+}
+
+// negotiateEncoder picks the best available encoder for the given Accept-Encoding header.
+// Prefers gzip over deflate. Returns nil when neither is accepted.
+func negotiateEncoder(acceptEncoding string, level int) Encoder {
+	gzQ := encodingQuality(acceptEncoding, "gzip")
+	deflQ := encodingQuality(acceptEncoding, "deflate")
+	if gzQ <= 0 && deflQ <= 0 {
+		return nil
+	}
+	if gzQ >= deflQ {
+		return NewGzipEncoder(level)
+	}
+	return NewDeflateEncoder(level)
+}
+
+// encodingQuality returns the quality value for a specific encoding in an Accept-Encoding header.
+func encodingQuality(header, encoding string) float64 {
+	for len(header) > 0 {
+		token := header
+		if i := strings.IndexByte(header, ','); i >= 0 {
+			token = strings.TrimSpace(header[:i])
+			header = header[i+1:]
+		} else {
+			header = ""
+		}
+		token = strings.TrimSpace(token)
+		q := 1.0
+		if semi := strings.IndexByte(token, ';'); semi >= 0 {
+			params := strings.TrimSpace(token[semi+1:])
+			token = strings.TrimSpace(token[:semi])
+			if strings.HasPrefix(params, "q=") {
+				if v, err := strconv.ParseFloat(params[2:], 64); err == nil {
+					q = v
+				}
+			}
+		}
+		if strings.EqualFold(token, encoding) || token == "*" {
+			return q
+		}
+	}
+	return 0
 }
 
 func mergeConfig(base Config, override Config) Config {
@@ -173,9 +218,9 @@ func isCompressible(contentType string, allowed []string) bool {
 	return false
 }
 
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Gzip encoder
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
 type GzipEncoder struct {
 	level int
@@ -199,9 +244,7 @@ func NewGzipEncoder(level int) *GzipEncoder {
 	return e
 }
 
-func (e *GzipEncoder) Encoding() string {
-	return EncodingGzip
-}
+func (e *GzipEncoder) Encoding() string { return EncodingGzip }
 
 func (e *GzipEncoder) Encode(dst *bytes.Buffer, src []byte) error {
 	w := e.pool.Get().(*gzip.Writer)
@@ -216,13 +259,44 @@ func (e *GzipEncoder) Encode(dst *bytes.Buffer, src []byte) error {
 	if writeErr != nil {
 		return writeErr
 	}
-
 	return closeErr
 }
 
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Deflate encoder
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DeflateEncoder compresses responses using the DEFLATE algorithm (compress/flate).
+// Deflate is universally supported by browsers and requires no external dependencies.
+type DeflateEncoder struct {
+	level int
+}
+
+// NewDeflateEncoder creates a new deflate encoder at the given compression level.
+func NewDeflateEncoder(level int) *DeflateEncoder {
+	if level == 0 {
+		level = flate.BestSpeed
+	}
+	return &DeflateEncoder{level: level}
+}
+
+func (d *DeflateEncoder) Encoding() string { return EncodingDeflate }
+
+func (d *DeflateEncoder) Encode(dst *bytes.Buffer, src []byte) error {
+	w, err := flate.NewWriter(dst, d.level)
+	if err != nil {
+		return err
+	}
+	if _, err = w.Write(src); err != nil {
+		_ = w.Close()
+		return err
+	}
+	return w.Close()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Accept-Encoding parser
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
 func acceptsEncoding(header string, want string) bool {
 	if header == "" || want == "" {
@@ -250,7 +324,6 @@ func acceptsEncoding(header string, want string) bool {
 		}
 
 		name := header[start:i]
-
 		qOK := true
 
 		for i < len(header) && header[i] != ',' {
@@ -259,7 +332,6 @@ func acceptsEncoding(header string, want string) bool {
 				for i < len(header) && (header[i] == ' ' || header[i] == '\t') {
 					i++
 				}
-
 				if i+2 <= len(header) && (header[i] == 'q' || header[i] == 'Q') && i+1 < len(header) && header[i+1] == '=' {
 					i += 2
 					qOK = !isQZeroValue(header[i:])
@@ -284,11 +356,9 @@ func acceptsEncoding(header string, want string) bool {
 	if foundWant {
 		return wantOK
 	}
-
 	if foundStar {
 		return starOK
 	}
-
 	return false
 }
 
@@ -296,23 +366,18 @@ func isQZeroValue(s string) bool {
 	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
 		s = s[1:]
 	}
-
 	if len(s) == 0 {
 		return false
 	}
-
 	if s[0] != '0' {
 		return false
 	}
-
 	if len(s) == 1 {
 		return true
 	}
-
 	if s[1] != '.' {
 		return true
 	}
-
 	for i := 2; i < len(s); i++ {
 		c := s[i]
 		if c == ',' || c == ';' || c == ' ' || c == '\t' {
@@ -322,6 +387,5 @@ func isQZeroValue(s string) bool {
 			return false
 		}
 	}
-
 	return true
 }

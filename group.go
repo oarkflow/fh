@@ -107,8 +107,20 @@ func (g *Group) Query(path string, handlers ...HandlerFunc) *Group {
 	return g.add("QUERY", path, handlers...)
 }
 
+func (g *Group) Search(path string, handlers ...HandlerFunc) *Group {
+	return g.add("SEARCH", path, handlers...)
+}
+
+func (g *Group) Purge(path string, handlers ...HandlerFunc) *Group {
+	return g.add("PURGE", path, handlers...)
+}
+
+func (g *Group) Report(path string, handlers ...HandlerFunc) *Group {
+	return g.add("REPORT", path, handlers...)
+}
+
 func (g *Group) All(path string, handlers ...HandlerFunc) *Group {
-	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "QUERY"} {
+	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "QUERY", "SEARCH", "PURGE", "REPORT"} {
 		g.add(m, path, handlers...)
 	}
 	return g

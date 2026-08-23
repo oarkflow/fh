@@ -57,10 +57,10 @@ func (s *JournalStore) Entries() []fh.RequestJournalEntry {
 func (s *JournalStore) Close() error { return nil }
 
 type IdempotencyStore struct {
-	mu         sync.Mutex
-	ttl        time.Duration
-	maxEntries int
-	records    map[string]*fh.IdempotencyRecord
+	mu          sync.Mutex
+	ttl         time.Duration
+	maxEntries  int
+	records     map[string]*fh.IdempotencyRecord
 	insertOrder []string
 }
 
@@ -147,10 +147,10 @@ func (s *IdempotencyStore) PurgeExpired(ctx context.Context, now time.Time) (int
 }
 
 type QueueStorage struct {
-	mu         sync.Mutex
-	jobs       map[string]*fh.QueueJob
-	state      map[string]string
-	maxEntries int
+	mu          sync.Mutex
+	jobs        map[string]*fh.QueueJob
+	state       map[string]string
+	maxEntries  int
 	insertOrder []string
 }
 

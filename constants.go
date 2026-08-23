@@ -44,6 +44,7 @@ const (
 	HeaderIfRange                         = "If-Range"
 	HeaderIfUnmodifiedSince               = "If-Unmodified-Since"
 	HeaderKeepAlive                       = "Keep-Alive"
+	HeaderLastEventID                     = "Last-Event-ID"
 	HeaderLastModified                    = "Last-Modified"
 	HeaderLink                            = "Link"
 	HeaderLocation                        = "Location"
@@ -81,6 +82,9 @@ const (
 	HeaderWantReprDigest                  = "Want-Repr-Digest"
 	HeaderWarning                         = "Warning"
 	HeaderWWWAuthenticate                 = "WWW-Authenticate"
+	// Reporting API (https://www.w3.org/TR/reporting/)
+	HeaderReportTo           = "Report-To"
+	HeaderReportingEndpoints = "Reporting-Endpoints"
 )
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
@@ -319,6 +323,7 @@ const (
 	ValueGzip           = "gzip"
 	ValueDeflate        = "deflate"
 	ValueBr             = "br"
+	ValueZstd           = "zstd"
 	ValueCompress       = "compress"
 	ValueIdentity       = "identity"
 	ValueNoCache        = "no-cache"
@@ -385,6 +390,10 @@ const (
 	CookieAttrSecure   = "Secure"
 	CookieAttrHTTPOnly = "HttpOnly"
 	CookieAttrSameSite = "SameSite"
+	// CookieAttrPartitioned implements CHIPS (Cookies Having Independent
+	// Partitioned State) — the cookie is scoped to the top-level site.
+	// https://developer.chrome.com/docs/privacy-sandbox/chips/
+	CookieAttrPartitioned = "Partitioned"
 )
 
 // AppendHeader appends "Key: Value\r\n" to dst — zero alloc with sufficient capacity.
@@ -455,6 +464,7 @@ var (
 	HeaderIfRangeBytes                         = []byte(HeaderIfRange)
 	HeaderIfUnmodifiedSinceBytes               = []byte(HeaderIfUnmodifiedSince)
 	HeaderKeepAliveBytes                       = []byte(HeaderKeepAlive)
+	HeaderLastEventIDBytes                     = []byte(HeaderLastEventID)
 	HeaderLastModifiedBytes                    = []byte(HeaderLastModified)
 	HeaderLinkBytes                            = []byte(HeaderLink)
 	HeaderLocationBytes                        = []byte(HeaderLocation)
@@ -670,4 +680,10 @@ var (
 	ValueBearerBytes         = []byte(ValueBearer)
 	ValueBasicBytes          = []byte(ValueBasic)
 	ValueDigestBytes         = []byte(ValueDigest)
+	ValueZstdBytes           = []byte(ValueZstd)
+)
+
+var (
+	HeaderReportToBytes           = []byte(HeaderReportTo)
+	HeaderReportingEndpointsBytes = []byte(HeaderReportingEndpoints)
 )

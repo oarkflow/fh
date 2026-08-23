@@ -14,8 +14,8 @@ import (
 type AuthFunc func(fh.Ctx) bool
 type AuditFunc func(ctx fh.Ctx, action string, allowed bool)
 type Config struct {
-	Prefix string
-	Auth   AuthFunc
+	Prefix  string
+	Auth    AuthFunc
 	Timeout time.Duration
 	// AllowInsecure disables all authentication and IP allowlisting for admin
 	// endpoints. This exposes runtime introspection (goroutines, routes, queue

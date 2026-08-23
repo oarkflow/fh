@@ -135,8 +135,11 @@ type Config struct {
 	SendKeepAliveHeader bool
 	// ServerHeader, when non-empty, is sent as the Server response header.
 	// Empty by default (no Server header sent) for security.
-	ServerHeader         string
-	ReadBufferSize       int
+	ServerHeader   string
+	ReadBufferSize int
+	// WriteBufferSize is the initial size of the per-connection write buffer.
+	// Defaults to ReadBufferSize when zero. Increase for streaming-heavy workloads.
+	WriteBufferSize      int
 	MaxRequestBodySize   int
 	MaxHeaderListSize    int
 	MaxHeaderCount       int
@@ -251,6 +254,9 @@ func WithResourceCheckInterval(d time.Duration) Option {
 }
 func WithReadBufferSize(n int) Option {
 	return func(c *Config) { c.ReadBufferSize = n }
+}
+func WithWriteBufferSize(n int) Option {
+	return func(c *Config) { c.WriteBufferSize = n }
 }
 func WithMaxRequestBodySize(n int) Option {
 	return func(c *Config) { c.MaxRequestBodySize = n }
@@ -802,8 +808,23 @@ func (a *App) Query(path string, handlers ...HandlerFunc) *App {
 	return a.Add("QUERY", path, handlers...)
 }
 
+// Search registers a SEARCH method route (RFC 5323, WebDAV, CalDAV searches).
+func (a *App) Search(path string, handlers ...HandlerFunc) *App {
+	return a.Add("SEARCH", path, handlers...)
+}
+
+// Purge registers a PURGE method route (common in CDN/cache invalidation APIs).
+func (a *App) Purge(path string, handlers ...HandlerFunc) *App {
+	return a.Add("PURGE", path, handlers...)
+}
+
+// Report registers a REPORT method route (WebDAV, CalDAV/CardDAV report queries).
+func (a *App) Report(path string, handlers ...HandlerFunc) *App {
+	return a.Add("REPORT", path, handlers...)
+}
+
 func (a *App) All(path string, handlers ...HandlerFunc) *App {
-	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "QUERY"} {
+	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "QUERY", "SEARCH", "PURGE", "REPORT"} {
 		a.Add(m, path, handlers...)
 	}
 	return a

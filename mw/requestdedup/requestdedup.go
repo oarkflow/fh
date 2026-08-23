@@ -66,10 +66,10 @@ func defaultConfig() Config {
 			c.Set("X-Dedup-Key", e.Key)
 			c.Set("X-Dedup-Received", e.ReceivedAt.Format(time.RFC3339Nano))
 			return c.Status(fh.StatusConflict).JSON(fh.Map{
-				"error":     "duplicate_request",
-				"key":       e.Key,
-				"received":  e.ReceivedAt.Format(time.RFC3339Nano),
-				"expires":   e.ExpiresAt.Format(time.RFC3339Nano),
+				"error":    "duplicate_request",
+				"key":      e.Key,
+				"received": e.ReceivedAt.Format(time.RFC3339Nano),
+				"expires":  e.ExpiresAt.Format(time.RFC3339Nano),
 			})
 		},
 	}

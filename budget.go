@@ -50,15 +50,15 @@ type Budget struct {
 
 // BudgetConfig holds budget defaults for a route or application.
 type BudgetConfig struct {
-	Deadline          time.Duration
-	MaxCPUTime        time.Duration
-	MaxQueueTime      time.Duration
-	MaxBodyBytes      int64
-	MaxResponseBytes  int64
-	MaxMemoryBytes    int64
-	MaxUpstreamCalls  int
-	MaxRetries        int
-	MaxLogBytes       int64
+	Deadline         time.Duration
+	MaxCPUTime       time.Duration
+	MaxQueueTime     time.Duration
+	MaxBodyBytes     int64
+	MaxResponseBytes int64
+	MaxMemoryBytes   int64
+	MaxUpstreamCalls int
+	MaxRetries       int
+	MaxLogBytes      int64
 }
 
 // NewBudget creates a budget from a config and starts its deadline.

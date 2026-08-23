@@ -97,10 +97,10 @@ func (v indexType) indexed() bool   { return v == indexedTrue }
 func (v indexType) sensitive() bool { return v == indexedNever }
 
 const (
-	maxDynamicTableSize = 65536  // 64KB max dynamic table
-	maxHeaderBlockSize = 1 << 20 // 1MB max decoded header block
-	maxHeaderFieldSize = 8192    // 8KB max single header field
-	maxSaveBufSize     = 1 << 20 // 1MB max saveBuf to prevent unbounded growth
+	maxDynamicTableSize = 65536   // 64KB max dynamic table
+	maxHeaderBlockSize  = 1 << 20 // 1MB max decoded header block
+	maxHeaderFieldSize  = 8192    // 8KB max single header field
+	maxSaveBufSize      = 1 << 20 // 1MB max saveBuf to prevent unbounded growth
 )
 
 // ── Decoder ──────────────────────────────────────────────────────────────────

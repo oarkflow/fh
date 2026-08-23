@@ -89,10 +89,10 @@ func New(cfg ...Config) *PrivacyFilter {
 			"Content-Type", "Accept", "User-Agent", "X-Request-ID",
 			"X-Correlation-ID", "X-Forwarded-For",
 		},
-		BodyLogging:      false,
-		SecretDetection:  true,
-		PathTemplate:     true,
-		Retention:        1000,
+		BodyLogging:     false,
+		SecretDetection: true,
+		PathTemplate:    true,
+		Retention:       1000,
 	}
 	if len(cfg) > 0 {
 		merge := cfg[0]

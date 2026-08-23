@@ -31,14 +31,25 @@ type StaticConfig struct {
 	Compress bool
 
 	// MaxAge controls the Cache-Control max-age directive in seconds.
-	// Zero omits the header.
+	// Zero omits the header. Superseded by CacheControl when both are set.
 	MaxAge int
+
+	// CacheControl, when non-empty, overrides the entire Cache-Control header
+	// for all served files. Takes precedence over MaxAge.
+	// Example: "public, max-age=86400, immutable"
+	CacheControl string
 
 	// Browse enables directory listing when no index file is found.
 	Browse bool
 
 	// Index is the filename used as a directory index. Default: "index.html".
+	// Superseded by IndexFiles when both are set.
 	Index string
+
+	// IndexFiles is an ordered list of filenames tried as the directory index.
+	// The first matching file is served. Takes precedence over Index.
+	// Example: []string{"index.html", "index.htm", "default.html"}
+	IndexFiles []string
 
 	// CacheDuration limits how long file metadata is cached in memory.
 	// Zero disables caching.
@@ -53,11 +64,35 @@ type StaticConfig struct {
 	// Defaults to false so accidental secrets/metadata in the served root
 	// are not exposed through Browse.
 	ShowHidden bool
+
+	// NotFoundHandler, when non-nil, is called instead of returning a 404
+	// when the requested file or directory is not found under the static root.
+	// Useful for single-page applications: serve index.html for any unknown path.
+	NotFoundHandler HandlerFunc
+
+	// PreCompressed enables transparent serving of pre-compressed sidecar files.
+	// When the client accepts br (Brotli), fh checks for <path>.br before <path>.
+	// When the client accepts gzip, fh checks for <path>.gz before <path>.
+	// The original Content-Type is preserved and Content-Encoding is set.
+	PreCompressed bool
 }
 
-func (c *StaticConfig) indexFile() string {
+// indexFiles returns the ordered list of index filenames to try.
+func (c *StaticConfig) indexFiles() []string {
+	if len(c.IndexFiles) > 0 {
+		return c.IndexFiles
+	}
 	if c.Index != "" {
-		return c.Index
+		return []string{c.Index}
+	}
+	return []string{indexFileName}
+}
+
+// indexFile returns the single index filename (legacy helper, kept for compat).
+func (c *StaticConfig) indexFile() string {
+	files := c.indexFiles()
+	if len(files) > 0 {
+		return files[0]
 	}
 	return indexFileName
 }
@@ -204,6 +239,9 @@ func (s *staticFS) servePath(c Ctx, upath string) error {
 	info, err := fs.Stat(s.fs, upath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			if s.cfg.NotFoundHandler != nil {
+				return s.cfg.NotFoundHandler(c)
+			}
 			return c.Status(404).SendString("404 Not Found")
 		}
 		if errors.Is(err, fs.ErrPermission) {
@@ -223,10 +261,12 @@ func (s *staticFS) serveDir(c Ctx, upath string) error {
 		return c.Redirect(c.Path()+"/", 301)
 	}
 
-	indexPath := path.Join(upath, s.cfg.indexFile())
-	indexInfo, err := fs.Stat(s.fs, indexPath)
-	if err == nil && !indexInfo.IsDir() {
-		return s.writeFile(c, indexPath, indexInfo)
+	for _, idxFile := range s.cfg.indexFiles() {
+		indexPath := path.Join(upath, idxFile)
+		indexInfo, err := fs.Stat(s.fs, indexPath)
+		if err == nil && !indexInfo.IsDir() {
+			return s.writeFile(c, indexPath, indexInfo)
+		}
 	}
 
 	if s.cfg.Browse {
@@ -274,7 +314,10 @@ func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
 	}
 	c.Type(mimeType)
 
-	if s.cfg.MaxAge > 0 {
+	// Cache-Control: CacheControl takes precedence over MaxAge.
+	if s.cfg.CacheControl != "" {
+		c.Set("Cache-Control", s.cfg.CacheControl)
+	} else if s.cfg.MaxAge > 0 {
 		c.Set("Cache-Control", "public, max-age="+strconv.Itoa(s.cfg.MaxAge))
 	}
 
@@ -299,6 +342,28 @@ func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
 		} else if strings.HasPrefix(rangeHeader, "bytes=") {
 			c.Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
 			return c.Status(416).SendStatus(416)
+		}
+	}
+
+	// Pre-compressed sidecar serving: check for .br / .gz sidecar files
+	// before falling back to on-the-fly gzip compression.
+	if s.cfg.PreCompressed {
+		ae := c.Get("Accept-Encoding")
+		if strings.Contains(ae, "br") {
+			brPath := upath + ".br"
+			if brData, err2 := fs.ReadFile(s.fs, brPath); err2 == nil {
+				c.Set("Content-Encoding", "br")
+				c.Append("Vary", "Accept-Encoding")
+				return c.SendBytes(brData)
+			}
+		}
+		if strings.Contains(ae, "gzip") {
+			gzPath := upath + ".gz"
+			if gzData, err2 := fs.ReadFile(s.fs, gzPath); err2 == nil {
+				c.Set("Content-Encoding", "gzip")
+				c.Append("Vary", "Accept-Encoding")
+				return c.SendBytes(gzData)
+			}
 		}
 	}
 

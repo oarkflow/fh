@@ -237,8 +237,8 @@ func TestValidateStructPtr(t *testing.T) {
 
 func TestValidateCrossField(t *testing.T) {
 	type Password struct {
-		Password  string `json:"password" validate:"required,min=8"`
-		Confirm   string `json:"confirm" validate:"eqfield=Password"`
+		Password string `json:"password" validate:"required,min=8"`
+		Confirm  string `json:"confirm" validate:"eqfield=Password"`
 	}
 
 	p := Password{Password: "secret123", Confirm: "different"}

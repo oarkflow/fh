@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/xml"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -221,6 +223,58 @@ type Ctx interface {
 	Secure() bool
 	// IsFromLocal returns true when the request originates from a loopback address.
 	IsFromLocal() bool
+
+	// ── Modern HTTP server helpers ──────────────────────────────────────
+
+	// Vary appends field names to the Vary response header without duplicating existing values.
+	Vary(fields ...string)
+	// IsXHR returns true when the request was made with XMLHttpRequest (X-Requested-With: XMLHttpRequest).
+	IsXHR() bool
+	// Protocol returns the request scheme: "https" when the connection is TLS, otherwise "http".
+	Protocol() string
+	// Subdomains returns subdomain segments of the Host, offset from the right (default 2).
+	// e.g. for Host=api.v2.example.com with offset=2 → ["v2", "api"].
+	Subdomains(offset ...int) []string
+	// BaseURL returns scheme://host (no trailing slash).
+	BaseURL() string
+	// Accepts returns the best MIME type match from the client's Accept header.
+	// Returns the first offered type when the header is absent.
+	// Returns "" when none of the offered types are acceptable.
+	Accepts(offers ...string) string
+	// AcceptsCharsets returns the best charset match from Accept-Charset.
+	AcceptsCharsets(offers ...string) string
+	// AcceptsEncodings returns the best encoding match from Accept-Encoding.
+	AcceptsEncodings(offers ...string) string
+	// AcceptsLanguages returns the best language match from Accept-Language.
+	AcceptsLanguages(offers ...string) string
+	// XML encodes v as XML and sends it with Content-Type application/xml; charset=utf-8.
+	XML(v any) error
+	// Format performs content-type negotiation from the Accept header and dispatches
+	// to the matching handler. Falls through to Next when no handler matches.
+	Format(handlers map[string]HandlerFunc) error
+	// Range parses the Range request header for a resource of the given total size.
+	// Returns nil, nil when no Range header is present (caller should serve the full resource).
+	// Returns a 416 status error when the range is syntactically valid but unsatisfiable.
+	Range(size int64) ([]ByteRange, error)
+	// ClearCookie expires cookies by name. With no arguments all staged response
+	// cookies are expired. The name must match the name used when the cookie was set.
+	ClearCookie(name ...string)
+	// QueryMultiple returns all values for a repeated query parameter.
+	QueryMultiple(name string) []string
+	// IPs returns all IP addresses from the X-Forwarded-For chain, left to right.
+	IPs() []string
+	// ClearSiteData sets the Clear-Site-Data response header (e.g. "cache", "cookies", "storage", "executionContexts", "*").
+	ClearSiteData(directives ...string)
+	// AcceptCH sets the Accept-CH response header for User-Agent Client Hints.
+	AcceptCH(hints ...string)
+	// CriticalCH sets the Critical-CH response header and adds them to Accept-CH.
+	CriticalCH(hints ...string)
+	// StaleWhileRevalidate appends the stale-while-revalidate directive to Cache-Control.
+	StaleWhileRevalidate(d time.Duration)
+	// SendContinue sends an intermediate 100 Continue response.
+	SendContinue() error
+	// LastEventID returns the Last-Event-ID header or ?lastEventId= query param.
+	LastEventID() string
 }
 
 type DefaultCtx struct {
@@ -286,6 +340,14 @@ type DefaultCtx struct {
 type localEntry struct {
 	key string
 	val any
+}
+
+// ByteRange represents a single parsed segment from a Range request header.
+// Both Start and End are byte offsets, inclusive. Start=0, End=N-1 for the
+// entire resource of size N.
+type ByteRange struct {
+	Start int64
+	End   int64
 }
 
 var ctxPool = sync.Pool{
@@ -2380,4 +2442,361 @@ func (c *DefaultCtx) IsFromLocal() bool {
 	}
 	parsed := net.ParseIP(ip)
 	return parsed != nil && parsed.IsLoopback()
+}
+
+// ── Modern HTTP server helpers ──────────────────────────────────────────────
+
+// Vary appends field names to the Vary response header without duplicating
+// existing tokens. It is safe to call multiple times.
+func (c *DefaultCtx) Vary(fields ...string) {
+	for _, f := range fields {
+		if f != "" {
+			c.Append(HeaderVary, f)
+		}
+	}
+}
+
+// IsXHR returns true when the request carries X-Requested-With: XMLHttpRequest.
+func (c *DefaultCtx) IsXHR() bool {
+	return strings.EqualFold(c.Get(HeaderXRequestedWith), "XMLHttpRequest")
+}
+
+// Protocol returns "https" when the connection uses TLS, otherwise "http".
+func (c *DefaultCtx) Protocol() string {
+	if c.Secure() {
+		return "https"
+	}
+	return "http"
+}
+
+// Subdomains returns the subdomain segments of the Host header, ordered from
+// leftmost (closest to the label boundary) to rightmost.
+// offset (default 2) controls how many right-hand labels (e.g. "example.com")
+// are skipped. For Host=api.v2.example.com with offset=2 → ["api", "v2"].
+func (c *DefaultCtx) Subdomains(offset ...int) []string {
+	off := 2
+	if len(offset) > 0 && offset[0] > 0 {
+		off = offset[0]
+	}
+	host := c.Hostname()
+	parts := strings.Split(host, ".")
+	if len(parts) <= off {
+		return nil
+	}
+	return parts[:len(parts)-off]
+}
+
+// BaseURL returns scheme://host with no trailing slash.
+func (c *DefaultCtx) BaseURL() string {
+	return c.Protocol() + "://" + string(c.Header.Host)
+}
+
+// Accepts returns the best MIME type match from the client's Accept header.
+// When the header is absent or "*/*", the first offered type is returned.
+// Returns "" when none of the offered types are acceptable (q=0 or no match).
+func (c *DefaultCtx) Accepts(offers ...string) string {
+	if len(offers) == 0 {
+		return ""
+	}
+	return ctxNegotiateBest(c.Get(HeaderAccept), offers)
+}
+
+// AcceptsCharsets selects the best offered charset from Accept-Charset.
+func (c *DefaultCtx) AcceptsCharsets(offers ...string) string {
+	if len(offers) == 0 {
+		return ""
+	}
+	return ctxNegotiateBest(c.Get(HeaderAcceptCharset), offers)
+}
+
+// AcceptsEncodings selects the best offered encoding from Accept-Encoding.
+func (c *DefaultCtx) AcceptsEncodings(offers ...string) string {
+	if len(offers) == 0 {
+		return ""
+	}
+	return ctxNegotiateBest(c.Get(HeaderAcceptEncoding), offers)
+}
+
+// AcceptsLanguages selects the best offered language from Accept-Language.
+func (c *DefaultCtx) AcceptsLanguages(offers ...string) string {
+	if len(offers) == 0 {
+		return ""
+	}
+	return ctxNegotiateBest(c.Get(HeaderAcceptLanguage), offers)
+}
+
+// ctxNegotiateBest picks the highest-quality offered value from an Accept-* header.
+// Falls back to the first offered value when the header is absent or "*".
+func ctxNegotiateBest(header string, offers []string) string {
+	if header == "" || header == "*" || header == "*/*" {
+		return offers[0]
+	}
+	best := ""
+	bestQ := -1.0
+	for _, offer := range offers {
+		q := ctxAcceptFieldQuality(header, offer)
+		if q > bestQ {
+			bestQ = q
+			best = offer
+		}
+	}
+	if bestQ <= 0 {
+		return ""
+	}
+	return best
+}
+
+// ctxAcceptFieldQuality returns the effective quality value for offer in an Accept-* header.
+func ctxAcceptFieldQuality(header, offer string) float64 {
+	for len(header) > 0 {
+		token := header
+		if idx := strings.IndexByte(header, ','); idx >= 0 {
+			token = header[:idx]
+			header = header[idx+1:]
+		} else {
+			header = ""
+		}
+		token = strings.TrimSpace(token)
+		q := 1.0
+		if semi := strings.IndexByte(token, ';'); semi >= 0 {
+			params := strings.TrimSpace(token[semi+1:])
+			token = strings.TrimSpace(token[:semi])
+			if strings.HasPrefix(params, "q=") {
+				if v, err := strconv.ParseFloat(params[2:], 64); err == nil {
+					q = v
+				}
+			}
+		}
+		if strings.EqualFold(token, offer) || token == "*" || token == "*/*" {
+			return q
+		}
+		// wildcard subtype match: "text/*" accepts "text/html"
+		if strings.HasSuffix(token, "/*") {
+			prefix := token[:len(token)-1] // "text/"
+			if strings.HasPrefix(strings.ToLower(offer), strings.ToLower(prefix)) {
+				return q
+			}
+		}
+	}
+	return 0
+}
+
+// XML encodes v to XML and sends it with Content-Type: application/xml; charset=utf-8.
+func (c *DefaultCtx) XML(v any) error {
+	b, err := xml.Marshal(v)
+	if err != nil {
+		return err
+	}
+	c.contentType = []byte(MIMEApplicationXMLCharsetUTF8)
+	return c.writeResponse(b)
+}
+
+// Format performs content negotiation from the Accept header and dispatches to
+// the matching handler. It sets Content-Type to the matched key before calling
+// the handler. Falls through to Next when no handler matches or offers is empty.
+func (c *DefaultCtx) Format(handlers map[string]HandlerFunc) error {
+	if len(handlers) == 0 {
+		return c.Next()
+	}
+	offers := make([]string, 0, len(handlers))
+	for k := range handlers {
+		offers = append(offers, k)
+	}
+	best := c.Accepts(offers...)
+	if best == "" {
+		return c.Next()
+	}
+	if h, ok := handlers[best]; ok {
+		c.Type(best)
+		return h(c)
+	}
+	return c.Next()
+}
+
+// Range parses the Range request header for a resource of the given total size.
+// Returns nil, nil when no Range header is present (serve the full resource).
+// Returns a 416 error when the header is present but unsatisfiable.
+func (c *DefaultCtx) Range(size int64) ([]ByteRange, error) {
+	header := c.Get(HeaderRange)
+	if header == "" {
+		return nil, nil
+	}
+	return parseRangeHeader(header, size)
+}
+
+// parseRangeHeader parses an RFC 9110 Range: bytes=... header value.
+func parseRangeHeader(header string, size int64) ([]ByteRange, error) {
+	const prefix = "bytes="
+	if !strings.HasPrefix(header, prefix) {
+		return nil, NewHTTPError(StatusRangeNotSatisfiable, "RANGE_NOT_SATISFIABLE", "unsupported range unit")
+	}
+	spec := header[len(prefix):]
+	var ranges []ByteRange
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		dash := strings.IndexByte(part, '-')
+		if dash < 0 {
+			return nil, NewHTTPError(StatusRangeNotSatisfiable, "RANGE_NOT_SATISFIABLE", "invalid range format")
+		}
+		startStr := strings.TrimSpace(part[:dash])
+		endStr := strings.TrimSpace(part[dash+1:])
+		var start, end int64
+		if startStr == "" {
+			// suffix-range: -N means last N bytes
+			n, err := strconv.ParseInt(endStr, 10, 64)
+			if err != nil || n < 0 {
+				return nil, NewHTTPError(StatusRangeNotSatisfiable, "RANGE_NOT_SATISFIABLE", "invalid suffix range")
+			}
+			start = size - n
+			if start < 0 {
+				start = 0
+			}
+			end = size - 1
+		} else {
+			var err error
+			start, err = strconv.ParseInt(startStr, 10, 64)
+			if err != nil || start < 0 {
+				return nil, NewHTTPError(StatusRangeNotSatisfiable, "RANGE_NOT_SATISFIABLE", "invalid range start")
+			}
+			if endStr == "" {
+				end = size - 1
+			} else {
+				end, err = strconv.ParseInt(endStr, 10, 64)
+				if err != nil || end < start {
+					return nil, NewHTTPError(StatusRangeNotSatisfiable, "RANGE_NOT_SATISFIABLE", "invalid range end")
+				}
+			}
+		}
+		if start >= size {
+			return nil, NewHTTPError(StatusRangeNotSatisfiable, "RANGE_NOT_SATISFIABLE", "range start beyond resource size")
+		}
+		if end >= size {
+			end = size - 1
+		}
+		ranges = append(ranges, ByteRange{Start: start, End: end})
+	}
+	if len(ranges) == 0 {
+		return nil, NewHTTPError(StatusRangeNotSatisfiable, "RANGE_NOT_SATISFIABLE", "empty range specification")
+	}
+	return ranges, nil
+}
+
+// ClearCookie expires cookies by name. With no arguments, all staged response
+// cookies on this context are expired. To clear a browser-stored cookie the
+// name (and optionally Path/Domain) must match the original Set-Cookie.
+func (c *DefaultCtx) ClearCookie(name ...string) {
+	if len(name) == 0 {
+		for i := range c.responseCookies {
+			c.responseCookies[i].MaxAge = -1
+			c.responseCookies[i].Expires = time.Unix(0, 0)
+		}
+		return
+	}
+	for _, n := range name {
+		c.SetCookie(&Cookie{
+			Name:    n,
+			Value:   "",
+			MaxAge:  -1,
+			Expires: time.Unix(0, 0),
+		})
+	}
+}
+
+// QueryMultiple returns all values for a repeated query parameter.
+// For /search?tag=go&tag=web it returns ["go", "web"].
+func (c *DefaultCtx) QueryMultiple(name string) []string {
+	c.parseQuery()
+	var out []string
+	for i := 0; i < c.qcount; i++ {
+		if c.queryParams[i].Key == name {
+			out = append(out, c.queryParams[i].Value)
+		}
+	}
+	return out
+}
+
+// IPs returns all IP addresses from the X-Forwarded-For header, left to right.
+// Returns nil when the header is absent.
+func (c *DefaultCtx) IPs() []string {
+	raw := c.Get(HeaderXForwardedFor)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if ip := strings.TrimSpace(p); ip != "" {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// ClearSiteData sets the Clear-Site-Data response header (W3C Clear Site Data specification).
+// Valid directives: "cache", "cookies", "storage", "executionContexts", or "*" (all).
+// Directives are automatically quoted according to the standard.
+func (c *DefaultCtx) ClearSiteData(directives ...string) {
+	if len(directives) == 0 {
+		c.Set(HeaderClearSiteData, `*`)
+		return
+	}
+	var b strings.Builder
+	for i, d := range directives {
+		d = strings.Trim(strings.TrimSpace(d), `"`)
+		if d == "" {
+			continue
+		}
+		if i > 0 && b.Len() > 0 {
+			b.WriteString(", ")
+		}
+		if d == "*" {
+			b.WriteString(`"*"`)
+		} else {
+			b.WriteString(`"`)
+			b.WriteString(d)
+			b.WriteString(`"`)
+		}
+	}
+	if b.Len() > 0 {
+		c.Set(HeaderClearSiteData, b.String())
+	}
+}
+
+// AcceptCH sets the Accept-CH response header for User-Agent Client Hints.
+func (c *DefaultCtx) AcceptCH(hints ...string) {
+	for _, h := range hints {
+		if h != "" {
+			c.Append("Accept-CH", h)
+		}
+	}
+}
+
+// CriticalCH sets the Critical-CH response header and also adds the hints to Accept-CH.
+func (c *DefaultCtx) CriticalCH(hints ...string) {
+	for _, h := range hints {
+		if h != "" {
+			c.Append("Critical-CH", h)
+			c.Append("Accept-CH", h)
+		}
+	}
+}
+
+// StaleWhileRevalidate appends the stale-while-revalidate directive in seconds to Cache-Control.
+func (c *DefaultCtx) StaleWhileRevalidate(d time.Duration) {
+	secs := int(d.Seconds())
+	if secs <= 0 {
+		secs = 1
+	}
+	c.Append(HeaderCacheControl, fmt.Sprintf("stale-while-revalidate=%d", secs))
+}
+
+// SendContinue sends an intermediate HTTP/1.1 100 Continue response before the final response.
+func (c *DefaultCtx) SendContinue() error {
+	if c.conn == nil || c.h2 != nil {
+		return nil
+	}
+	return writeAll(c.conn, []byte("HTTP/1.1 100 Continue\r\n\r\n"))
 }

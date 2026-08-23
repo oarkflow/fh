@@ -67,16 +67,16 @@ type ReloadHook func(new, old *ConfigGeneration)
 
 // ReloadResult holds the outcome of a configuration reload attempt.
 type ReloadResult struct {
-	Success   bool
+	Success    bool
 	Generation ConfigGeneration
-	Duration  time.Duration
-	Error     error
+	Duration   time.Duration
+	Error      error
 }
 
 // NewConfigReloader creates a configuration reloader for the given app.
 func NewConfigReloader(app *App) *ConfigReloader {
 	return &ConfigReloader{
-		app:       app,
+		app:        app,
 		generation: atomic.Uint64{},
 		current: &ConfigGeneration{
 			Timestamp: time.Now(),
@@ -195,11 +195,11 @@ func (cr *ConfigReloader) Reload(newCfg *Config) ReloadResult {
 
 	// Step 7: Swap configuration atomically.
 	newGen := &ConfigGeneration{
-		ConfigGeneration:    cr.generation.Add(1),
-		RouteGeneration:     cr.routeGen.Load(),
-		PolicyGeneration:    cr.policyGen.Load(),
+		ConfigGeneration:      cr.generation.Add(1),
+		RouteGeneration:       cr.routeGen.Load(),
+		PolicyGeneration:      cr.policyGen.Load(),
 		CertificateGeneration: cr.certGen.Load(),
-		Timestamp:           time.Now(),
+		Timestamp:             time.Now(),
 	}
 	cr.current = newGen
 
