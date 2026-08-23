@@ -5,8 +5,11 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/session"
+	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
 type mockEngine struct {
@@ -70,6 +73,39 @@ func TestRenderWithData(t *testing.T) {
 	}
 	if body != "world" {
 		t.Fatalf("expected 'world', got %q", body)
+	}
+}
+
+func TestRenderFlashOverridesTemplateDefaults(t *testing.T) {
+	app := fh.NewWithConfig(fh.Config{
+		TemplateEngine: &mockEngine{
+			renderFn: func(w io.Writer, name string, data any, layout ...string) error {
+				m, ok := data.(map[string]any)
+				if !ok {
+					t.Fatalf("data type = %T, want map[string]any", data)
+				}
+				_, _ = io.WriteString(w, m["success"].(string))
+				return nil
+			},
+		},
+	})
+	manager := session.NewSessionManager(kv.NewMemoryStore(kv.WithGCInterval(time.Minute)),
+		session.SessionSecret([]byte("0123456789abcdef0123456789abcdef")),
+		session.SessionSecure(false),
+	)
+	app.Use(session.New(manager))
+	app.Get("/", func(c fh.Ctx) error {
+		c.Flash("success", "from flash")
+		return c.Render("hello", map[string]any{"success": false})
+	})
+	addr := testServer(t, app)
+
+	code, body := doRequest(t, addr, "GET", "/", "", nil)
+	if code != 200 {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	if body != "from flash" {
+		t.Fatalf("expected flash to override default, got %q", body)
 	}
 }
 

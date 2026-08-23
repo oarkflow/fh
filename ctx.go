@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -131,6 +132,12 @@ type Ctx interface {
 	RedirectTo(name string, params map[string]string, code ...int) error
 	RedirectBack(fallback string, code ...int) error
 	Flash(key string, value ...any) any
+	// FlashAll retrieves and consumes all pending flash data atomically.
+	// Returns nil when there is no flash data. Requires session middleware.
+	FlashAll() map[string]any
+	// RedirectWithFlash sets one or more flash key/value pairs then redirects.
+	// Flash data is available exactly once on the next request.
+	RedirectWithFlash(location string, code int, flash map[string]any) error
 	App() *App
 	ServerOutbox() *Outbox
 	ServerInbox() *Inbox
@@ -1193,12 +1200,40 @@ func (c *DefaultCtx) Render(name string, data any, layout ...string) error {
 	if engine == nil {
 		return NewHTTPError(StatusInternalServerError, "TEMPLATE_ENGINE_MISSING", "fh: no template engine configured")
 	}
+	// Auto-inject flash data into template rendering.
+	// Flash data is consumed atomically on first access.
+	flash := c.FlashAll()
+	if len(flash) > 0 {
+		data = mergeFlashData(data, flash)
+	}
 	var buf bytes.Buffer
 	if err := engine.Render(&buf, name, data, layout...); err != nil {
 		return err
 	}
 	c.contentType = []byte("text/html; charset=utf-8")
 	return c.writeResponse(buf.Bytes())
+}
+
+// mergeFlashData merges flash key/value pairs into the template data.
+// If data is a map, flash keys are added directly and override placeholder defaults.
+// If data is a struct or nil, a new map is created wrapping the original data.
+func mergeFlashData(data any, flash map[string]any) any {
+	if data == nil {
+		return flash
+	}
+	if m, ok := data.(map[string]any); ok {
+		maps.Copy(m, flash)
+		return m
+	}
+	if m, ok := data.(Map); ok {
+		maps.Copy(m, flash)
+		return m
+	}
+	// For structs, wrap in a map so templates can access both.
+	return map[string]any{
+		"Data":  data,
+		"Flash": flash,
+	}
 }
 
 func (c *DefaultCtx) SendStatus(code int) error {
@@ -1273,6 +1308,29 @@ func (c *DefaultCtx) Flash(key string, value ...any) any {
 		panic("fh: flash messages require session middleware")
 	}
 	return store.Flash(key, value...)
+}
+
+type contextFlashAllStore interface {
+	FlashAll() map[string]any
+}
+
+// FlashAll retrieves and consumes all pending flash data atomically.
+// Returns nil when there is no flash data. Requires session middleware.
+func (c *DefaultCtx) FlashAll() map[string]any {
+	store, ok := c.Locals("session").(contextFlashAllStore)
+	if !ok {
+		return nil
+	}
+	return store.FlashAll()
+}
+
+// RedirectWithFlash sets one or more flash key/value pairs then redirects.
+// Flash data is available exactly once on the next request.
+func (c *DefaultCtx) RedirectWithFlash(location string, code int, flash map[string]any) error {
+	for k, v := range flash {
+		c.Flash(k, v)
+	}
+	return c.Redirect(location, code)
 }
 
 // App returns the owning application instance for advanced integrations.

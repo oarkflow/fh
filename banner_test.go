@@ -2,6 +2,7 @@ package fh
 
 import (
 	"bytes"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -36,6 +37,68 @@ func TestRenderStartupBanner(t *testing.T) {
 	}
 }
 
+func TestRenderStartupBannerColor(t *testing.T) {
+	out := RenderStartupBanner(StartupBannerConfig{ASCIIArt: "-", Color: true}, StartupBannerData{
+		Name:      "fh",
+		URL:       "http://127.0.0.1:3000",
+		Routes:    3,
+		GoVersion: "go1.test",
+		PID:       123,
+		HTTP2:     true,
+		Mode:      ModeDevelopment,
+	})
+	for _, want := range []string{"\033[", "\033]8;;http://127.0.0.1:3000", "enabled", "development"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("colored banner missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, startupReset) {
+		t.Fatalf("colored banner missing reset sequence:\n%s", out)
+	}
+}
+
+func TestRenderStartupBannerColorAlignsRightBorder(t *testing.T) {
+	out := RenderStartupBanner(StartupBannerConfig{ASCIIArt: "-", Color: true}, StartupBannerData{
+		Name:      "fh",
+		URL:       "http://127.0.0.1:3000",
+		Routes:    4,
+		GoVersion: "go1.26.5",
+		PID:       68816,
+		HTTP2:     true,
+		Mode:      ModeProduction,
+	})
+
+	var want int
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "|") && !strings.Contains(line, "+") {
+			continue
+		}
+		got := startupVisibleWidth(line)
+		if want == 0 {
+			want = got
+			continue
+		}
+		if got != want {
+			t.Fatalf("misaligned banner line width=%d want=%d:\n%s", got, want, out)
+		}
+	}
+}
+
+func TestRenderStartupBannerPlainHasNoANSI(t *testing.T) {
+	out := RenderStartupBanner(StartupBannerConfig{ASCIIArt: "-"}, StartupBannerData{
+		Name:      "fh",
+		URL:       "http://127.0.0.1:3000",
+		Routes:    3,
+		GoVersion: "go1.test",
+		PID:       123,
+		HTTP2:     true,
+		Mode:      ModeProduction,
+	})
+	if strings.Contains(out, "\033[") || strings.Contains(out, "\033]8;;") {
+		t.Fatalf("plain banner should not contain ANSI escapes:\n%q", out)
+	}
+}
+
 func TestStartupBannerWritesToConfiguredWriter(t *testing.T) {
 	var buf bytes.Buffer
 	app := New(WithStartupBanner(StartupBannerConfig{Writer: &buf, ASCIIArt: "-", Name: "demo", Version: "v1"}))
@@ -44,6 +107,18 @@ func TestStartupBannerWritesToConfiguredWriter(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "demo v1") || !strings.Contains(out, "http://127.0.0.1:3000") || !strings.Contains(out, "Routes") {
 		t.Fatalf("unexpected banner output:\n%s", out)
+	}
+}
+
+func TestStartupBannerColorDefaultsOnAndCanBeDisabled(t *testing.T) {
+	colored := New(WithStartupBannerOutput(io.Discard))
+	if !colored.cfg.StartupBanner.Color {
+		t.Fatal("startup banner color should default to enabled")
+	}
+
+	plain := New(WithStartupBannerOutput(io.Discard), WithStartupBannerColor(false))
+	if plain.cfg.StartupBanner.Color {
+		t.Fatal("WithStartupBannerColor(false) should disable startup banner color")
 	}
 }
 

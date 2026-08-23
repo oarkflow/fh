@@ -1,6 +1,6 @@
 # Startup Banner
 
-fh prints a Fiber-style ASCII startup banner when the server starts listening. It is enabled by default, fully configurable, custom-renderable, and can be disabled for machine-readable logging environments.
+fh prints a Fiber-style ASCII startup banner when the server starts listening. It is enabled with color by default, fully configurable, custom-renderable, and can be disabled for machine-readable logging environments.
 
 ## Default
 
@@ -10,6 +10,14 @@ app.Listen(":8080")
 ```
 
 Prints the fh wordmark plus address, PID, Go version, mode, HTTP/2 status, and route count.
+
+Color is enabled by default for apps created with `fh.New()`. To turn it off:
+
+```go
+app := fh.New(fh.WithStartupBannerColor(false))
+```
+
+When color is enabled, fh colorizes the wordmark, borders, labels, URL, mode, and enabled/disabled status values. The URL is also emitted as a terminal hyperlink in terminals that support OSC 8 links.
 
 ## Configuring
 
@@ -31,7 +39,7 @@ app := fh.New(fh.WithStartupBanner(fh.StartupBannerConfig{
 | `Scheme` | Scheme used to build the displayed URL (default: `"http"`) |
 | `Address` | Overrides the listener address shown in the banner |
 | `ASCIIArt` | Overrides the default wordmark; `"-"` hides it |
-| `Color` | Enable ANSI color output (default: `false`, so captured logs stay clean) |
+| `Color` | Enable ANSI color output (default: `true` for `fh.New()`) |
 | `Writer` | Destination for the banner (default: `os.Stdout`) |
 | `Render` | Full custom renderer — receives `StartupBannerData`, returns the string to print |
 | `ExtraLines` | Extra key/value rows appended after the built-in rows |

@@ -1,13 +1,13 @@
 package fh
 
 import (
-	"fmt"
 	"io"
 	"net"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // StartupBannerConfig controls the pretty ASCII startup message shown when the
@@ -84,6 +84,11 @@ func WithStartupBannerDisabled(disabled bool) Option {
 // WithStartupBannerOutput sets the destination for the startup banner.
 func WithStartupBannerOutput(w io.Writer) Option {
 	return func(c *Config) { c.StartupBanner.Writer = w }
+}
+
+// WithStartupBannerColor enables/disables ANSI color in the startup banner.
+func WithStartupBannerColor(enabled bool) Option {
+	return func(c *Config) { c.StartupBanner.Color = enabled }
 }
 
 // WithStartupBannerName sets the displayed application/framework name.
@@ -182,7 +187,7 @@ func RenderStartupBanner(cfg StartupBannerConfig, data StartupBannerData) string
 		}
 		for _, line := range strings.Split(strings.TrimRight(art, "\n"), "\n") {
 			if strings.TrimSpace(line) != "" {
-				lines = append(lines, line)
+				lines = append(lines, startupColor(cfg.Color, startupCyanBold, line))
 			}
 		}
 	}
@@ -232,16 +237,130 @@ func RenderStartupBanner(cfg StartupBannerConfig, data StartupBannerData) string
 	}
 	inner := keyWidth + valWidth + 5
 	border := "+" + strings.Repeat("-", inner) + "+"
-	lines = append(lines, border)
+	lines = append(lines, startupColor(cfg.Color, startupBorder, border))
 	for _, row := range rows {
-		lines = append(lines, fmt.Sprintf("| %-*s : %-*s |", keyWidth, row.Key, valWidth, row.Value))
+		key := startupColor(cfg.Color, startupKey, row.Key)
+		value := startupBannerValue(cfg.Color, row)
+		lines = append(lines,
+			startupColor(cfg.Color, startupBorder, "|")+" "+
+				startupPadRight(key, keyWidth)+" "+
+				startupColor(cfg.Color, startupDivider, ":")+" "+
+				startupPadRight(value, valWidth)+" "+
+				startupColor(cfg.Color, startupBorder, "|"),
+		)
 	}
-	lines = append(lines, border)
-	out := strings.Join(lines, "\n")
-	if cfg.Color {
-		return "\033[36m" + out + "\033[0m"
+	lines = append(lines, startupColor(cfg.Color, startupBorder, border))
+	return strings.Join(lines, "\n")
+}
+
+const (
+	startupReset    = "\033[0m"
+	startupBorder   = "\033[38;5;244m"
+	startupCyanBold = "\033[1;38;5;51m"
+	startupKey      = "\033[38;5;147m"
+	startupDivider  = "\033[38;5;245m"
+	startupValue    = "\033[38;5;255m"
+	startupURLColor = "\033[4;38;5;81m"
+	startupGreen    = "\033[38;5;82m"
+	startupYellow   = "\033[38;5;221m"
+	startupBlue     = "\033[38;5;75m"
+	startupMagenta  = "\033[38;5;213m"
+)
+
+func startupBannerValue(color bool, row StartupBannerLine) string {
+	if !color {
+		return row.Value
 	}
-	return out
+	switch strings.ToLower(row.Key) {
+	case "url":
+		return startupHyperlink(row.Value, startupColor(true, startupURLColor, row.Value))
+	case "mode":
+		switch strings.ToLower(row.Value) {
+		case string(ModeProduction):
+			return startupColor(true, startupGreen, row.Value)
+		case string(ModeDevelopment):
+			return startupColor(true, startupYellow, row.Value)
+		default:
+			return startupColor(true, startupBlue, row.Value)
+		}
+	case "http/2", "reuseport":
+		if strings.EqualFold(row.Value, "enabled") {
+			return startupColor(true, startupGreen, row.Value)
+		}
+		return startupColor(true, startupYellow, row.Value)
+	case "name":
+		return startupColor(true, startupMagenta, row.Value)
+	default:
+		return startupColor(true, startupValue, row.Value)
+	}
+}
+
+func startupColor(enabled bool, code, text string) string {
+	if !enabled || text == "" {
+		return text
+	}
+	return code + text + startupReset
+}
+
+func startupHyperlink(url, text string) string {
+	if strings.TrimSpace(url) == "" {
+		return text
+	}
+	return "\033]8;;" + url + "\033\\" + text + "\033]8;;\033\\"
+}
+
+func startupPadRight(s string, width int) string {
+	if pad := width - startupVisibleWidth(s); pad > 0 {
+		return s + strings.Repeat(" ", pad)
+	}
+	return s
+}
+
+func startupVisibleWidth(s string) int {
+	width := 0
+	for i := 0; i < len(s); {
+		if s[i] == '\033' {
+			i++
+			if i < len(s) && s[i] == ']' {
+				i++
+				for i < len(s) {
+					if s[i] == '\a' {
+						i++
+						break
+					}
+					if s[i] == '\033' && i+1 < len(s) && s[i+1] == '\\' {
+						i += 2
+						break
+					}
+					i++
+				}
+				continue
+			}
+			if i < len(s) && s[i] == '[' {
+				i++
+				for i < len(s) {
+					b := s[i]
+					i++
+					if b >= '@' && b <= '~' {
+						break
+					}
+				}
+				continue
+			}
+			for i < len(s) {
+				b := s[i]
+				i++
+				if b >= '@' && b <= '~' {
+					break
+				}
+			}
+			continue
+		}
+		_, n := utf8.DecodeRuneInString(s[i:])
+		width++
+		i += n
+	}
+	return width
 }
 
 func defaultStartupASCII(name string) string {

@@ -64,6 +64,24 @@ func (s *Session) Flash(key string, value ...any) any {
 	return result
 }
 
+// FlashAll retrieves and consumes all flash data in one atomic operation.
+// The returned map is a snapshot; modifying it does not affect the session.
+// Returns nil when there is no pending flash data.
+func (s *Session) FlashAll() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	flashes, _ := s.Data[flashKey].(map[string]any)
+	if len(flashes) == 0 {
+		return nil
+	}
+	snapshot := make(map[string]any, len(flashes))
+	for k, v := range flashes {
+		snapshot[k] = v
+	}
+	delete(s.Data, flashKey)
+	return snapshot
+}
+
 func (s *Session) Set(key string, value any) {
 	s.mu.Lock()
 	if s.Data == nil {

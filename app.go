@@ -196,6 +196,7 @@ var defaultConfig = Config{
 	Environment:           EnvProduction,
 	ErrorOptions:          ErrorOptions{Environment: EnvProduction},
 	ResourceCheckInterval: 250 * time.Millisecond,
+	StartupBanner:         StartupBannerConfig{Color: true},
 }
 
 const maxServerHeaderCount = 1024
