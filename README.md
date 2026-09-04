@@ -19,7 +19,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 - **Opt-in fail-closed baseline** — `fh.WithSecureByDefault(true)` bounds every protocol input, enables strict parsing, recovery, redaction, and hardened response headers
 - **Template engine** — agnostic interface, any engine implementing `Render(w, name, data, layout...)`
 - **Static file serving** — directory listings, compression, cache control, range requests
-- **Graceful shutdown** — `app.ShutdownWithContext(ctx)` or `app.ListenWithGracefulShutdown(addr)`
+- **Graceful shutdown** — `app.ServeContext(ctx, listener)`, `app.ShutdownWithContext(ctx)`, or `app.ListenWithGracefulShutdown(addr)`
 - **Graceful TLS shutdown** — `app.ListenTLSWithGracefulShutdown(addr, certFile, keyFile)`
 - **Pool-based zero-allocation** — `sync.Pool` for contexts, byte buffers, HPACK decoders
 - **Hardened TLS/mTLS** — TLS 1.3 config builder, verified peer state in request contexts, atomic certificate reload
@@ -349,6 +349,13 @@ signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 defer cancel()
 app.ShutdownWithContext(ctx)
+
+// Context-owned serving for embedded servers and process managers.
+// Canceling ctx drains active connections and closes the listener.
+ln, _ := net.Listen("tcp", ":8080")
+serveCtx, cancel := context.WithCancel(context.Background())
+defer cancel()
+app.ServeContext(serveCtx, ln)
 ```
 
 ## Prefork & Zero-Downtime Restarts

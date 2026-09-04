@@ -1041,12 +1041,32 @@ func (a *App) effectiveShutdownTimeout() time.Duration {
 }
 
 func (a *App) Serve(ln net.Listener) error {
+	return a.ServeContext(context.Background(), ln)
+}
+
+// ServeContext serves ln until it is closed, the application shuts down, or
+// ctx is canceled. Cancellation initiates the same graceful shutdown path as
+// ShutdownWithContext, making it suitable for signal-aware process managers
+// and embedded servers. The context is not used as a per-request deadline.
+func (a *App) ServeContext(ctx context.Context, ln net.Listener) error {
 	if ln == nil {
 		return errors.New("fh: nil listener")
+	}
+	if ctx == nil {
+		return errors.New("fh: nil context")
 	}
 	if err := a.startServing(ln); err != nil {
 		return err
 	}
+	serveDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = a.ShutdownWithContext(ctx)
+		case <-serveDone:
+		}
+	}()
+	defer close(serveDone)
 	a.printStartupBanner(ln)
 	a.logger.Info("listening", "addr", ln.Addr(), "transport", "standard")
 

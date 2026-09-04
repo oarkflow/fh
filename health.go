@@ -3,6 +3,7 @@ package fh
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,7 +56,10 @@ func (a *App) HealthStatus(ctx context.Context) (bool, []HealthCheckResult) {
 	}
 
 	results := make([]HealthCheckResult, len(checks))
-	allOk := true
+	// Each check writes a distinct result slot, but the failure state is shared. Keep the
+	// aggregation atomic so concurrent probes remain race-free without adding
+	// a lock to the (common) result writes.
+	var failed atomic.Bool
 	var wg sync.WaitGroup
 
 	for i, hc := range checks {
@@ -74,7 +78,7 @@ func (a *App) HealthStatus(ctx context.Context) (bool, []HealthCheckResult) {
 					Latency: dur,
 					Error:   err.Error(),
 				}
-				allOk = false
+				failed.Store(true)
 			} else {
 				results[idx] = HealthCheckResult{
 					Name:    c.name,
@@ -85,7 +89,7 @@ func (a *App) HealthStatus(ctx context.Context) (bool, []HealthCheckResult) {
 		}(i, hc)
 	}
 	wg.Wait()
-	return allOk, results
+	return !failed.Load(), results
 }
 
 // HealthCheck registers a health check endpoint at path with configured probes.

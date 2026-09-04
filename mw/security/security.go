@@ -3,9 +3,11 @@ package security
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"github.com/oarkflow/fh"
+	"reflect"
 	"strconv"
 	"strings"
+
+	"github.com/oarkflow/fh"
 )
 
 const CSPNonceLocalKey = "csp_nonce"
@@ -26,11 +28,22 @@ type Config struct {
 	CrossOriginEmbedderPolicy       string
 	ReferrerPolicy                  string
 	PermissionsPolicy               string
+	// Disable* fields make it possible to turn off an individual default while
+	// retaining the rest of the middleware's secure baseline.
+	DisableFrameDeny          bool
+	DisableContentTypeNosniff bool
+	DisableHSTS               bool
 }
 
 var defaultConfig = Config{HSTSMaxAge: 31536000, HSTSIncludeSubDomains: true, FrameDeny: true, ContentTypeNosniff: true, XSSProtection: "0", ReferrerPolicy: "no-referrer", CrossOriginOpenerPolicy: "same-origin", CrossOriginResourcePolicy: "same-origin", PermissionsPolicy: "geolocation=(), microphone=(), camera=(), payment=(), usb=(), magnetometer=(), accelerometer=(), gyroscope=(), interest-cohort=()"}
 
 func mergeConfig(base Config, override Config) Config {
+	// An explicitly supplied empty Config is an intentional opt-out. Keep
+	// security.New() (no arguments) on the secure baseline while making
+	// security.New(Config{}) useful for development and tests.
+	if reflect.DeepEqual(override, Config{}) {
+		return Config{}
+	}
 	if override.ContentSecurityPolicy != "" {
 		base.ContentSecurityPolicy = override.ContentSecurityPolicy
 	}
@@ -75,6 +88,17 @@ func mergeConfig(base Config, override Config) Config {
 	}
 	if override.PermissionsPolicy != "" {
 		base.PermissionsPolicy = override.PermissionsPolicy
+	}
+	if override.DisableFrameDeny {
+		base.FrameDeny = false
+	}
+	if override.DisableContentTypeNosniff {
+		base.ContentTypeNosniff = false
+	}
+	if override.DisableHSTS {
+		base.HSTSMaxAge = 0
+		base.HSTSIncludeSubDomains = false
+		base.HSTSPreload = false
 	}
 	return base
 }
