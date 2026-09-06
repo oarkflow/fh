@@ -14,7 +14,7 @@ import (
 
 const (
 	DefaultHeader   = "X-Request-ID"
-	DefaultLocalKey = "requestID"
+	DefaultLocalKey = "request_id"
 
 	defaultMaxIncomingLen = 128
 )

@@ -15,8 +15,8 @@ func TestPartialConfigPreservesSecureDefaults(t *testing.T) {
 
 func TestInsecureCompatibilityRequiresExplicitOptOut(t *testing.T) {
 	cfg := DefaultConfig
-	merge(&cfg, Config{AllowInsecureCookie: true, AllowMissingOrigin: true})
-	if cfg.CookieSecure || cfg.RequireOriginHeader {
+	merge(&cfg, Config{AllowInsecureCookie: true, AllowMissingOrigin: true, AllowUntrustedOrigin: true})
+	if cfg.CookieSecure || cfg.RequireOriginHeader || !cfg.AllowUntrustedOrigin {
 		t.Fatalf("explicit compatibility opt-out was not applied: %#v", cfg)
 	}
 }

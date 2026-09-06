@@ -12,7 +12,15 @@ import (
 )
 
 func TestListenUnixContextServesAndCleansSocket(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "fh.sock")
+	// Unix-domain socket paths are limited to roughly 104 bytes on macOS.
+	// testing.T.TempDir can exceed that once the test name and random suffix
+	// are included, so use a deliberately short system-temp directory.
+	dir, err := os.MkdirTemp("", "fh-unix-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "fh.sock")
 	app := fh.New(fh.WithStartupBannerDisabled(true))
 	app.Get("/", func(c fh.Ctx) error { return c.SendString("unix") })
 	ctx, cancel := context.WithCancel(context.Background())
@@ -21,7 +29,7 @@ func TestListenUnixContextServesAndCleansSocket(t *testing.T) {
 	go func() { serveErr <- app.ListenUnixContext(ctx, path) }()
 
 	var conn net.Conn
-	var err error
+	err = nil
 	for i := 0; i < 100; i++ {
 		conn, err = net.Dial("unix", path)
 		if err == nil {

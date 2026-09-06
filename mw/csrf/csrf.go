@@ -35,7 +35,11 @@ type Config struct {
 	// AllowMissingOrigin explicitly opts out of the secure origin requirement.
 	// Prefer bypassing CSRF middleware only on authenticated non-browser routes.
 	AllowMissingOrigin bool
-	Next               func(fh.Ctx) bool
+	// AllowUntrustedOrigin skips Origin/Referer matching while still requiring
+	// the double-submit cookie and token. This is intended only for loopback
+	// development behind IDE/browser-preview proxies; never enable in production.
+	AllowUntrustedOrigin bool
+	Next                 func(fh.Ctx) bool
 }
 
 var DefaultConfig = Config{
@@ -70,7 +74,7 @@ func New(config ...Config) fh.HandlerFunc {
 		if safeMethod(c.Method()) {
 			return c.Next()
 		}
-		if !validOrigin(c, trusted, cfg.RequireOriginHeader) {
+		if !cfg.AllowUntrustedOrigin && !validOrigin(c, trusted, cfg.RequireOriginHeader) {
 			return csrfError("Request origin is not allowed")
 		}
 		provided := c.Get(cfg.HeaderName)
@@ -111,6 +115,7 @@ func merge(dst *Config, src Config) {
 	} else if src.RequireOriginHeader {
 		dst.RequireOriginHeader = true
 	}
+	dst.AllowUntrustedOrigin = src.AllowUntrustedOrigin
 	dst.Next = src.Next
 }
 
