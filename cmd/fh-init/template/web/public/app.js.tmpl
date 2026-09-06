@@ -1,0 +1,30 @@
+const output = document.querySelector('#output');
+const profile = document.querySelector('#me');
+let secure;
+const show = value => { output.textContent = JSON.stringify(value, null, 2); };
+document.querySelector('#login').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    const form = new FormData(event.currentTarget);
+    const response = await fetch('/auth/login', { method: 'POST', credentials: 'same-origin', headers: {'content-type': 'application/json'}, body: JSON.stringify(Object.fromEntries(form)) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'login failed');
+    show(result);
+    const configResponse = await fetch('/secure-config.json', { credentials: 'same-origin', cache: 'no-store' });
+    const config = await configResponse.json();
+    const { createSecureFetch } = await import('/wasm/index.js');
+    secure = await createSecureFetch({ ...config, credentials: 'same-origin', clientBuild: 'fh-init-1', deviceName: 'Browser' });
+    profile.hidden = false;
+    show(secure.sessionInfo());
+  } catch (error) {
+    show({error: error instanceof Error ? error.message : String(error)});
+  }
+});
+profile.addEventListener('click', async () => {
+  try {
+    const response = await secure.fetch('/api/me');
+    show(await response.json());
+  } catch (error) {
+    show({error: error instanceof Error ? error.message : String(error)});
+  }
+});

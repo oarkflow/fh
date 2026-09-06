@@ -1,0 +1,59 @@
+package config
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	secureconfig "github.com/oarkflow/config"
+	"github.com/oarkflow/config/providers/env"
+)
+
+type Config struct {
+	Environment string
+	Address    string
+	Origin     string
+	DatabaseURL string
+	SessionSecret []byte
+	LoginUser string
+	LoginPassword string
+}
+
+func Load() (Config, error) {
+	manager, err := secureconfig.Load(context.Background(), secureconfig.WithProviders(env.Provider{
+		Path:      ".env",
+		Prefix:    "APP_",
+		Separator: "__",
+		Lower:     true,
+	}))
+	if err != nil {
+		return Config{}, err
+	}
+	manager.MarkSecret("session_secret", "login_password")
+	values, err := secureconfig.Decode[configValues](manager, "")
+	if err != nil {
+		return Config{}, fmt.Errorf("decode configuration: %w", err)
+	}
+	if len(values.SessionSecret) < 32 {
+		return Config{}, fmt.Errorf("APP_SESSION_SECRET must contain at least 32 bytes")
+	}
+	return Config{
+		Environment: values.Environment,
+		Address: values.Address,
+		Origin: strings.TrimRight(values.Origin, "/"),
+		DatabaseURL: values.DatabaseURL,
+		SessionSecret: []byte(values.SessionSecret),
+		LoginUser: values.LoginUser,
+		LoginPassword: values.LoginPassword,
+	}, nil
+}
+
+type configValues struct {
+	Environment  string `json:"env"`
+	Address      string `json:"addr"`
+	Origin       string `json:"origin"`
+	DatabaseURL  string `json:"database_url"`
+	SessionSecret string `json:"session_secret"`
+	LoginUser    string `json:"login_user"`
+	LoginPassword string `json:"login_password"`
+}

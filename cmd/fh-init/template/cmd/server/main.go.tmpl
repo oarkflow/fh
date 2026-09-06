@@ -1,0 +1,51 @@
+package main
+
+import (
+	"log"
+	"strings"
+
+	"github.com/oarkflow/fh"
+	contriblogger "github.com/oarkflow/fh-contrib/logger"
+	"github.com/oarkflow/fh/mw/securetransport"
+	"github.com/oarkflow/fh/mw/session"
+	secureprotocol "github.com/oarkflow/fh/pkg/securetransport"
+	"github.com/oarkflow/fh/pkg/storage/kv"
+	appauth "__FH_MODULE__/internal/auth"
+	appconfig "__FH_MODULE__/internal/config"
+	appdb "__FH_MODULE__/internal/database"
+	apphttp "__FH_MODULE__/internal/httpapi"
+	"github.com/oarkflow/template"
+	"github.com/oarkflow/zlog"
+	authzmw "github.com/oarkflow/fh-contrib/mw/authz"
+)
+
+func main() {
+	cfg, err := appconfig.Load(); if err != nil { log.Fatal(err) }
+	logger := zlog.NewProduction()
+	appLogger := &contriblogger.ZlogAdapter{Logger: logger}
+	db, err := appdb.Open(cfg.DatabaseURL); if err != nil { appLogger.Error("database startup failed", "error", err); log.Fatal(err) }
+	defer db.Close()
+	engine, err := authzmw.LoadEngineFromAuthzFile("policy.authz"); if err != nil { log.Fatal(err) }
+	secureCookie := strings.HasPrefix(cfg.Origin, "https://")
+	cookieName := "session_id"
+	if secureCookie { cookieName = "__Host-session" }
+	grants := appauth.NewGrantStore()
+	sessions := session.NewSessionManager(kv.NewMemoryStore(), session.SessionSecret(cfg.SessionSecret), session.SessionCookieName(cookieName), session.SessionHTTPOnly(true), session.SessionSecure(secureCookie), session.SessionSameSite(fh.SameSiteStrict), session.SessionPath("/"))
+	view := template.NewSPL("web/templates", ".html").Config(template.SPLConfig{Directory: "web/templates", SSR: true, SecureMode: true})
+	app := fh.NewProduction(fh.WithLogger(appLogger), fh.WithTemplateEngine(view))
+	app.Use(session.New(sessions))
+	transport, err := securetransport.Install(app, securetransport.Config{KeyID: "fh-dev-transport", AllowEphemeralServerKey: true, RequireSecure: true, Protect: func(c fh.Ctx) bool { return strings.HasPrefix(c.Path(), "/api/") }, AllowedOrigins: []string{cfg.Origin}, RequireOrigin: true, AuthorizeDeviceRegistration: func(c fh.Ctx, _ secureprotocol.DeviceRegistrationRequest) (string, error) {
+		principal, ok := appauth.Principal(c)
+		if !ok || !grants.Consume(c.Get(secureprotocol.HeaderDeviceRegistration), principal.ID, session.Get(c).ID) { return "", fh.Forbidden("device registration grant is missing, expired, or already used") }
+		return principal.ID, nil
+	}, ValidateSession: func(c fh.Ctx, secure securetransport.SessionInfo) error {
+		principal, ok := appauth.Principal(c)
+		if !ok || principal.ID != secure.Principal { return fh.Unauthorized("session binding failed") }
+		return nil
+	}})
+	if err != nil { log.Fatal(err) }
+	apphttp.Register(app, cfg, sessions, transport, engine, grants, appLogger)
+	_ = db
+	appLogger.Info("starting server", "addr", cfg.Address)
+	log.Fatal(app.ListenWithGracefulShutdown(cfg.Address))
+}

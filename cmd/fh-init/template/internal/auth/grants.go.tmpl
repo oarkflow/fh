@@ -1,0 +1,28 @@
+package auth
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
+	"sync"
+	"time"
+)
+
+const registrationTTL = 90 * time.Second
+type registrationGrant struct { principal, sessionID string; expiresAt time.Time }
+type GrantStore struct { mu sync.Mutex; grants map[[32]byte]registrationGrant }
+func NewGrantStore() *GrantStore { return &GrantStore{grants: make(map[[32]byte]registrationGrant)} }
+func (s *GrantStore) Issue(principal, sessionID string) (string, error) {
+	var raw [32]byte; if _, err := rand.Read(raw[:]); err != nil { return "", err }
+	now := time.Now(); s.mu.Lock(); defer s.mu.Unlock()
+	for key, grant := range s.grants { if !grant.expiresAt.After(now) { delete(s.grants, key) } }
+	if len(s.grants) >= 10_000 { return "", fmt.Errorf("registration grant capacity exhausted") }
+	s.grants[sha256.Sum256(raw[:])] = registrationGrant{principal: principal, sessionID: sessionID, expiresAt: now.Add(registrationTTL)}
+	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
+}
+func (s *GrantStore) Consume(raw, principal, sessionID string) bool {
+	decoded, err := base64.RawURLEncoding.DecodeString(raw); if err != nil || len(decoded) != 32 { return false }
+	key := sha256.Sum256(decoded); s.mu.Lock(); grant, ok := s.grants[key]; delete(s.grants, key); s.mu.Unlock()
+	return ok && grant.expiresAt.After(time.Now()) && grant.principal == principal && grant.sessionID == sessionID
+}

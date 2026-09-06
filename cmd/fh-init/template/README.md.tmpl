@@ -1,0 +1,20 @@
+# __FH_MODULE__
+
+Complete fh application starter with secure defaults.
+
+## Run
+
+```sh
+cp .env.example .env
+go mod tidy
+go run ./cmd/server
+```
+
+The starter includes `fh` secure-by-default middleware, signed sessions,
+database access through `squealx`, `config` secret loading, structured `zlog`,
+file-backed RBAC through `authz`, SPL server-rendered templates, and the
+secure WASM fetch integration. Replace the development credentials and secret
+values before deployment.
+
+Use `make check` for the application checks and `make wasm` to build the
+secure-fetch client after installing Node.js and TypeScript.

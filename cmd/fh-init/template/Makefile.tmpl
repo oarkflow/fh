@@ -1,0 +1,18 @@
+GO ?= go
+
+.PHONY: check test run wasm
+
+check:
+	$(GO) test ./...
+
+test:
+	$(GO) test ./...
+
+run:
+	$(GO) run ./cmd/server
+
+wasm:
+	@mkdir -p web/wasm
+	GOOS=js GOARCH=wasm CGO_ENABLED=0 $(GO) build -trimpath -buildvcs=false -o web/wasm/securefetch.wasm github.com/oarkflow/fh/wasm/cmd/securefetch
+	@command -v wasm_exec.js >/dev/null 2>&1 || true
+	@echo "Copy wasm_exec.js, secure-fetch.js, storage.js, and index.js from the fh release bundle into web/wasm"

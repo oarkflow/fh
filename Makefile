@@ -35,12 +35,19 @@ endif
 WASM_TRUST_LDFLAGS := -X main.embeddedTrustedOrigin=$(WASM_TRUSTED_ORIGIN) -X main.embeddedTransportPublicKey=$(WASM_TRUSTED_TRANSPORT_KEY) -X main.embeddedTransportKeyID=$(WASM_TRUSTED_TRANSPORT_KEY_ID) -X main.embeddedResponseSigningPublicKey=$(WASM_TRUSTED_RESPONSE_KEY) -X main.embeddedResponseSigningKeyID=$(WASM_TRUSTED_RESPONSE_KEY_ID)
 endif
 
-.PHONY: all test secure-test kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-clean clean
+.PHONY: all test check template-check secure-test kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-clean clean
 
 all: test wasm
 
 test:
 	$(GO) test ./...
+
+check: test template-check
+
+template-check:
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+		$(GO) run ./cmd/fh-init -module example.com/fh/generated -dir "$$tmp"; \
+		(cd "$$tmp" && $(GO) mod tidy && $(GO) test ./...)
 
 secure-test:
 	$(GO) test ./pkg/securetransport ./mw/securetransport

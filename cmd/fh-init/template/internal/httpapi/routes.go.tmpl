@@ -1,0 +1,37 @@
+package httpapi
+
+import (
+	"encoding/json"
+
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/session"
+	"github.com/oarkflow/fh/mw/securetransport"
+	"github.com/oarkflow/fh/mw/security"
+	"github.com/oarkflow/authz"
+	appauth "__FH_MODULE__/internal/auth"
+	appconfig "__FH_MODULE__/internal/config"
+)
+
+func Register(app *fh.App, cfg appconfig.Config, sessions *session.SessionManager, transport *securetransport.Transport, engine *authz.Engine, grants *appauth.GrantStore, log fh.Logger) {
+	app.Use(security.New(security.Config{ContentSecurityPolicy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'", HSTSMaxAge: 31536000, FrameDeny: true, ContentTypeNosniff: true, ReferrerPolicy: "no-referrer"}))
+	app.Static("/wasm", "web/wasm", fh.StaticConfig{MaxAge: 31536000})
+	app.Static("/", "web/public", fh.StaticConfig{CacheDuration: 1})
+	app.Post("/auth/login", func(c fh.Ctx) error {
+		user, password, err := appauth.DecodeLogin(c); if err != nil { return err }
+		if err := appauth.Login(c, sessions, user, password, cfg.LoginUser, cfg.LoginPassword); err != nil { return err }
+		return c.JSON(fh.Map{"authenticated": true})
+	})
+	app.Post("/auth/logout", func(c fh.Ctx) error { return sessions.Destroy(c, session.Get(c)) })
+	app.Get("/secure-config.json", func(c fh.Ctx) error {
+		principal, ok := appauth.Principal(c)
+		if !ok { return fh.Unauthorized("login required") }
+		grant, err := grants.Issue(principal.ID, session.Get(c).ID)
+		if err != nil { return fh.NewHTTPError(fh.StatusServiceUnavailable, "GRANT_UNAVAILABLE", "registration grant unavailable") }
+		return c.JSON(fh.Map{"baseURL": cfg.Origin, "pinnedServerKey": transport.PublicKeyBase64(), "pinnedServerKeyID": transport.KeyID(), "registrationToken": grant, "wasmURL": "/wasm/securefetch.wasm", "wasmExecURL": "/wasm/wasm_exec.js", "requireEmbeddedTrust": false, "requireAssetIntegrity": false})
+	})
+	api := app.Group("/api", appauth.Require)
+	api.Use(appauth.PolicyMiddleware(engine))
+	api.Get("/me", func(c fh.Ctx) error { p, _ := appauth.Principal(c); return c.JSON(fh.Map{"userID": p.ID, "roles": p.Roles}) })
+	api.Post("/echo", func(c fh.Ctx) error { var body map[string]any; if err := json.Unmarshal(c.BodyCopy(), &body); err != nil { return fh.NewHTTPError(fh.StatusBadRequest, "INVALID_JSON", "invalid JSON") }; return c.JSON(fh.Map{"accepted": true, "body": body}) })
+	_ = log
+}

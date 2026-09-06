@@ -1,0 +1,56 @@
+package auth
+
+import (
+	"crypto/subtle"
+	"encoding/json"
+
+	"github.com/oarkflow/authz"
+	authzmw "github.com/oarkflow/fh-contrib/mw/authz"
+	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/session"
+)
+
+const userKey = "authenticated_user_id"
+
+func Login(c fh.Ctx, manager *session.SessionManager, username, password, expectedUser, expectedPassword string) error {
+	if subtle.ConstantTimeCompare([]byte(username), []byte(expectedUser)) != 1 || subtle.ConstantTimeCompare([]byte(password), []byte(expectedPassword)) != 1 {
+		return fh.Unauthorized("invalid credentials")
+	}
+	web := session.Get(c)
+	web.Set(userKey, username)
+	web.Set("roles", []string{"admin"})
+	return manager.Regenerate(c, web)
+}
+
+func Principal(c fh.Ctx) (fh.Principal, bool) {
+	web := session.Get(c)
+	user, _ := web.Get(userKey).(string)
+	if user == "" { return fh.Principal{}, false }
+	p := fh.Principal{ID: user, Subject: user, Type: "user", Roles: []string{"admin"}, AuthMethod: "session"}
+	fh.SetPrincipal(c, p)
+	return p, true
+}
+
+func Require(c fh.Ctx) error {
+	if _, ok := Principal(c); !ok { return fh.Unauthorized("login required") }
+	return c.Next()
+}
+
+func PolicyMiddleware(engine *authz.Engine) fh.HandlerFunc {
+	return authzmw.FHWithConfig(authzmw.FHConfig{
+		Engine: engine,
+		Subject: authzmw.SubjectFromPrincipal(),
+		Action: authzmw.ActionFromMethod(),
+		Resource: authzmw.ResourceFromRoute("api", ""),
+		Environment: authzmw.EnvironmentFromRequest(),
+		OnDenied: authzmw.FHDefaultDeniedHandler,
+		OnUnauthenticated: authzmw.FHDefaultUnauthenticatedHandler,
+		OnError: authzmw.FHDefaultErrorHandler,
+	})
+}
+
+func DecodeLogin(c fh.Ctx) (string, string, error) {
+	var input struct { Username string `json:"username"`; Password string `json:"password"` }
+	if err := json.Unmarshal(c.BodyCopy(), &input); err != nil { return "", "", fh.NewHTTPError(fh.StatusBadRequest, "INVALID_LOGIN", "invalid login request") }
+	return input.Username, input.Password, nil
+}
