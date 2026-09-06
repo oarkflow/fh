@@ -30,6 +30,17 @@ type dummyAddr string
 func (a dummyAddr) Network() string { return string(a) }
 func (a dummyAddr) String() string  { return string(a) }
 
+type h2BufferConn struct {
+	bytes.Buffer
+}
+
+func (h2BufferConn) Close() error                     { return nil }
+func (h2BufferConn) LocalAddr() net.Addr              { return dummyAddr("local") }
+func (h2BufferConn) RemoteAddr() net.Addr             { return dummyAddr("remote") }
+func (h2BufferConn) SetDeadline(time.Time) error      { return nil }
+func (h2BufferConn) SetReadDeadline(time.Time) error  { return nil }
+func (h2BufferConn) SetWriteDeadline(time.Time) error { return nil }
+
 func newTestH2Conn(t *testing.T) *h2Conn {
 	t.Helper()
 	app := &App{}
@@ -38,6 +49,120 @@ func newTestH2Conn(t *testing.T) *h2Conn {
 	app.cfg.MaxRequestBodySize = 1 << 20
 	app.cfg.WriteTimeout = 250 * time.Millisecond
 	return newH2Conn(app, h2discardConn{})
+}
+
+func TestH2PushPromiseFragmentation(t *testing.T) {
+	conn := &h2BufferConn{}
+	app := &App{}
+	app.cfg.MaxConcurrentStreams = 16
+	h := newH2Conn(app, conn)
+	h.peerMaxFrame.Store(16)
+	r := &h2Response{conn: h, stream: &h2Stream{id: 1, authority: "example.test"}}
+
+	if !r.pushPromise("/assets/app.js", "GET", map[string]string{
+		"x-one": strings.Repeat("a", 32),
+		"x-two": strings.Repeat("b", 32),
+	}) {
+		t.Fatal("push promise was rejected")
+	}
+
+	raw := conn.Bytes()
+	if len(raw) < 9 {
+		t.Fatalf("short frame output: %d bytes", len(raw))
+	}
+	offset := 0
+	frames := 0
+	for offset < len(raw) {
+		if len(raw)-offset < 9 {
+			t.Fatalf("truncated frame header at %d", offset)
+		}
+		length := int(raw[offset])<<16 | int(raw[offset+1])<<8 | int(raw[offset+2])
+		if length > 16 || offset+9+length > len(raw) {
+			t.Fatalf("invalid frame length %d at %d", length, offset)
+		}
+		typ, flags := raw[offset+3], raw[offset+4]
+		if frames == 0 {
+			if typ != h2PushPromise || length < 4 {
+				t.Fatalf("first frame = type %d, length %d", typ, length)
+			}
+			if binary.BigEndian.Uint32(raw[offset+9:offset+13]) != 2 {
+				t.Fatalf("promised stream id = %d", binary.BigEndian.Uint32(raw[offset+9:offset+13]))
+			}
+			if flags&h2FlagEndHeaders != 0 {
+				t.Fatal("fragmented PUSH_PROMISE ended its headers too early")
+			}
+		} else if typ != h2Continuation {
+			t.Fatalf("frame %d type = %d, want CONTINUATION", frames, typ)
+		}
+		if offset+9+length == len(raw) && flags&h2FlagEndHeaders == 0 {
+			t.Fatal("final header fragment omitted END_HEADERS")
+		}
+		offset += 9 + length
+		frames++
+	}
+	if frames < 2 {
+		t.Fatalf("push promise was not fragmented: %d frame(s)", frames)
+	}
+}
+
+func TestH2PushStreamStateIsReleasedOnFinish(t *testing.T) {
+	h := newTestH2Conn(t)
+	h.pushState.mu.Lock()
+	h.pushState.streams[2] = true
+	h.pushState.mu.Unlock()
+	h.mu.Lock()
+	h.streams[2] = &h2Stream{id: 2}
+	h.mu.Unlock()
+
+	(&h2Response{conn: h, stream: &h2Stream{id: 2}}).finish()
+
+	h.pushState.mu.Lock()
+	_, retained := h.pushState.streams[2]
+	h.pushState.mu.Unlock()
+	if retained {
+		t.Fatal("completed push stream remained counted")
+	}
+}
+
+func TestH2PushStreamStateIsReleasedOnReset(t *testing.T) {
+	h := newTestH2Conn(t)
+	h.pushState.mu.Lock()
+	h.pushState.streams[2] = true
+	h.pushState.mu.Unlock()
+	h.mu.Lock()
+	h.streams[2] = &h2Stream{id: 2}
+	h.mu.Unlock()
+
+	h.resetStream(2)
+
+	h.pushState.mu.Lock()
+	_, retained := h.pushState.streams[2]
+	h.pushState.mu.Unlock()
+	if retained {
+		t.Fatal("reset push stream remained counted")
+	}
+}
+
+func TestH2PushLimitReservesConcurrentPromise(t *testing.T) {
+	h := newTestH2Conn(t)
+	h.pushState.maxPush = 1
+	h.peerMaxConcurrentStreams.Store(1)
+	h.mu.Lock()
+	h.streams[1] = &h2Stream{id: 1}
+	h.mu.Unlock()
+
+	if got := h.allocatePushID(); got != 2 {
+		t.Fatalf("first push stream id = %d, want 2", got)
+	}
+	if got := h.allocatePushID(); got != 0 {
+		t.Fatalf("second concurrent push stream id = %d, want rejection", got)
+	}
+
+	h.releasePushReservation()
+	if got := h.allocatePushID(); got != 4 {
+		t.Fatalf("push stream id after releasing reservation = %d, want 4", got)
+	}
+	h.releasePushReservation()
 }
 
 func mustH2ErrCode(t *testing.T, err error, want uint32) {
@@ -97,6 +222,34 @@ func TestH2HeaderFragmentPaddingAndPriority(t *testing.T) {
 		binary.BigEndian.PutUint32(p[:4], 1)
 		_, err := headerFragment(h2Frame{streamID: 1, flags: h2FlagPriority, payload: p[:]})
 		mustH2ErrCode(t, err, h2ProtocolError)
+	})
+}
+
+func TestH2HeadersOnClosedStreamAreConnectionErrors(t *testing.T) {
+	block := encodeHeaderBlock(t,
+		hpack.HeaderField{Name: ":method", Value: "GET"},
+		hpack.HeaderField{Name: ":path", Value: "/"},
+		hpack.HeaderField{Name: ":scheme", Value: "https"},
+		hpack.HeaderField{Name: ":authority", Value: "example.test"},
+	)
+
+	t.Run("removed stream", func(t *testing.T) {
+		h := newTestH2Conn(t)
+		h.lastStream = 1
+		mustH2ErrCode(t, h.handleHeaders(h2Frame{
+			typ: h2Headers, flags: h2FlagEndHeaders, streamID: 1, payload: block,
+		}), h2ErrStreamClosed)
+	})
+
+	t.Run("closed state", func(t *testing.T) {
+		h := newTestH2Conn(t)
+		s := &h2Stream{id: 1}
+		s.state.Store(int32(stateClosed))
+		h.streams[1] = s
+		h.lastStream = 1
+		mustH2ErrCode(t, h.handleHeaders(h2Frame{
+			typ: h2Headers, flags: h2FlagEndHeaders, streamID: 1, payload: block,
+		}), h2ErrStreamClosed)
 	})
 }
 

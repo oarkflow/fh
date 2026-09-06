@@ -4,13 +4,15 @@ import "sync/atomic"
 
 // ServerMetrics contains real-time server runtime metrics.
 type ServerMetrics struct {
-	ActiveConns   int64  `json:"active_conns"`
-	TotalRequests uint64 `json:"total_requests"`
-	TotalErrors   uint64 `json:"total_errors"`
-	Status2xx     uint64 `json:"status_2xx"`
-	Status3xx     uint64 `json:"status_3xx"`
-	Status4xx     uint64 `json:"status_4xx"`
-	Status5xx     uint64 `json:"status_5xx"`
+	ActiveConns          int64  `json:"active_conns"`
+	TotalRequests        uint64 `json:"total_requests"`
+	TotalErrors          uint64 `json:"total_errors"`
+	Status2xx            uint64 `json:"status_2xx"`
+	Status3xx            uint64 `json:"status_3xx"`
+	Status4xx            uint64 `json:"status_4xx"`
+	Status5xx            uint64 `json:"status_5xx"`
+	TotalDurationNS      uint64 `json:"total_duration_ns"`
+	MaxRequestDurationNS uint64 `json:"max_request_duration_ns"`
 }
 
 type metricsTracker struct {
@@ -21,10 +23,19 @@ type metricsTracker struct {
 	status3xx     atomic.Uint64
 	status4xx     atomic.Uint64
 	status5xx     atomic.Uint64
+	totalDuration atomic.Uint64
+	maxDuration   atomic.Uint64
 }
 
-func (m *metricsTracker) recordRequest(status int) {
+func (m *metricsTracker) recordRequest(status int, durationNS uint64) {
 	m.totalRequests.Add(1)
+	m.totalDuration.Add(durationNS)
+	for {
+		max := m.maxDuration.Load()
+		if durationNS <= max || m.maxDuration.CompareAndSwap(max, durationNS) {
+			break
+		}
+	}
 	switch {
 	case status >= 200 && status < 300:
 		m.status2xx.Add(1)
@@ -41,12 +52,14 @@ func (m *metricsTracker) recordRequest(status int) {
 
 func (m *metricsTracker) snapshot() ServerMetrics {
 	return ServerMetrics{
-		ActiveConns:   m.activeConns.Load(),
-		TotalRequests: m.totalRequests.Load(),
-		TotalErrors:   m.totalErrors.Load(),
-		Status2xx:     m.status2xx.Load(),
-		Status3xx:     m.status3xx.Load(),
-		Status4xx:     m.status4xx.Load(),
-		Status5xx:     m.status5xx.Load(),
+		ActiveConns:          m.activeConns.Load(),
+		TotalRequests:        m.totalRequests.Load(),
+		TotalErrors:          m.totalErrors.Load(),
+		Status2xx:            m.status2xx.Load(),
+		Status3xx:            m.status3xx.Load(),
+		Status4xx:            m.status4xx.Load(),
+		Status5xx:            m.status5xx.Load(),
+		TotalDurationNS:      m.totalDuration.Load(),
+		MaxRequestDurationNS: m.maxDuration.Load(),
 	}
 }

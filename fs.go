@@ -20,9 +20,13 @@ import (
 
 const indexFileName = "index.html"
 
+const streamCompressionThreshold = 64 << 10
+const defaultMaxStaticRanges = 16
+
 // DefaultStaticConfig is the default configuration for Static and StaticFS.
 var DefaultStaticConfig = StaticConfig{
-	Index: "index.html",
+	Index:     "index.html",
+	MaxRanges: defaultMaxStaticRanges,
 }
 
 // StaticConfig configures static file serving behavior.
@@ -75,6 +79,10 @@ type StaticConfig struct {
 	// When the client accepts gzip, fh checks for <path>.gz before <path>.
 	// The original Content-Type is preserved and Content-Encoding is set.
 	PreCompressed bool
+
+	// MaxRanges limits the number of byte ranges accepted in one request.
+	// Zero uses the safe default of 16 ranges.
+	MaxRanges int
 }
 
 // indexFiles returns the ordered list of index filenames to try.
@@ -125,6 +133,9 @@ func (a *App) StaticFS(prefix string, filesystem fs.FS, config ...StaticConfig) 
 }
 
 func (a *App) addStatic(prefix string, filesystem fs.FS, cfg StaticConfig) {
+	if cfg.MaxRanges <= 0 {
+		cfg.MaxRanges = defaultMaxStaticRanges
+	}
 	fsc := &staticFS{
 		fs:    filesystem,
 		cfg:   cfg,
@@ -179,6 +190,9 @@ func (g *Group) StaticFS(prefix string, filesystem fs.FS, config ...StaticConfig
 }
 
 func (g *Group) addStatic(prefix string, filesystem fs.FS, cfg StaticConfig) {
+	if cfg.MaxRanges <= 0 {
+		cfg.MaxRanges = defaultMaxStaticRanges
+	}
 	fsc := &staticFS{
 		fs:    filesystem,
 		cfg:   cfg,
@@ -303,11 +317,6 @@ func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
 		}
 	}
 
-	data, err := fs.ReadFile(s.fs, upath)
-	if err != nil {
-		return c.Status(500).SendString("Internal Server Error")
-	}
-
 	mimeType := mime.TypeByExtension(path.Ext(upath))
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
@@ -329,40 +338,44 @@ func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
 
 	c.Set("Accept-Ranges", "bytes")
 
-	fileSize := len(data)
+	fileSize := info.Size()
 	if rangeHeader := c.Get("Range"); rangeHeader != "" && !s.cfg.Compress {
-		if start, end, ok := parseRange(rangeHeader, fileSize); ok {
+		if strings.HasPrefix(rangeHeader, "bytes=") {
+			ranges, rangeErr := parseRangeHeader(rangeHeader, fileSize)
+			if rangeErr != nil {
+				c.Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
+				return c.Status(416).SendStatus(416)
+			}
+			if len(ranges) > s.cfg.MaxRanges {
+				c.Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
+				return c.Status(416).SendStatus(416)
+			}
 			ifRange := c.Get("If-Range")
 			if ifRange == "" || ifRange == fi.etag || ifRange == info.ModTime().UTC().Format(httpTimeFormat) {
-				data = data[start:end]
 				c.Status(206)
-				c.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end-1, fileSize))
-				return c.SendBytes(data)
+				if len(ranges) == 1 {
+					start, end := ranges[0].Start, ranges[0].End
+					c.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
+					return streamStaticFileRange(c, s.fs, upath, start, end-start+1)
+				}
+				return streamStaticFileRanges(c, s.fs, upath, mimeType, fileSize, ranges, info.ModTime())
 			}
-		} else if strings.HasPrefix(rangeHeader, "bytes=") {
-			c.Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
-			return c.Status(416).SendStatus(416)
 		}
 	}
 
 	// Pre-compressed sidecar serving: check for .br / .gz sidecar files
 	// before falling back to on-the-fly gzip compression.
 	if s.cfg.PreCompressed {
-		ae := c.Get("Accept-Encoding")
-		if strings.Contains(ae, "br") {
-			brPath := upath + ".br"
-			if brData, err2 := fs.ReadFile(s.fs, brPath); err2 == nil {
-				c.Set("Content-Encoding", "br")
-				c.Append("Vary", "Accept-Encoding")
-				return c.SendBytes(brData)
+		if encoding := preferredStaticEncoding(c.Get("Accept-Encoding")); encoding != "" {
+			suffix := encoding
+			if encoding == "gzip" {
+				suffix = "gz"
 			}
-		}
-		if strings.Contains(ae, "gzip") {
-			gzPath := upath + ".gz"
-			if gzData, err2 := fs.ReadFile(s.fs, gzPath); err2 == nil {
-				c.Set("Content-Encoding", "gzip")
+			compressedPath := upath + "." + suffix
+			if compressedInfo, err2 := fs.Stat(s.fs, compressedPath); err2 == nil && !compressedInfo.IsDir() {
+				c.Set("Content-Encoding", encoding)
 				c.Append("Vary", "Accept-Encoding")
-				return c.SendBytes(gzData)
+				return streamStaticFile(c, s.fs, compressedPath, compressedInfo.Size())
 			}
 		}
 	}
@@ -370,6 +383,15 @@ func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
 	if s.cfg.Compress && isCompressible(mimeType) {
 		ae := c.Get("Accept-Encoding")
 		if acceptsGzip(ae) {
+			if info.Size() >= streamCompressionThreshold && canStreamStaticResponse(c) {
+				c.Set("Content-Encoding", "gzip")
+				c.Append("Vary", "Accept-Encoding")
+				return streamGzipStaticFile(c, s.fs, upath)
+			}
+			data, err := fs.ReadFile(s.fs, upath)
+			if err != nil {
+				return c.Status(500).SendString("Internal Server Error")
+			}
 			c.Set("Content-Encoding", "gzip")
 			c.Append("Vary", "Accept-Encoding")
 			c.AddBodyTransform(func(body []byte) ([]byte, error) {
@@ -382,10 +404,115 @@ func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
 				fsGzipPool.Put(w)
 				return buf.Bytes(), nil
 			})
+			return c.SendBytes(data)
 		}
 	}
 
-	return c.SendBytes(data)
+	// The common uncompressed path streams directly from the filesystem (or
+	// embedded fs) and retains a known Content-Length, avoiding an allocation
+	// proportional to the asset size and keeping HTTP/1.1 connections reusable.
+	return streamStaticFile(c, s.fs, upath, info.Size())
+}
+
+func streamStaticFile(c Ctx, filesystem fs.FS, path string, size int64) error {
+	file, err := filesystem.Open(path)
+	if err != nil {
+		return c.Status(500).SendString("Internal Server Error")
+	}
+	defer file.Close()
+	return c.SendStreamLength(file, size)
+}
+
+// streamStaticFileRange streams only the selected byte range. Files that
+// implement io.Seeker (including os.File) jump directly to the offset;
+// generic fs.FS implementations fall back to discarding the prefix without
+// buffering the complete file.
+func streamStaticFileRange(c Ctx, filesystem fs.FS, path string, start, size int64) error {
+	file, err := filesystem.Open(path)
+	if err != nil {
+		return c.Status(500).SendString("Internal Server Error")
+	}
+	defer file.Close()
+	if seeker, ok := file.(io.Seeker); ok {
+		if _, err := seeker.Seek(start, io.SeekStart); err != nil {
+			return c.Status(500).SendString("Internal Server Error")
+		}
+	} else if start > 0 {
+		if _, err := io.CopyN(io.Discard, file, start); err != nil {
+			return c.Status(500).SendString("Internal Server Error")
+		}
+	}
+	return c.SendStreamLength(io.LimitReader(file, size), size)
+}
+
+// streamStaticFileRanges writes a bounded multipart/byteranges response. The
+// file is opened once and each segment is copied directly to the response, so
+// even a large multi-range request never materializes the representation.
+func streamStaticFileRanges(c Ctx, filesystem fs.FS, path, mimeType string, total int64, ranges []ByteRange, modTime time.Time) error {
+	boundary := "fh-range-" + strconv.FormatInt(total, 16) + "-" + strconv.FormatInt(modTime.UnixNano(), 16)
+	c.Type("multipart/byteranges; boundary=" + boundary)
+	return c.Stream(func(w *StreamWriter) error {
+		if w.discard {
+			return nil
+		}
+		file, err := filesystem.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		var scratch [32 << 10]byte
+		for _, r := range ranges {
+			header := "--" + boundary + "\r\nContent-Type: " + mimeType + "\r\nContent-Range: bytes " + strconv.FormatInt(r.Start, 10) + "-" + strconv.FormatInt(r.End, 10) + "/" + strconv.FormatInt(total, 10) + "\r\n\r\n"
+			if _, err := w.Write([]byte(header)); err != nil {
+				return err
+			}
+			if seeker, ok := file.(io.Seeker); ok {
+				if _, err := seeker.Seek(r.Start, io.SeekStart); err != nil {
+					return err
+				}
+			} else if r.Start > 0 {
+				if _, err := io.CopyN(io.Discard, file, r.Start); err != nil {
+					return err
+				}
+			}
+			if _, err := io.CopyBuffer(w, io.LimitReader(file, r.End-r.Start+1), scratch[:]); err != nil {
+				return err
+			}
+			if _, err := w.Write([]byte("\r\n")); err != nil {
+				return err
+			}
+		}
+		_, err = w.Write([]byte("--" + boundary + "--\r\n"))
+		return err
+	})
+}
+
+func canStreamStaticResponse(c Ctx) bool {
+	dc, ok := c.(*DefaultCtx)
+	return ok && dc.bodyTransform == nil && !dc.captureResponseBody
+}
+
+func streamGzipStaticFile(c Ctx, filesystem fs.FS, path string) error {
+	return c.Stream(func(w *StreamWriter) error {
+		if w.discard {
+			return nil
+		}
+		file, err := filesystem.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		gzipWriter := fsGzipPool.Get().(*gzip.Writer)
+		gzipWriter.Reset(w)
+		_, copyErr := io.Copy(gzipWriter, file)
+		closeErr := gzipWriter.Close()
+		gzipWriter.Reset(io.Discard)
+		fsGzipPool.Put(gzipWriter)
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
 }
 
 // parseRange parses a single Range header value in the form "bytes=start-end".
@@ -620,45 +747,60 @@ func (s *staticFS) fileInfo(upath string, info fs.FileInfo) cacheEntry {
 // ── Gzip detection ──────────────────────────────────────────────────────────
 
 func acceptsGzip(header string) bool {
+	return encodingQuality(header, "gzip") > 0
+}
+
+// preferredStaticEncoding returns the highest-quality supported sidecar
+// encoding. Brotli wins ties because it generally produces smaller assets.
+// An explicit token always overrides a wildcard, including q=0.
+func preferredStaticEncoding(header string) string {
+	br := encodingQuality(header, "br")
+	gzip := encodingQuality(header, "gzip")
+	if br <= 0 && gzip <= 0 {
+		return ""
+	}
+	if br >= gzip {
+		return "br"
+	}
+	return "gzip"
+}
+
+func encodingQuality(header, encoding string) float64 {
 	if header == "" {
-		return false
+		return 0
 	}
-	i := 0
-	for i < len(header) {
-		for i < len(header) && (header[i] == ',' || header[i] == ' ') {
-			i++
+	var explicit, wildcard float64
+	var hasExplicit, hasWildcard bool
+	for _, item := range strings.Split(header, ",") {
+		parts := strings.Split(item, ";")
+		token := strings.TrimSpace(parts[0])
+		if token == "" {
+			continue
 		}
-		if i >= len(header) {
-			break
-		}
-		start := i
-		for i < len(header) && header[i] != ',' && header[i] != ' ' && header[i] != ';' {
-			i++
-		}
-		token := header[start:i]
-
-		qZero := false
-		for i < len(header) && header[i] != ',' {
-			if header[i] == ';' {
-				j := i + 1
-				for j < len(header) && header[j] == ' ' {
-					j++
-				}
-				if j+3 <= len(header) && (header[j] == 'q' || header[j] == 'Q') && header[j+1] == '=' && header[j+2] == '0' {
-					qZero = true
-				}
+		quality := 1.0
+		for _, parameter := range parts[1:] {
+			key, value, ok := strings.Cut(strings.TrimSpace(parameter), "=")
+			if !ok || !strings.EqualFold(strings.TrimSpace(key), "q") {
+				continue
 			}
-			i++
+			parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+			if err != nil || parsed < 0 || parsed > 1 {
+				quality = 0
+			} else {
+				quality = parsed
+			}
 		}
-
-		if !qZero {
-			if strings.EqualFold(token, "gzip") {
-				return true
-			}
-			if len(token) == 1 && token[0] == '*' {
-				return true
-			}
+		if token == "*" {
+			wildcard, hasWildcard = quality, true
+		} else if strings.EqualFold(token, encoding) {
+			explicit, hasExplicit = quality, true
 		}
 	}
-	return false
+	if hasExplicit {
+		return explicit
+	}
+	if hasWildcard {
+		return wildcard
+	}
+	return 0
 }

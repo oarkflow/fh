@@ -8,74 +8,53 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-type User struct {
+type user struct {
 	ID   int    `json:"id"`
 	Name string `json:"name"`
 }
 
-var users []User
+var users = benchmarkUsers()
 
-func init() {
-	users = make([]User, 100)
-	for i := 0; i < 100; i++ {
-		users[i] = User{ID: i + 1, Name: "User " + strconv.Itoa(i+1)}
+func benchmarkUsers() []user {
+	result := make([]user, 100)
+	for i := range result {
+		result[i] = user{ID: i + 1, Name: "User " + strconv.Itoa(i+1)}
 	}
+	return result
+}
+
+func writeJSON(ctx *fasthttp.RequestCtx, value any) {
+	ctx.SetContentType("application/json")
+	body, err := json.Marshal(value)
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		return
+	}
+	ctx.SetBody(body)
 }
 
 func requestHandler(ctx *fasthttp.RequestCtx) {
-	path := string(ctx.Path())
-	method := string(ctx.Method())
-
+	path := ctx.Path()
 	switch {
-	case method == "GET" && string(path) == "/plaintext":
+	case string(path) == "/plaintext" && ctx.IsGet():
 		ctx.SetBodyString("Hello, World!")
-
-	case method == "GET" && string(path) == "/json":
-		ctx.SetContentType("application/json")
-		body, _ := json.Marshal(map[string]string{"message": "Hello, World!"})
-		ctx.SetBody(body)
-
-	case method == "GET" && len(path) > 7 && path[:7] == "/users/":
-		id := path[7:]
-		ctx.SetContentType("application/json")
-		body, _ := json.Marshal(User{Name: "User " + id})
-		ctx.SetBody(body)
-
-	case method == "GET" && string(path) == "/search":
-		q := string(ctx.QueryArgs().Peek("q"))
-		ctx.SetContentType("application/json")
-		body, _ := json.Marshal(map[string]string{"query": q})
-		ctx.SetBody(body)
-
-	case method == "POST" && string(path) == "/echo":
-		ctx.SetContentType("application/json")
+	case string(path) == "/json" && ctx.IsGet():
+		writeJSON(ctx, map[string]string{"message": "Hello, World!"})
+	case len(path) > len("/users/") && string(path[:len("/users/")]) == "/users/" && ctx.IsGet():
+		writeJSON(ctx, user{Name: "User " + string(path[len("/users/"):])})
+	case string(path) == "/search" && ctx.IsGet():
+		writeJSON(ctx, map[string]string{"query": string(ctx.QueryArgs().Peek("q"))})
+	case string(path) == "/echo" && ctx.IsPost():
 		var value map[string]any
 		if err := json.Unmarshal(ctx.PostBody(), &value); err != nil {
-			ctx.SetStatusCode(400)
+			ctx.SetStatusCode(fasthttp.StatusBadRequest)
 			return
 		}
-		body, _ := json.Marshal(value)
-		ctx.SetBody(body)
-
-	case method == "GET" && string(path) == "/users":
-		ctx.SetContentType("application/json")
-		body, _ := json.Marshal(users)
-		ctx.SetBody(body)
-
-	case method == "GET" && path == "/methods/get",
-		method == "HEAD" && path == "/methods/head",
-		method == "POST" && path == "/methods/post",
-		method == "PUT" && path == "/methods/put",
-		method == "PATCH" && path == "/methods/patch",
-		method == "DELETE" && path == "/methods/delete",
-		method == "OPTIONS" && path == "/methods/options",
-		method == "CONNECT" && path == "/methods/connect",
-		method == "TRACE" && path == "/methods/trace",
-		method == "QUERY" && path == "/methods/query":
-		ctx.SetBodyString("OK")
-
+		writeJSON(ctx, value)
+	case string(path) == "/users" && ctx.IsGet():
+		writeJSON(ctx, users)
 	default:
-		ctx.SetStatusCode(404)
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		ctx.SetBodyString("Not Found")
 	}
 }
@@ -88,5 +67,5 @@ func main() {
 		NoDefaultDate:         true,
 		NoDefaultServerHeader: true,
 	}
-	log.Fatal(server.ListenAndServe(":3004"))
+	log.Fatal(server.ListenAndServe("127.0.0.1:3004"))
 }

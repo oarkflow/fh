@@ -10,6 +10,12 @@ bytes := c.Body()        // returns buffer slice (invalid after handler returns)
 bytes := c.BodyCopy()    // safe copy
 bytes := c.BodyRaw()     // raw bytes before any processing
 
+// Incremental upload consumption (enable with fh.WithStreamRequestBody(true))
+err := c.StreamBody(func(r io.Reader) error {
+    _, err := io.Copy(destination, r)
+    return err
+})
+
 // Auto-detect and decode based on Content-Type
 var user User
 c.BodyParser(&user)

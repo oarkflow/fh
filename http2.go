@@ -149,6 +149,14 @@ type h2Stream struct {
 	trailers         []Header
 	trailerMu        sync.Mutex
 	body             []byte
+	bodyMu           sync.Mutex
+	bodyCond         *sync.Cond
+	bodyChunks       [][]byte
+	bodyChunkOffset  int
+	bodyQueued       int
+	bodyReceived     int
+	bodyEOF          bool
+	bodyErr          error
 	sendWindow       int64
 	recvWindow       int64
 	recvWindowAccum  int64
@@ -175,7 +183,7 @@ type h2Response struct {
 	trailers []Header
 }
 
-func newH2Conn(app *App, conn net.Conn) *h2Conn {
+func newH2Conn(app *App, conn net.Conn, bases ...context.Context) *h2Conn {
 	h := &h2Conn{
 		app: app, conn: conn, r: conn,
 		streams:                   make(map[uint32]*h2Stream),
@@ -187,6 +195,9 @@ func newH2Conn(app *App, conn net.Conn) *h2Conn {
 		resetWindowStart:          time.Now(),
 	}
 	baseContext := context.Background()
+	if len(bases) > 0 && bases[0] != nil {
+		baseContext = bases[0]
+	}
 	if tc, ok := conn.(*tls.Conn); ok {
 		baseContext = WithTLSState(baseContext, tc.ConnectionState())
 	}
@@ -245,6 +256,13 @@ func (h *h2Conn) closeAllStreams() {
 
 	for _, s := range streams {
 		s.reset.Store(true)
+		s.bodyMu.Lock()
+		s.bodyErr = net.ErrClosed
+		s.bodyEOF = true
+		if s.bodyCond != nil {
+			s.bodyCond.Broadcast()
+		}
+		s.bodyMu.Unlock()
 		if s.bodyTimer != nil {
 			s.bodyTimer.Stop()
 		}
@@ -593,9 +611,15 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 	s := h.streams[f.streamID]
 	newStream := s == nil
 	if s == nil {
-		if f.streamID&1 == 0 || f.streamID <= h.lastStream {
+		if f.streamID&1 == 0 {
 			h.mu.Unlock()
 			return h2ConnError{h2ProtocolError}
+		}
+		if f.streamID <= h.lastStream {
+			h.mu.Unlock()
+			// HEADERS on a previously closed stream is a connection error
+			// (RFC 9113 §5.1), unlike DATA/RST_STREAM which use a stream error.
+			return h2ConnError{h2ErrStreamClosed}
 		}
 		h.lastStream = f.streamID
 		if h.draining.Load() || uint32(len(h.streams)) >= h.localMaxConcurrentStreams {
@@ -615,6 +639,7 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			ctx:        streamCtx,
 			cancel:     cancel,
 		}
+		s.bodyCond = sync.NewCond(&s.bodyMu)
 		s.state.Store(int32(initialState))
 		if len(fields) > h.app.cfg.MaxHeaderCount && h.app.cfg.MaxHeaderCount > 0 {
 			h.mu.Unlock()
@@ -645,17 +670,27 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 		}
 	} else {
 		st := s.state.Load()
+		if st == int32(stateClosed) {
+			h.mu.Unlock()
+			return h2ConnError{h2ErrStreamClosed}
+		}
 		if st == int32(stateHalfClosedRemote) {
 			h.mu.Unlock()
 			h.sendRST(f.streamID, h2ErrStreamClosed)
 			return nil
 		}
-		if s.dispatched || st == int32(stateClosed) {
+		streamingTrailers := h.app.cfg.StreamRequestBody && s.dispatched && s.connectConn == nil
+		if s.dispatched && !streamingTrailers {
 			h.mu.Unlock()
 			h.sendRST(f.streamID, h2ProtocolError)
 			return nil
 		}
 		if st == int32(stateHalfClosedRemote) {
+			h.mu.Unlock()
+			h.sendRST(f.streamID, h2ErrStreamClosed)
+			return nil
+		}
+		if streamingTrailers && st != int32(stateOpen) && st != int32(stateHalfClosedLocal) {
 			h.mu.Unlock()
 			h.sendRST(f.streamID, h2ErrStreamClosed)
 			return nil
@@ -687,6 +722,14 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			s.bodyTimer = nil
 		}
 		s.ended = true
+		if s.dispatched && s.connectConn == nil {
+			s.bodyMu.Lock()
+			s.bodyEOF = true
+			if s.bodyCond != nil {
+				s.bodyCond.Broadcast()
+			}
+			s.bodyMu.Unlock()
+		}
 		for {
 			st := s.state.Load()
 			next := st
@@ -718,7 +761,7 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 	// they may never send END_STREAM for the life of the tunnel. dispatch()'s
 	// own s.dispatched guard makes a later end-of-stream on the same stream a
 	// safe no-op.
-	if end || (newStream && s.connectConn != nil) {
+	if (newStream && h.app.cfg.StreamRequestBody && s.connectConn == nil && !s.ended) || end || (newStream && s.connectConn != nil) {
 		h.dispatch(s)
 	}
 	return nil
@@ -779,7 +822,8 @@ func (h *h2Conn) handleData(f h2Frame) error {
 		return nil
 	}
 	isConnect := s.connectConn != nil
-	if !isConnect && len(s.body)+len(p) > maxH2RequestBodySize(h.app) {
+	streaming := !isConnect && h.app.cfg.StreamRequestBody && s.dispatched
+	if !isConnect && s.bodyReceived+len(p) > maxH2RequestBodySize(h.app) {
 		h.mu.Unlock()
 		h.sendRST(f.streamID, h2Cancel)
 		return nil
@@ -799,8 +843,20 @@ func (h *h2Conn) handleData(f h2Frame) error {
 		// itself bounds how much unread data can be outstanding — no separate
 		// buffering cap is needed on top of it.
 		connectPayload = append([]byte(nil), p...)
+	} else if streaming {
+		chunk := append([]byte(nil), p...)
+		s.bodyMu.Lock()
+		s.bodyChunks = append(s.bodyChunks, chunk)
+		s.bodyQueued += len(chunk)
+		if s.bodyCond != nil {
+			s.bodyCond.Signal()
+		}
+		s.bodyMu.Unlock()
 	} else {
 		s.body = append(s.body, p...)
+	}
+	if !isConnect {
+		s.bodyReceived += len(p)
 	}
 	s.recvWindow -= int64(flowControlled)
 	if s.recvWindow < 0 {
@@ -810,7 +866,7 @@ func (h *h2Conn) handleData(f h2Frame) error {
 	// Batched flow control: accumulate consumed bytes and send WINDOW_UPDATE
 	// at threshold to avoid per-frame updates (RFC 9113 §6.9.1).
 	var connWU, streamWU uint32
-	if flowControlled > 0 && !isConnect {
+	if flowControlled > 0 && !isConnect && !streaming {
 		h.connRecvWindowAccum += int64(flowControlled)
 		s.recvWindowAccum += int64(flowControlled)
 		if h.connRecvWindowAccum >= windowsUpdateThreshold {
@@ -831,6 +887,14 @@ func (h *h2Conn) handleData(f h2Frame) error {
 			s.bodyTimer = nil
 		}
 		s.ended = true
+		if streaming {
+			s.bodyMu.Lock()
+			s.bodyEOF = true
+			if s.bodyCond != nil {
+				s.bodyCond.Broadcast()
+			}
+			s.bodyMu.Unlock()
+		}
 		for {
 			st := s.state.Load()
 			var next int32
@@ -951,7 +1015,11 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 			}
 		}()
 		s.trailerMu.Lock()
-		ctx.body, ctx.trailers = s.body, s.trailers
+		if h.app.cfg.StreamRequestBody && s.connectConn == nil && !s.ended {
+			ctx.requestBodyReader = &h2RequestBodyReader{conn: h, stream: s}
+		} else {
+			ctx.body, ctx.trailers = s.body, s.trailers
+		}
 		s.trailerMu.Unlock()
 		h.app.dispatch(ctx)
 		if !ctx.responded && !s.reset.Load() {
@@ -1208,7 +1276,14 @@ func validateRequestTrailers(fields []hpack.HeaderField) ([]Header, error) {
 }
 
 func validH2ContentLength(s *h2Stream) bool {
-	return !s.hasContentLength || s.contentLength == len(s.body)
+	received := s.bodyReceived
+	// A few low-level tests and upgrade paths construct the buffered body
+	// directly. Preserve their semantics while normal DATA frames use the
+	// explicit received counter for streaming bodies.
+	if received == 0 && len(s.body) > 0 {
+		received = len(s.body)
+	}
+	return !s.hasContentLength || s.contentLength == received
 }
 
 func trimSpace(s string) string { return strings.Trim(s, " \t") }
@@ -1379,6 +1454,11 @@ func (r *h2Response) finish() {
 	delete(r.conn.streams, r.stream.id)
 	empty, draining := len(r.conn.streams) == 0, r.conn.draining.Load()
 	r.conn.mu.Unlock()
+	if r.stream.id&1 == 0 && r.conn.pushState != nil {
+		r.conn.pushState.mu.Lock()
+		delete(r.conn.pushState.streams, r.stream.id)
+		r.conn.pushState.mu.Unlock()
+	}
 	if empty && draining {
 		_ = r.conn.conn.Close()
 	}
@@ -1397,6 +1477,9 @@ func (h *h2Conn) sendResponseHeaders(s *h2Stream, c *DefaultCtx, contentLength *
 	}
 	if contentLength != nil {
 		fields = append(fields, hpack.HeaderField{Name: "content-length", Value: strconv.Itoa(*contentLength)})
+	}
+	if h.app.cfg.ServerHeader != "" && validResponseField("server", []byte(h.app.cfg.ServerHeader)) {
+		fields = append(fields, hpack.HeaderField{Name: "server", Value: h.app.cfg.ServerHeader})
 	}
 	for i := 0; i < c.chCount; i++ {
 		name := lowerHeaderName(c.customHeaders[i].Key)
@@ -1672,6 +1755,13 @@ func (h *h2Conn) resetStream(id uint32) {
 	s := h.streams[id]
 	if s != nil {
 		s.reset.Store(true)
+		s.bodyMu.Lock()
+		s.bodyErr = net.ErrClosed
+		s.bodyEOF = true
+		if s.bodyCond != nil {
+			s.bodyCond.Broadcast()
+		}
+		s.bodyMu.Unlock()
 		if s.bodyTimer != nil {
 			s.bodyTimer.Stop()
 			s.bodyTimer = nil
@@ -1682,6 +1772,11 @@ func (h *h2Conn) resetStream(id uint32) {
 		}
 	}
 	h.mu.Unlock()
+	if id&1 == 0 && h.pushState != nil {
+		h.pushState.mu.Lock()
+		delete(h.pushState.streams, id)
+		h.pushState.mu.Unlock()
+	}
 	h.flowMu.Lock()
 	h.flowCond.Broadcast()
 	h.flowMu.Unlock()

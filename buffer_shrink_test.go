@@ -69,7 +69,9 @@ func TestKeepAliveWriteBufferShrinksAfterLargeResponse(t *testing.T) {
 		state := app.conns[serverConn]
 		var cap0 int
 		if state != nil {
+			state.writeBufMu.RLock()
 			cap0 = cap(state.writeBuf)
+			state.writeBufMu.RUnlock()
 		}
 		app.connMu.Unlock()
 		if state != nil && cap0 <= maxPooledBytesCap {

@@ -47,6 +47,9 @@ func (a *App) AddHealthCheck(name string, timeout time.Duration, fn func(context
 
 // HealthStatus runs all registered health checks and returns overall readiness and individual results.
 func (a *App) HealthStatus(ctx context.Context) (bool, []HealthCheckResult) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.healthMu.RLock()
 	checks := append([]registeredHealthCheck(nil), a.healthChecks...)
 	a.healthMu.RUnlock()

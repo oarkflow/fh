@@ -2,6 +2,7 @@ package fh
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -79,6 +80,18 @@ func (a *App) Test(req *http.Request, msTimeout ...int) (*http.Response, error) 
 			errCh <- fmt.Errorf("fh test: failed reading response: %w", err)
 			return
 		}
+		// Read the complete body before shutting down the in-memory server.
+		// This keeps App.Test compatible with chunked and length-aware streaming
+		// responses instead of closing the net.Pipe while the caller still owns
+		// resp.Body.
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			errCh <- fmt.Errorf("fh test: failed reading response body: %w", err)
+			return
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		resp.ContentLength = int64(len(body))
 		respCh <- resp
 	}()
 

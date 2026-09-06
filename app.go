@@ -88,6 +88,10 @@ type Config struct {
 	HandlerTimeout time.Duration
 	// RequestBodyTimeout is an absolute budget for receiving one request body.
 	RequestBodyTimeout time.Duration
+	// StreamRequestBody defers request-body buffering and enables
+	// Ctx.StreamBody for upload endpoints. Unconsumed bodies are drained before
+	// keep-alive reuse; Body and BodyParser still materialize the body on demand.
+	StreamRequestBody bool
 	// TLSHandshakeTimeout bounds the server-side TLS handshake.
 	TLSHandshakeTimeout time.Duration
 	// HTTP2IdleTimeout bounds the interval between HTTP/2 frames.
@@ -162,8 +166,15 @@ type Config struct {
 	// a response to accept the body; return an error or write a response to reject
 	// it early. The handler must not attempt to read Body.
 	RequestHeadHandler HandlerFunc
-	Logger             Logger
-	TemplateEngine     TemplateEngine
+	// ConnContext derives the base context for each accepted connection. The
+	// returned context is inherited by every request on that connection and is
+	// canceled when the connection closes. A nil return uses context.Background.
+	ConnContext func(context.Context, net.Conn) context.Context
+	// BaseContext supplies the parent context for a serving listener. It is
+	// called once when serving starts; a nil return uses context.Background.
+	BaseContext    func(net.Listener) context.Context
+	Logger         Logger
+	TemplateEngine TemplateEngine
 	// Reliability enables request journal, idempotency, and durable async queue.
 	Reliability ReliabilityConfig
 	// Environment controls safe error exposure defaults. Use EnvDevelopment locally and EnvProduction in production.
@@ -224,6 +235,9 @@ func WithHandlerTimeout(d time.Duration) Option {
 }
 func WithRequestBodyTimeout(d time.Duration) Option {
 	return func(c *Config) { c.RequestBodyTimeout = d }
+}
+func WithStreamRequestBody(enabled bool) Option {
+	return func(c *Config) { c.StreamRequestBody = enabled }
 }
 func WithTLSHandshakeTimeout(d time.Duration) Option {
 	return func(c *Config) { c.TLSHandshakeTimeout = d }
@@ -320,6 +334,12 @@ func WithOptionsHandler(h OptionsHandler) Option {
 }
 func WithRequestHeadHandler(h HandlerFunc) Option {
 	return func(c *Config) { c.RequestHeadHandler = h }
+}
+func WithConnContext(fn func(context.Context, net.Conn) context.Context) Option {
+	return func(c *Config) { c.ConnContext = fn }
+}
+func WithBaseContext(fn func(net.Listener) context.Context) Option {
+	return func(c *Config) { c.BaseContext = fn }
 }
 func WithLogger(l Logger) Option {
 	return func(c *Config) { c.Logger = l }
@@ -419,6 +439,7 @@ type App struct {
 	connectionsByIP map[string]int
 	shutdownOnce    sync.Once
 	started         atomic.Bool
+	serveReady      chan struct{}
 	buildMu         sync.Mutex
 	groups          []*Group
 	lastRoute       namedRoute
@@ -443,11 +464,17 @@ type App struct {
 	// supervisor without threading it through every call site.
 	preforkSupervisor atomic.Pointer[preforkSupervisor]
 	metrics           metricsTracker
+	contextMu         sync.RWMutex
+	baseContext       context.Context
 }
 
 type connState struct {
 	active atomic.Bool
 	h2     *h2Conn
+	// writeBufMu protects lifecycle changes to writeBuf (not ordinary request
+	// assembly, which is serialized per HTTP/1 connection). In particular, a
+	// large-response buffer may be replaced while diagnostics inspect state.
+	writeBufMu sync.RWMutex
 	// HTTP/1 requests on one connection are serialized. Keep the response
 	// assembly buffer here instead of borrowing/returning a global pool item for
 	// every request.
@@ -488,8 +515,23 @@ func NewWithConfig(cfg Config) *App {
 // Boolean fields are intentionally left untouched because false can be an
 // explicit choice.
 func applyConfigDefaults(cfg *Config) {
+	if cfg.ReadTimeout <= 0 {
+		cfg.ReadTimeout = defaultConfig.ReadTimeout
+	}
+	if cfg.ReadHeaderTimeout <= 0 {
+		cfg.ReadHeaderTimeout = defaultConfig.ReadHeaderTimeout
+	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = defaultConfig.WriteTimeout
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = defaultConfig.IdleTimeout
+	}
 	if cfg.ReadBufferSize <= 0 {
 		cfg.ReadBufferSize = defaultConfig.ReadBufferSize
+	}
+	if cfg.WriteBufferSize <= 0 {
+		cfg.WriteBufferSize = cfg.ReadBufferSize
 	}
 	if cfg.MaxRequestBodySize <= 0 {
 		cfg.MaxRequestBodySize = defaultConfig.MaxRequestBodySize
@@ -903,18 +945,60 @@ func (a *App) OnError(fn func(error)) *App {
 // ── Listen ─────────────────────────────────────────────────────────────────
 
 func (a *App) Listen(addr string) error {
+	return a.ListenContext(context.Background(), addr)
+}
+
+// ListenContext binds addr and serves until ctx is canceled. Cancellation
+// initiates graceful shutdown and waits for the serving loop to exit.
+func (a *App) ListenContext(ctx context.Context, addr string) error {
+	if ctx == nil {
+		return errors.New("fh: nil context")
+	}
 	if a.cfg.Kernel.Enabled {
-		return a.listenKernel(addr, nil)
+		ready := make(chan struct{})
+		a.buildMu.Lock()
+		a.serveReady = ready
+		a.buildMu.Unlock()
+		done := make(chan error, 1)
+		go func() { done <- a.listenKernel(addr, nil) }()
+		select {
+		case err := <-done:
+			return err
+		case <-ready:
+			select {
+			case err := <-done:
+				return err
+			case <-ctx.Done():
+				_ = a.shutdownAfterServeContext()
+				return <-done
+			}
+		case <-ctx.Done():
+			select {
+			case <-ready:
+				_ = a.shutdownAfterServeContext()
+				return <-done
+			case err := <-done:
+				return err
+			}
+		}
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	return a.Serve(ln)
+	return a.ServeContext(ctx, ln)
 }
 
 // ListenTLS serves HTTPS using the standard library TLS stack.
 func (a *App) ListenTLS(addr, certFile, keyFile string) error {
+	return a.ListenTLSContext(context.Background(), addr, certFile, keyFile)
+}
+
+// ListenTLSContext is the context-aware TLS counterpart to ListenContext.
+func (a *App) ListenTLSContext(ctx context.Context, addr, certFile, keyFile string) error {
+	if ctx == nil {
+		return errors.New("fh: nil context")
+	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return err
@@ -924,13 +1008,61 @@ func (a *App) ListenTLS(addr, certFile, keyFile string) error {
 		return err
 	}
 	if a.cfg.Kernel.Enabled {
-		return a.listenKernel(addr, tlsConfig)
+		ready := make(chan struct{})
+		a.buildMu.Lock()
+		a.serveReady = ready
+		a.buildMu.Unlock()
+		done := make(chan error, 1)
+		go func() { done <- a.listenKernel(addr, tlsConfig) }()
+		select {
+		case err := <-done:
+			return err
+		case <-ready:
+			select {
+			case err := <-done:
+				return err
+			case <-ctx.Done():
+				_ = a.shutdownAfterServeContext()
+				return <-done
+			}
+		case <-ctx.Done():
+			select {
+			case <-ready:
+				_ = a.shutdownAfterServeContext()
+				return <-done
+			case err := <-done:
+				return err
+			}
+		}
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	return a.Serve(tls.NewListener(ln, tlsConfig))
+	return a.ServeContext(ctx, tls.NewListener(ln, tlsConfig))
+}
+
+// ListenUnix serves HTTP over a Unix-domain socket. The socket path is
+// removed when serving stops. Existing paths are never overwritten; net.Listen
+// returns an error if the requested path is already occupied.
+func (a *App) ListenUnix(path string) error {
+	return a.ListenUnixContext(context.Background(), path)
+}
+
+// ListenUnixContext is the context-aware Unix-domain socket counterpart to
+// ListenContext.
+func (a *App) ListenUnixContext(ctx context.Context, path string) error {
+	if ctx == nil {
+		return errors.New("fh: nil context")
+	}
+	if path == "" {
+		return errors.New("fh: empty Unix socket path")
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return err
+	}
+	return a.ServeContext(ctx, &unlinkListener{Listener: ln, path: path})
 }
 
 // Metrics returns a real-time snapshot of server runtime metrics.
@@ -1062,7 +1194,7 @@ func (a *App) ServeContext(ctx context.Context, ln net.Listener) error {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = a.ShutdownWithContext(ctx)
+			_ = a.shutdownAfterServeContext()
 		case <-serveDone:
 		}
 	}()
@@ -1091,6 +1223,15 @@ func (a *App) ServeContext(ctx context.Context, ln net.Listener) error {
 
 	a.finishServing()
 	return normalizeServeError(acceptErr, a.closed.Load())
+}
+
+// shutdownAfterServeContext turns serving-context cancellation into a fresh
+// graceful-shutdown budget. Passing the canceled serving context directly to
+// ShutdownWithContext would force-close active requests immediately.
+func (a *App) shutdownAfterServeContext() error {
+	ctx, cancel := context.WithTimeout(context.Background(), a.effectiveShutdownTimeout())
+	defer cancel()
+	return a.ShutdownWithContext(ctx)
 }
 
 func (a *App) assertMutable() {
@@ -1160,6 +1301,9 @@ func (a *App) ShutdownWithTimeout(d time.Duration) error {
 }
 
 func (a *App) ShutdownWithContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("fh: nil context")
+	}
 	if err := a.beginShutdown(); err != nil {
 		return err
 	}
@@ -1309,7 +1453,18 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 	// Connection-level context: cancelled when the TCP connection terminates
 	// (client disconnect, idle close, or I/O error). Per-request contexts are
 	// derived from this so that handlers see cancellation on connection death.
-	connCtx, connCancel := context.WithCancel(context.Background())
+	a.contextMu.RLock()
+	connBase := a.baseContext
+	a.contextMu.RUnlock()
+	if connBase == nil {
+		connBase = context.Background()
+	}
+	if a.cfg.ConnContext != nil {
+		if derived := a.cfg.ConnContext(connBase, conn); derived != nil {
+			connBase = derived
+		}
+	}
+	connCtx, connCancel := context.WithCancel(connBase)
 	defer connCancel()
 
 	for _, fn := range a.hooks.onConnect {
@@ -1337,7 +1492,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 				a.emitError(errors.New("http2: TLS version 1.2 or higher required"))
 				return
 			}
-			h2c := newH2Conn(a, conn)
+			h2c := newH2Conn(a, conn, connCtx)
 			a.setH2Conn(conn, h2c)
 			h2c.serve(nil, false)
 			return
@@ -1368,8 +1523,18 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 	for {
 		var requestStart time.Time
 		headerBudget := a.cfg.ReadHeaderTimeout
+		if a.fastHTTP1 {
+			// NewFast is intended for trusted benchmark/edge deployments. The
+			// standard profile keeps this deadline as a slowloris defense, but
+			// applying it to every keep-alive request adds a socket deadline
+			// operation that does not exist in the unbounded fast profile.
+			headerBudget = 0
+		}
 		if headerBudget <= 0 {
 			headerBudget = a.cfg.ReadTimeout
+			if a.fastHTTP1 {
+				headerBudget = 0
+			}
 		}
 		if len(accumulated) > 0 && headerBudget > 0 {
 			requestStart = time.Now()
@@ -1377,7 +1542,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 				return
 			}
 			readDeadlineArmed = true
-		} else if len(accumulated) == 0 && a.cfg.IdleTimeout > 0 {
+		} else if !a.fastHTTP1 && len(accumulated) == 0 && a.cfg.IdleTimeout > 0 {
 			if err := conn.SetReadDeadline(time.Now().Add(a.cfg.IdleTimeout)); err != nil {
 				return
 			}
@@ -1431,14 +1596,14 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 				if len(accumulated) < len(h2ClientPreface) {
 					continue
 				}
-				h2c := newH2Conn(a, conn)
+				h2c := newH2Conn(a, conn, connCtx)
 				a.setH2Conn(conn, h2c)
 				_ = conn.SetReadDeadline(time.Time{})
 				h2c.serve(nil, true)
 				return
 			}
 			if !a.cfg.DisableHTTP2 && !a.cfg.DisableH2C && len(accumulated) > len(h2ClientPreface) && bytes.Equal(accumulated[:len(h2ClientPreface)], h2ClientPreface) {
-				h2c := newH2Conn(a, conn)
+				h2c := newH2Conn(a, conn, connCtx)
 				a.setH2Conn(conn, h2c)
 				_ = conn.SetReadDeadline(time.Time{})
 				h2c.serve(accumulated[len(h2ClientPreface):], true)
@@ -1550,7 +1715,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 				}
 				return
 			}
-			h2c := newH2Conn(a, conn)
+			h2c := newH2Conn(a, conn, connCtx)
 			if err := h2c.prepareUpgrade(ctx); err != nil {
 				releaseCtx(ctx)
 				_ = writeAll(conn, serverError400)
@@ -1588,9 +1753,16 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		bodyLen := ctx.Header.ContentLength
 		var nextData []byte
 		chunkedBody := ctx.Header.Chunked
+		var streamedBody *requestBodyStream
 		bodyBudget := a.cfg.RequestBodyTimeout
+		if a.fastHTTP1 {
+			bodyBudget = 0
+		}
 		if bodyBudget <= 0 {
 			bodyBudget = a.cfg.ReadTimeout
+			if a.fastHTTP1 {
+				bodyBudget = 0
+			}
 		}
 		if (chunkedBody || bodyLen > 0) && bodyBudget > 0 {
 			if err := conn.SetReadDeadline(time.Now().Add(bodyBudget)); err != nil {
@@ -1600,7 +1772,10 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			readDeadlineArmed = true
 		}
 
-		if chunkedBody {
+		if a.cfg.StreamRequestBody && (chunkedBody || bodyLen > 0) {
+			streamedBody = newRequestBodyStream(conn, accumulated[bodyStart:], bodyLen, chunkedBody, a.cfg.MaxRequestBodySize)
+			ctx.requestBodyStream = streamedBody
+		} else if chunkedBody {
 			body, leftover, trailers, readErr := readChunkedBody(conn, accumulated[bodyStart:], a.cfg.MaxRequestBodySize, bodyBudget)
 			if readErr != nil {
 				releaseCtx(ctx)
@@ -1653,9 +1828,9 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 				ctx.body = grown[bodyStart:messageEnd]
 			}
 		}
-		if chunkedBody {
+		if streamedBody == nil && chunkedBody {
 			ctx.upgradeBuffered = nextData
-		} else {
+		} else if streamedBody == nil {
 			nextStart := bodyStart + bodyLen
 			if nextStart < len(accumulated) {
 				ctx.upgradeBuffered = accumulated[nextStart:]
@@ -1689,6 +1864,16 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			a.dispatch(ctx)
 			reqCancel()
 		}
+		if streamedBody != nil {
+			if !streamedBody.done {
+				_, _ = io.Copy(io.Discard, streamedBody)
+			}
+			nextData, ctx.trailers, _ = streamedBody.finish()
+			ctx.upgradeBuffered = nextData
+			if streamedBody.err != nil {
+				ctx.forceClose = true
+			}
+		}
 		keepAlive := ctx.Header.KeepAlive && !ctx.forceClose && !ctx.upgraded && !a.cfg.DisableKeepAlive
 		if keepAlive && !a.fastHTTP1 {
 			keepAlive = !a.draining.Load()
@@ -1711,8 +1896,14 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		// small response after it. Drop it back to a small buffer once it grows
 		// past the same ceiling putBytes uses for the shared pool, so idle
 		// keep-alive connections don't each pin a multi-MB buffer.
+		if state != nil {
+			state.writeBufMu.Lock()
+		}
 		if state != nil && cap(state.writeBuf) > maxPooledBytesCap {
 			state.writeBuf = make([]byte, 0, 4096)
+		}
+		if state != nil {
+			state.writeBufMu.Unlock()
 		}
 
 		// The read buffer grows (via make, not the pool) to fit an oversized
@@ -1802,6 +1993,23 @@ func (a *App) defaultRecoveryMiddleware() HandlerFunc {
 }
 
 func (a *App) dispatch(ctx *DefaultCtx) {
+	// Fast mode is explicitly for trusted, benchmark-oriented deployments. Avoid
+	// the per-request clock reads and metrics atomics here; applications that
+	// need request accounting should use NewProduction or install the metrics
+	// middleware, while the low-level Metrics snapshot remains available for
+	// production-mode servers.
+	if a.fastHTTP1 {
+		a.dispatchCore(ctx)
+		return
+	}
+	started := time.Now()
+	defer func() {
+		status := ctx.status
+		if status == 0 {
+			status = StatusOK
+		}
+		a.metrics.recordRequest(status, uint64(time.Since(started).Nanoseconds()))
+	}()
 	a.dispatchCore(ctx)
 }
 
@@ -1898,11 +2106,6 @@ func (a *App) dispatchCore(ctx *DefaultCtx) {
 		_ = ctx.SendStatus(200)
 	}
 
-	status := ctx.status
-	if status == 0 {
-		status = 200
-	}
-	a.metrics.recordRequest(status)
 }
 
 // chain combines global middleware + route-specific handlers into one HandlerFunc.

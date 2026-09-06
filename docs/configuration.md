@@ -15,6 +15,7 @@ type Config struct {
     MaxConnections       int                      // Default: 10,000
 	MaxConnectionsPerIP  int                      // Default: 100 in production/secure profiles
     ReadBufferSize       int                      // Default: 16384 (16KB)
+    WriteBufferSize      int                      // Default: ReadBufferSize
     MaxRequestBodySize   int                      // Default: 4194304 (4MB)
     MaxHeaderListSize    int                      // Default: 65536 (64KB)
     MaxHeaderCount       int                      // Default: 64
@@ -24,6 +25,9 @@ type Config struct {
     DisableHTTP2         bool                     // Default: false
     DisableH2C           bool                     // Default: false; true in SecureByDefault
     RequestHeadHandler   HandlerFunc              // Optional pre-body admission/auth hook
+	StreamRequestBody     bool                     // Defer request body buffering; use Ctx.StreamBody
+    ConnContext          func(context.Context, net.Conn) context.Context // Optional per-connection context hook
+    BaseContext          func(net.Listener) context.Context             // Optional listener base context hook
     ErrorHandler         ErrorHandler             // Default: logs + problem JSON
     NotFoundHandler      NotFoundHandler          // Default: 404 text/plain
     MethodNotAllowed     MethodNotAllowedHandler  // Default: 405 + Allow header
@@ -53,6 +57,7 @@ type Config struct {
 | Field | Default | Description |
 |-------|---------|-------------|
 | `ReadBufferSize` | 16KB | Initial buffer size for reading requests |
+| `WriteBufferSize` | ReadBufferSize | Initial reusable response buffer size per HTTP/1 connection |
 | `MaxRequestBodySize` | 4MB | Maximum allowed request body size |
 | `MaxHeaderListSize` | 64KB | Maximum total header size |
 | `MaxHeaderCount` | 64 | Maximum number of headers |

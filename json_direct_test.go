@@ -23,3 +23,20 @@ func TestDirectJSONAppenderMayReturnExternalStorage(t *testing.T) {
 		t.Fatal("caller-owned JSON was retained as the response buffer")
 	}
 }
+
+func TestDirectJSONMapWithExactHeaderReserveDoesNotPanic(t *testing.T) {
+	conn := &benchConn{buf: make([]byte, 4096)}
+	app := NewFast(WithDisableHTTP2(true), WithDisablePanicRecovery(true))
+	ctx := acquireCtx(conn, app)
+	defer releaseCtx(ctx)
+	ctx.Header.KeepAlive = true
+	buf := make([]byte, directJSONHeaderReserve)
+	ctx.writeBuf = &buf
+
+	if err := ctx.JSON(Map{"message": "Hello, World!"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(conn.buf[:conn.pos], []byte(`{"message":"Hello, World!"}`)) {
+		t.Fatalf("response=%q", conn.buf[:conn.pos])
+	}
+}

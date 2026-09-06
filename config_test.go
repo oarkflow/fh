@@ -8,8 +8,17 @@ import (
 func TestNewWithConfigUsesDefaultsForOmittedFields(t *testing.T) {
 	app := NewWithConfig(Config{})
 
+	if app.cfg.ReadTimeout != defaultConfig.ReadTimeout ||
+		app.cfg.ReadHeaderTimeout != defaultConfig.ReadHeaderTimeout ||
+		app.cfg.WriteTimeout != defaultConfig.WriteTimeout ||
+		app.cfg.IdleTimeout != defaultConfig.IdleTimeout {
+		t.Fatalf("timeout defaults were not applied: %#v", app.cfg)
+	}
 	if app.cfg.ReadBufferSize != defaultConfig.ReadBufferSize {
 		t.Fatalf("ReadBufferSize = %d, want %d", app.cfg.ReadBufferSize, defaultConfig.ReadBufferSize)
+	}
+	if app.cfg.WriteBufferSize != defaultConfig.ReadBufferSize {
+		t.Fatalf("WriteBufferSize = %d, want %d", app.cfg.WriteBufferSize, defaultConfig.ReadBufferSize)
 	}
 	if app.cfg.MaxRequestBodySize != defaultConfig.MaxRequestBodySize {
 		t.Fatalf("MaxRequestBodySize = %d, want %d", app.cfg.MaxRequestBodySize, defaultConfig.MaxRequestBodySize)
@@ -44,6 +53,7 @@ func TestNewWithConfigPreservesOverrides(t *testing.T) {
 	app := NewWithConfig(cfg)
 
 	if app.cfg.ReadBufferSize != cfg.ReadBufferSize ||
+		app.cfg.WriteBufferSize != cfg.ReadBufferSize ||
 		app.cfg.MaxRequestBodySize != cfg.MaxRequestBodySize ||
 		app.cfg.MaxHeaderListSize != cfg.MaxHeaderListSize ||
 		app.cfg.MaxHeaderCount != cfg.MaxHeaderCount ||
@@ -51,6 +61,11 @@ func TestNewWithConfigPreservesOverrides(t *testing.T) {
 		app.cfg.MaxConcurrentStreams != cfg.MaxConcurrentStreams ||
 		app.cfg.Environment != cfg.Environment {
 		t.Fatalf("explicit config was not preserved: %#v", app.cfg)
+	}
+
+	custom := New(WithReadBufferSize(8<<10), WithWriteBufferSize(64<<10))
+	if custom.cfg.WriteBufferSize != 64<<10 {
+		t.Fatalf("explicit WriteBufferSize = %d, want %d", custom.cfg.WriteBufferSize, 64<<10)
 	}
 }
 

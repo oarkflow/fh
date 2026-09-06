@@ -31,6 +31,19 @@ func TestServerMetrics(t *testing.T) {
 	if m2.TotalRequests < 1 || m2.Status5xx < 1 || m2.TotalErrors < 1 {
 		t.Fatalf("unexpected error metrics snapshot: %#v", m2)
 	}
+	if m1.TotalDurationNS == 0 || m1.MaxRequestDurationNS == 0 || m1.MaxRequestDurationNS > m1.TotalDurationNS {
+		t.Fatalf("unexpected duration metrics snapshot: %#v", m1)
+	}
+
+	// Prebuilt responses bypass the normal handler response path, but must
+	// still be represented in the core server counters.
+	staticApp := New()
+	staticApp.Get("/static", StaticText("ok"))
+	_ = pipeRequest(t, staticApp, "GET /static HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
+	staticMetrics := staticApp.Metrics()
+	if staticMetrics.TotalRequests != 1 || staticMetrics.Status2xx != 1 || staticMetrics.TotalDurationNS == 0 {
+		t.Fatalf("prebuilt response was not counted: %#v", staticMetrics)
+	}
 }
 
 func TestAutoETag(t *testing.T) {

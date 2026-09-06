@@ -3,6 +3,7 @@ package fh
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -69,6 +70,110 @@ func TestChunkedRequestAndTrailers(t *testing.T) {
 	}
 	if !bytes.Contains(resp, []byte("Wikipedia:good")) {
 		t.Fatalf("unexpected response: %q", resp)
+	}
+}
+
+func TestStreamingRequestBodyConsumesFixedBody(t *testing.T) {
+	app := New(WithStreamRequestBody(true))
+	app.Post("/upload", func(c Ctx) error {
+		var body bytes.Buffer
+		if err := c.StreamBody(func(r io.Reader) error {
+			_, err := io.Copy(&body, r)
+			return err
+		}); err != nil {
+			return err
+		}
+		return c.SendString(body.String())
+	})
+	client := runPipeApp(t, app)
+	request := "POST /upload HTTP/1.1\r\nHost: local\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world"
+	go func() { _, _ = io.WriteString(client, request) }()
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(resp, []byte("hello world")) {
+		t.Fatalf("unexpected response: %q", resp)
+	}
+}
+
+func TestStreamingRequestBodyPreservesChunkedTrailers(t *testing.T) {
+	app := New(WithStreamRequestBody(true))
+	app.Post("/upload", func(c Ctx) error {
+		var body bytes.Buffer
+		if err := c.StreamBody(func(r io.Reader) error {
+			_, err := io.Copy(&body, r)
+			return err
+		}); err != nil {
+			return err
+		}
+		return c.SendString(body.String() + ":" + c.Trailer("X-Checksum"))
+	})
+	client := runPipeApp(t, app)
+	request := "POST /upload HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+		"5\r\nhello\r\n0\r\nX-Checksum: good\r\n\r\n"
+	go func() { _, _ = io.WriteString(client, request) }()
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(resp, []byte("hello:good")) {
+		t.Fatalf("unexpected response: %q", resp)
+	}
+}
+
+func TestStreamingRequestBodyDrainsUnreadBodyForKeepAlive(t *testing.T) {
+	app := New(WithStreamRequestBody(true))
+	app.Post("/skip", func(c Ctx) error { return c.SendString("skipped") })
+	app.Get("/next", func(c Ctx) error { return c.SendString("next") })
+	client := runPipeApp(t, app)
+	request := "POST /skip HTTP/1.1\r\nHost: local\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\nignored" +
+		"GET /next HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n"
+	go func() { _, _ = io.WriteString(client, request) }()
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(resp, []byte("skipped")) || !bytes.Contains(resp, []byte("next")) {
+		t.Fatalf("pipelined response lost after body drain: %q", resp)
+	}
+}
+
+func TestStreamingRequestBodyPreservesBodyCompatibility(t *testing.T) {
+	app := New(WithStreamRequestBody(true))
+	app.Post("/upload", func(c Ctx) error {
+		return c.SendString(string(c.Body()))
+	})
+	client := runPipeApp(t, app)
+	request := "POST /upload HTTP/1.1\r\nHost: local\r\nContent-Length: 11\r\nConnection: close\r\n\r\nbody bytes!"
+	go func() { _, _ = io.WriteString(client, request) }()
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(resp, []byte("body bytes!")) {
+		t.Fatalf("unexpected response: %q", resp)
+	}
+}
+
+func TestStreamingRequestBodyRejectsOversizedChunkedBody(t *testing.T) {
+	app := New(WithStreamRequestBody(true), WithMaxRequestBodySize(4))
+	app.Post("/upload", func(c Ctx) error {
+		return c.StreamBody(func(r io.Reader) error {
+			_, err := io.Copy(io.Discard, r)
+			return err
+		})
+	})
+	client := runPipeApp(t, app)
+	request := "POST /upload HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+		"5\r\nhello\r\n0\r\n\r\n"
+	go func() { _, _ = io.WriteString(client, request) }()
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(resp, []byte("413")) {
+		t.Fatalf("expected 413 response, got %q", resp)
 	}
 }
 
@@ -250,10 +355,16 @@ func TestHTTP2PriorKnowledgeRequest(t *testing.T) {
 }
 
 func TestHTTP2CleartextUpgradeRequestBecomesStreamOne(t *testing.T) {
-	app := New()
+	const contextKey = "h2-base"
+	app := New(WithBaseContext(func(net.Listener) context.Context {
+		return context.WithValue(context.Background(), contextKey, "present")
+	}))
 	app.Post("/upgrade-h2", func(c Ctx) error {
 		if string(c.RequestHeader().Proto) != "HTTP/2.0" {
-			t.Fatalf("unexpected protocol %q", c.RequestHeader().Proto)
+			return errors.New("unexpected HTTP protocol")
+		}
+		if c.Context().Value(contextKey) != "present" {
+			return errors.New("base context was not propagated to HTTP/2")
 		}
 		return c.SendString("upgraded:" + string(c.Body()))
 	})

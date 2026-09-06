@@ -19,6 +19,7 @@ app.Static("/static", "./public", fh.StaticConfig{
     Index:         "index.html", // index file name
     CacheDuration: 5 * time.Minute, // file metadata cache
     StripSlash:    false,    // trailing slash handling
+	MaxRanges:      16,        // maximum ranges in one request
 })
 ```
 
@@ -32,6 +33,7 @@ app.Static("/static", "./public", fh.StaticConfig{
 | `Index` | `"index.html"` | Index file for directories |
 | `CacheDuration` | 0 | File metadata cache TTL |
 | `StripSlash` | false | Remove trailing slash from path |
+| `MaxRanges` | 16 | Maximum byte ranges accepted per request; zero uses 16 |
 
 ## From `embed.FS`
 
@@ -79,7 +81,8 @@ app.Static("/static", "./public", fh.StaticConfig{
 
 ### Range Requests
 
-Partial content (206 Partial Content) is supported for media files and large downloads.
+Partial content (206 Partial Content) is supported for media files and large downloads,
+including bounded multipart responses for multiple ranges.
 
 ### Content-Type Detection
 

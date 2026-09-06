@@ -1,6 +1,7 @@
 package fh
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"net"
@@ -28,12 +29,27 @@ func (a *App) startServing(ln net.Listener) error {
 		return ErrAppAlreadyStarted
 	}
 	a.buildMu.Unlock()
-
 	a.connMu.Lock()
 	a.listener = ln
 	a.connMu.Unlock()
+	base := context.Background()
+	if a.cfg.BaseContext != nil {
+		if derived := a.cfg.BaseContext(ln); derived != nil {
+			base = derived
+		}
+	}
+	a.contextMu.Lock()
+	a.baseContext = base
+	a.contextMu.Unlock()
 	a.closed.Store(false)
 	a.draining.Store(false)
+	a.buildMu.Lock()
+	ready := a.serveReady
+	a.serveReady = nil
+	a.buildMu.Unlock()
+	if ready != nil {
+		close(ready)
+	}
 
 	if a.reliability != nil {
 		if err := a.reliability.Start(); err != nil {
@@ -58,6 +74,9 @@ func (a *App) startServing(ln net.Listener) error {
 func (a *App) finishServing() {
 	a.activeConn.Wait()
 	a.runShutdownHooks()
+	a.contextMu.Lock()
+	a.baseContext = context.Background()
+	a.contextMu.Unlock()
 }
 
 // acceptConnection applies process-wide and peer-specific admission limits,

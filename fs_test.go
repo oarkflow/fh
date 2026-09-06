@@ -696,3 +696,22 @@ func TestStaticGroupStripSlash(t *testing.T) {
 		}
 	}
 }
+
+func TestStaticGroupUsesSafeDefaultMaxRanges(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("0123456789"), 0644)
+
+	app := fh.New()
+	app.Group("/v1").Static("/static", dir)
+	addr := testServer(t, app)
+
+	code, body := doRequest(t, addr, "GET", "/v1/static/file.txt", "", map[string]string{
+		"Range": "bytes=0-1,4-5",
+	})
+	if code != 206 {
+		t.Fatalf("expected grouped static range response 206, got %d (body: %q)", code, body)
+	}
+	if !strings.Contains(body, "Content-Range: bytes 0-1/10") || !strings.Contains(body, "Content-Range: bytes 4-5/10") {
+		t.Fatalf("expected both grouped ranges, got %q", body)
+	}
+}

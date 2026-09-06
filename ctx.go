@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -86,6 +87,9 @@ type Ctx interface {
 	Params(name string, defaults ...string) string
 	Query(name string, def ...string) string
 	Body() []byte
+	// StreamBody passes the request body to fn without first buffering it when
+	// StreamRequestBody is enabled. In the default mode it reads from Body().
+	StreamBody(fn func(io.Reader) error) error
 	BodyCopy() []byte
 	BodyRaw() []byte
 	QueryParser(v any) error
@@ -164,7 +168,9 @@ type Ctx interface {
 	ErrorResponse(err error) error
 	SafeErrorResponse(err error) error
 	Stream(fn func(*StreamWriter) error) error
+	StreamLength(size int64, fn func(*StreamWriter) error) error
 	SendStream(r io.Reader) error
+	SendStreamLength(r io.Reader, size int64) error
 	Hijack(handler func(*ResponseConn) error) error
 	Upgrade(protocol string, handler func(net.Conn) error) error
 	Attachment(filename string) Ctx
@@ -324,17 +330,20 @@ type DefaultCtx struct {
 	queryParams []Param
 	qcount      int
 
-	responseCookies     []Cookie
-	responseTime        time.Time
-	beforeResponse      []func(Ctx) error
-	beforeRan           bool
-	multipartForm       *MultipartForm
-	multipartErr        error
-	multipartParsed     bool
-	captureResponseBody bool
-	bodyParserMapPtr    uintptr
-	bodyParserRawJSON   []byte
-	flags               uint32
+	responseCookies      []Cookie
+	responseTime         time.Time
+	beforeResponse       []func(Ctx) error
+	beforeRan            bool
+	multipartForm        *MultipartForm
+	multipartErr         error
+	multipartParsed      bool
+	captureResponseBody  bool
+	bodyParserMapPtr     uintptr
+	bodyParserRawJSON    []byte
+	requestBodyStream    *requestBodyStream
+	requestBodyStreamErr error
+	requestBodyReader    io.Reader
+	flags                uint32
 }
 
 type localEntry struct {
@@ -386,6 +395,9 @@ func acquireHTTP1Ctx(conn net.Conn, app *App, state *connState) *DefaultCtx {
 	c.connectionOwned = true
 	c.reset()
 	c.writeBuf = &state.writeBuf
+	if len(state.writeBuf) == 0 && cap(state.writeBuf) == 0 && app.cfg.WriteBufferSize > 0 {
+		state.writeBuf = make([]byte, 0, app.cfg.WriteBufferSize)
+	}
 	return c
 }
 
@@ -456,6 +468,9 @@ func (c *DefaultCtx) reset() {
 	}
 	c.bodyParserMapPtr = 0
 	c.bodyParserRawJSON = nil
+	c.requestBodyStream = nil
+	c.requestBodyStreamErr = nil
+	c.requestBodyReader = nil
 }
 
 // CaptureResponseBody enables a stable in-request response body snapshot for
@@ -742,11 +757,70 @@ func (c *DefaultCtx) parseQuery() {
 	}
 }
 
-func (c *DefaultCtx) Body() []byte { return c.body }
+func (c *DefaultCtx) Body() []byte {
+	_ = c.ensureRequestBody()
+	return c.body
+}
+
+// StreamBody consumes the request body incrementally when request-body
+// streaming is enabled. It falls back to a reader over the already-buffered
+// body for applications using the default mode.
+func (c *DefaultCtx) StreamBody(fn func(io.Reader) error) error {
+	if fn == nil {
+		return errors.New("fh: nil request body callback")
+	}
+	if err := c.ensureRequestBodyReader(); err != nil {
+		return err
+	}
+	if c.requestBodyStream != nil {
+		err := fn(c.requestBodyStream)
+		if c.requestBodyStream.done {
+			_, c.trailers, c.requestBodyStreamErr = c.requestBodyStream.finish()
+			if err == nil {
+				err = c.requestBodyStreamErr
+			}
+		}
+		return err
+	}
+	if c.requestBodyReader != nil {
+		return fn(c.requestBodyReader)
+	}
+	return fn(bytes.NewReader(c.body))
+}
+
+func (c *DefaultCtx) ensureRequestBodyReader() error {
+	if c.requestBodyStreamErr != nil {
+		return c.requestBodyStreamErr
+	}
+	return nil
+}
+
+func (c *DefaultCtx) ensureRequestBody() error {
+	if c.requestBodyStream == nil {
+		if c.requestBodyReader == nil {
+			return c.requestBodyStreamErr
+		}
+		body, err := io.ReadAll(c.requestBodyReader)
+		c.body = body
+		c.requestBodyStreamErr = err
+		return err
+	}
+	if c.body != nil || c.requestBodyStream.done {
+		if c.body == nil && c.requestBodyStream.done && c.requestBodyStream.err == nil {
+			c.body = []byte{}
+		}
+		return c.requestBodyStreamErr
+	}
+	body, err := io.ReadAll(c.requestBodyStream)
+	c.body = body
+	c.requestBodyStreamErr = err
+	return err
+}
 
 // BodyCopy returns a stable copy of the request body. Use it when data must
 // outlive the handler, for example when enqueueing async work.
 func (c *DefaultCtx) BodyCopy() []byte {
+	_ = c.ensureRequestBody()
 	if len(c.body) == 0 {
 		return nil
 	}
@@ -756,7 +830,10 @@ func (c *DefaultCtx) BodyCopy() []byte {
 }
 
 // BodyRaw is the Fiber-compatible name for the unmodified request body.
-func (c *DefaultCtx) BodyRaw() []byte { return c.body }
+func (c *DefaultCtx) BodyRaw() []byte {
+	_ = c.ensureRequestBody()
+	return c.body
+}
 
 // QueryParser decodes the query string into v. The target type should be
 // *map[string]any for unstructured access; struct decoding is not yet supported.
@@ -789,6 +866,17 @@ func (c *DefaultCtx) HeaderParser(v any) error {
 
 // Trailer returns a decoded chunked request trailer by name.
 func (c *DefaultCtx) Trailer(name string) string {
+	if c.h2 != nil && c.server != nil && c.server.cfg.StreamRequestBody && c.h2.stream != nil {
+		s := c.h2.stream
+		s.trailerMu.Lock()
+		defer s.trailerMu.Unlock()
+		for i := range s.trailers {
+			if bytesEqualFold(s.trailers[i].Key, []byte(name)) {
+				return string(s.trailers[i].Value)
+			}
+		}
+		return ""
+	}
 	for i := range c.trailers {
 		if bytesEqualFold(c.trailers[i].Key, []byte(name)) {
 			return string(c.trailers[i].Value)
@@ -818,6 +906,9 @@ func (c *DefaultCtx) SetTrailer(key, value string) {
 }
 
 func (c *DefaultCtx) BodyParser(v any) error {
+	if err := c.ensureRequestBody(); err != nil {
+		return err
+	}
 	if c.server != nil && c.server.cfg.MaxRequestBodySize > 0 && len(c.body) > c.server.cfg.MaxRequestBodySize {
 		return PayloadTooLarge("Request body too large")
 	}
@@ -1561,8 +1652,8 @@ func (c *DefaultCtx) writeJSONMapStringString(m map[string]string) error {
 			c.writeBufPooled = true
 		}
 		base := (*c.writeBuf)[:0]
-		if cap(base) < directJSONHeaderReserve {
-			base = append(base, make([]byte, directJSONHeaderReserve)...)
+		if cap(base) < directJSONHeaderReserve+1 {
+			base = append(base, make([]byte, directJSONHeaderReserve+1)...)
 		} else {
 			base = base[:directJSONHeaderReserve]
 		}
@@ -1601,8 +1692,8 @@ func (c *DefaultCtx) writeJSONMapStringAny(m map[string]any) error {
 			c.writeBufPooled = true
 		}
 		base := (*c.writeBuf)[:0]
-		if cap(base) < directJSONHeaderReserve {
-			base = append(base, make([]byte, directJSONHeaderReserve)...)
+		if cap(base) < directJSONHeaderReserve+1 {
+			base = append(base, make([]byte, directJSONHeaderReserve+1)...)
 		} else {
 			base = base[:directJSONHeaderReserve]
 		}
@@ -1826,8 +1917,8 @@ func (c *DefaultCtx) writeDirectJSONAppender200(app JSONAppender) error {
 		c.writeBufPooled = true
 	}
 	base := (*c.writeBuf)[:0]
-	if cap(base) < directJSONHeaderReserve {
-		base = append(base, make([]byte, directJSONHeaderReserve)...)
+	if cap(base) < directJSONHeaderReserve+1 {
+		base = append(base, make([]byte, directJSONHeaderReserve+1)...)
 	} else {
 		base = base[:directJSONHeaderReserve]
 	}

@@ -22,13 +22,14 @@ type h2PushState struct {
 	mu       sync.Mutex
 	nextID   uint32
 	streams  map[uint32]bool
+	pending  uint32
 	maxPush  uint32
 	disabled atomic.Bool
 }
 
 func newPushState(maxConcurrentStreams uint32) *h2PushState {
 	p := &h2PushState{
-		nextID:  1, // push promises use odd stream IDs starting from 1
+		nextID:  2, // server-initiated push streams use even IDs
 		streams: make(map[uint32]bool),
 		maxPush: maxConcurrentStreams,
 	}
@@ -65,6 +66,9 @@ func (r *h2Response) pushPromise(path string, method string, headers map[string]
 	if r.ended.Load() {
 		return false
 	}
+	if (method != "GET" && method != "HEAD") || path == "" || path[0] != '/' || strings.ContainsAny(path, "\x00\r\n") {
+		return false
+	}
 	conn := r.conn
 
 	// Check if client allows push.
@@ -77,26 +81,42 @@ func (r *h2Response) pushPromise(path string, method string, headers map[string]
 		return false
 	}
 
-	// Allocate a push promise stream ID.
+	// Allocate a server-initiated push stream ID.
 	streamID := conn.allocatePushID()
 	if streamID == 0 {
 		return false
 	}
+	reserved := true
+	defer func() {
+		if reserved {
+			conn.releasePushReservation()
+		}
+	}()
 
 	// Build the PUSH_PROMISE header block.
 	conn.writeMu.Lock()
 	defer conn.writeMu.Unlock()
 	conn.encBuf.Reset()
 
+	scheme := r.stream.scheme
+	if scheme == "" {
+		scheme = "https"
+	}
 	fields := []hpackHeaderField{
 		{Name: ":method", Value: method},
 		{Name: ":path", Value: path},
-		{Name: ":scheme", Value: "https"},
+		{Name: ":scheme", Value: scheme},
 		{Name: ":authority", Value: string(r.stream.authority)},
 	}
 
+	requestHeaders := make([]hpack.HeaderField, 0, len(headers))
 	for k, v := range headers {
-		fields = append(fields, hpackHeaderField{Name: k, Value: v})
+		name := strings.ToLower(k)
+		if strings.HasPrefix(name, ":") || !validToken([]byte(name)) || strings.ContainsAny(v, "\x00\r\n") {
+			return false
+		}
+		fields = append(fields, hpackHeaderField{Name: name, Value: v})
+		requestHeaders = append(requestHeaders, hpack.HeaderField{Name: name, Value: v})
 	}
 
 	for _, field := range fields {
@@ -113,64 +133,111 @@ func (r *h2Response) pushPromise(path string, method string, headers map[string]
 
 	block := conn.encBuf.Bytes()
 
-	// PUSH_PROMISE frame: 8 bytes payload = 4 bytes reserved + 4 bytes promised stream ID.
-	var payload [8]byte
-	binary.BigEndian.PutUint32(payload[0:4], streamID&0x7fffffff)
-
-	// Send the header block as CONTINUATION frames if needed.
+	// A PUSH_PROMISE carries the promised stream ID followed by the first
+	// header-block fragment. The remaining fragments belong in CONTINUATION
+	// frames. In particular, END_HEADERS must only be set on the final frame.
 	max := int(conn.peerMaxFrame.Load())
+	if max < 4 {
+		return false
+	}
 	first := true
-	for first || len(block) > 0 {
-		n := minInt(len(block), max)
-		part := block[:n]
-		block = block[n:]
-		flags := uint8(0)
+	for {
+		limit := max
 		if first {
-			flags = h2FlagEndHeaders
-			first = false
+			limit -= 4
 		}
-		if len(block) == 0 {
+		n := minInt(len(block), limit)
+		flags := uint8(0)
+		if n == len(block) {
 			flags |= h2FlagEndHeaders
 		}
-		if err := conn.writeFrameLocked(h2PushPromise, flags, r.stream.id, payload[:]); err != nil {
-			return false
-		}
-		if len(part) > 0 {
-			if err := conn.writeFrameLocked(h2Continuation, 0, r.stream.id, part); err != nil {
+
+		if first {
+			payload := make([]byte, 4+n)
+			binary.BigEndian.PutUint32(payload[:4], streamID&0x7fffffff)
+			copy(payload[4:], block[:n])
+			if err := conn.writeFrameLocked(h2PushPromise, flags, r.stream.id, payload); err != nil {
 				return false
 			}
+			first = false
+		} else if err := conn.writeFrameLocked(h2Continuation, flags, r.stream.id, block[:n]); err != nil {
+			return false
+		}
+
+		block = block[n:]
+		if len(block) == 0 {
+			break
 		}
 	}
 
 	// Record the pushed stream.
 	conn.pushState.mu.Lock()
 	conn.pushState.streams[streamID] = true
+	conn.pushState.pending--
 	conn.pushState.mu.Unlock()
+	reserved = false
+
+	// A PUSH_PROMISE reserves a server-initiated stream. Dispatch the promised
+	// request through the normal router so the client receives the promised
+	// resource response instead of an orphaned stream that can never finish.
+	streamCtx, cancel := conn.newStreamContext()
+	pushed := &h2Stream{
+		id:         streamID,
+		method:     method,
+		path:       path,
+		authority:  r.stream.authority,
+		scheme:     scheme,
+		headers:    requestHeaders,
+		ctx:        streamCtx,
+		cancel:     cancel,
+		sendWindow: conn.peerInitialWindow,
+		recvWindow: h2InitialWindow,
+		ended:      true,
+	}
+	pushed.bodyCond = sync.NewCond(&pushed.bodyMu)
+	pushed.state.Store(int32(stateHalfClosedRemote))
+	conn.mu.Lock()
+	conn.streams[streamID] = pushed
+	conn.mu.Unlock()
+	conn.dispatch(pushed)
 
 	return true
 }
 
-// allocatePushID allocates an odd-numbered stream ID for a push promise.
+// allocatePushID allocates an even-numbered stream ID for a push promise.
 func (h *h2Conn) allocatePushID() uint32 {
 	if h.pushState == nil {
 		return 0
 	}
 
+	// SETTINGS_MAX_CONCURRENT_STREAMS limits streams initiated by the peer, so
+	// use the peer's value for pushes and keep the application value as a local
+	// safety cap. Ordinary client-initiated streams do not consume push slots.
 	h.pushState.mu.Lock()
 	defer h.pushState.mu.Unlock()
-
-	// Check concurrent push limit.
-	h.mu.Lock()
-	streamCount := len(h.streams)
-	h.mu.Unlock()
-
-	if uint32(streamCount) >= h.pushState.maxPush {
+	limit := h.pushState.maxPush
+	if peerLimit := h.peerMaxConcurrentStreams.Load(); peerLimit < limit {
+		limit = peerLimit
+	}
+	if uint32(len(h.pushState.streams))+h.pushState.pending >= limit {
 		return 0
 	}
 
 	id := h.pushState.nextID
-	h.pushState.nextID += 2 // Push promises use odd IDs
+	h.pushState.nextID += 2 // Push promises use even IDs.
+	h.pushState.pending++
 	return id
+}
+
+func (h *h2Conn) releasePushReservation() {
+	if h.pushState == nil {
+		return
+	}
+	h.pushState.mu.Lock()
+	if h.pushState.pending > 0 {
+		h.pushState.pending--
+	}
+	h.pushState.mu.Unlock()
 }
 
 // ── HTTP/1.1 Push (Early Hints 103) ────────────────────────────────────────

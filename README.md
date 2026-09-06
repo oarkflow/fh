@@ -18,8 +18,9 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 - **Compliance layer** — Business/Professional/Enterprise/Security profiles, audit ledger, route security metadata
 - **Opt-in fail-closed baseline** — `fh.WithSecureByDefault(true)` bounds every protocol input, enables strict parsing, recovery, redaction, and hardened response headers
 - **Template engine** — agnostic interface, any engine implementing `Render(w, name, data, layout...)`
-- **Static file serving** — directory listings, compression, cache control, range requests
-- **Graceful shutdown** — `app.ServeContext(ctx, listener)`, `app.ShutdownWithContext(ctx)`, or `app.ListenWithGracefulShutdown(addr)`
+- **Static file serving** — direct streaming, range requests, streaming gzip, precompressed Brotli/gzip, cache control
+- **Streaming uploads** — opt-in incremental HTTP/1 body consumption with bounded draining and trailer support
+- **Graceful shutdown** — `app.ServeContext(ctx, listener)`, `app.ListenContext(ctx, addr)`, `app.ListenUnixContext(ctx, path)`, `app.ShutdownWithContext(ctx)`, or `app.ListenWithGracefulShutdown(addr)`
 - **Graceful TLS shutdown** — `app.ListenTLSWithGracefulShutdown(addr, certFile, keyFile)`
 - **Pool-based zero-allocation** — `sync.Pool` for contexts, byte buffers, HPACK decoders
 - **Hardened TLS/mTLS** — TLS 1.3 config builder, verified peer state in request contexts, atomic certificate reload
