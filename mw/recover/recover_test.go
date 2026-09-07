@@ -59,7 +59,7 @@ func TestRecoverRFC9457(t *testing.T) {
 	})
 
 	resp := pipeReq(t, app, "GET /panic HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
-	if !strings.Contains(resp, "500 Internal Server Error") || !strings.Contains(resp, "application/problem+json") || !strings.Contains(resp, "An unexpected panic occurred: boom") {
+	if !strings.Contains(resp, "500 Internal Server Error") || !strings.Contains(resp, "application/problem+json") || strings.Contains(resp, "boom") {
 		t.Fatalf("unexpected panic recover response: %s", resp)
 	}
 }

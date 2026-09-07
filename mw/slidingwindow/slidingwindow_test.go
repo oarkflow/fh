@@ -68,3 +68,15 @@ func TestDefaultMaxKeysStillAppliesWhenUnset(t *testing.T) {
 		t.Fatalf("expected all 200 distinct keys tracked (well under default bound), got %d", size)
 	}
 }
+
+func TestBurstAllowsRequestsAboveBaseRate(t *testing.T) {
+	l := NewLimiter(Config{Rate: 2, Burst: 3, Window: time.Hour, MaxKeys: 10, CleanupInterval: time.Hour})
+	for i := 0; i < 5; i++ {
+		if ok, _, _ := l.Allow("burst-key"); !ok {
+			t.Fatalf("request %d should be admitted within rate plus burst", i+1)
+		}
+	}
+	if ok, _, _ := l.Allow("burst-key"); ok {
+		t.Fatal("request beyond rate plus burst should be rejected")
+	}
+}

@@ -199,6 +199,9 @@ func New(config ...Config) fh.HandlerFunc {
 					ctx.Set(k, v)
 				}
 			}
+			if cached.StatusCode > 0 {
+				ctx.Status(cached.StatusCode)
+			}
 			return ctx.SendBytes(cached.Body)
 		}
 
@@ -231,7 +234,7 @@ func New(config ...Config) fh.HandlerFunc {
 		// handler marking its response private/no-store must be honored
 		// even if the incoming request had no Cache-Control at all).
 		respCC := parseCacheControl(ctx.ResponseHeader("Cache-Control"))
-		if respCC.NoStore || respCC.Private {
+		if respCC.NoStore || respCC.Private || respCC.NoCache {
 			return nil
 		}
 
@@ -248,6 +251,7 @@ func New(config ...Config) fh.HandlerFunc {
 			etag := generateETag(body)
 			resp.ETag = etag
 			ctx.Set("ETag", etag)
+			resp.Headers["ETag"] = []string{etag}
 		} else {
 			resp.ETag = resp.Headers["ETag"][0]
 		}

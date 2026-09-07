@@ -152,6 +152,37 @@ func TestResponsePrivateCacheControlIsNotCached(t *testing.T) {
 	}
 }
 
+func TestCachedResponsePreservesStatusAndNoCacheResponsesAreNotStored(t *testing.T) {
+	var notFoundCalls, noCacheCalls int
+	app := fh.New()
+	app.Use(New())
+	app.Get("/missing", func(c fh.Ctx) error {
+		notFoundCalls++
+		return c.Status(404).SendString("missing")
+	})
+	app.Get("/fresh", func(c fh.Ctx) error {
+		noCacheCalls++
+		c.Set("Cache-Control", "no-cache")
+		return c.SendString("fresh")
+	})
+	addr := testServer(t, app)
+
+	status, _ := doRequest(t, addr, "GET", "/missing", nil)
+	if status != 404 {
+		t.Fatalf("expected initial 404, got %d", status)
+	}
+	status, _ = doRequest(t, addr, "GET", "/missing", nil)
+	if status != 404 || notFoundCalls != 1 {
+		t.Fatalf("expected cached 404 with one handler call, status=%d calls=%d", status, notFoundCalls)
+	}
+
+	doRequest(t, addr, "GET", "/fresh", nil)
+	doRequest(t, addr, "GET", "/fresh", nil)
+	if noCacheCalls != 2 {
+		t.Fatalf("expected no-cache response not to be stored, calls=%d", noCacheCalls)
+	}
+}
+
 // TestVaryHeaderPreventsEncodingMismatch proves two requests differing only
 // by a configured Vary header don't collide on the same cache entry.
 func TestVaryHeaderPreventsEncodingMismatch(t *testing.T) {

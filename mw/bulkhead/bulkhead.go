@@ -2,6 +2,7 @@ package bulkhead
 
 import (
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/oarkflow/fh"
@@ -33,7 +34,20 @@ func New(cfg Config) fh.HandlerFunc {
 	if cfg.Reject == nil {
 		cfg.Reject = DefaultReject
 	}
-	sem := make(chan struct{}, cfg.MaxConcurrent)
+	type bucket struct {
+		sem chan struct{}
+		mu  sync.Mutex
+		queued int
+	}
+	var buckets sync.Map
+	getBucket := func(key string) *bucket {
+		if value, ok := buckets.Load(key); ok {
+			return value.(*bucket)
+		}
+		created := &bucket{sem: make(chan struct{}, cfg.MaxConcurrent)}
+		actual, _ := buckets.LoadOrStore(key, created)
+		return actual.(*bucket)
+	}
 	return func(c fh.Ctx) error {
 		key := "global"
 		if cfg.KeyFunc != nil {
@@ -42,29 +56,43 @@ func New(cfg Config) fh.HandlerFunc {
 				key = "global"
 			}
 		}
+		b := getBucket(key)
 		if cfg.Timeout <= 0 {
 			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
+			case b.sem <- struct{}{}:
+				defer func() { <-b.sem }()
 				if cfg.Headers {
-					setHeaders(c, cfg.MaxConcurrent, len(sem))
+					setHeaders(c, cfg.MaxConcurrent, len(b.sem))
 				}
 				return c.Next()
 			default:
-				return cfg.Reject(c, Result{Key: key, Limit: cfg.MaxConcurrent, InFlight: len(sem), RetryAfter: time.Second})
+				return cfg.Reject(c, Result{Key: key, Limit: cfg.MaxConcurrent, InFlight: len(b.sem), RetryAfter: time.Second})
 			}
 		}
+		b.mu.Lock()
+		if len(b.sem) == cfg.MaxConcurrent && b.queued >= cfg.Queue {
+			inFlight := len(b.sem)
+			b.mu.Unlock()
+			return cfg.Reject(c, Result{Key: key, Limit: cfg.MaxConcurrent, InFlight: inFlight, RetryAfter: cfg.Timeout})
+		}
+		b.queued++
+		b.mu.Unlock()
+		defer func() {
+			b.mu.Lock()
+			b.queued--
+			b.mu.Unlock()
+		}()
 		timer := time.NewTimer(cfg.Timeout)
 		defer timer.Stop()
 		select {
-		case sem <- struct{}{}:
-			defer func() { <-sem }()
+		case b.sem <- struct{}{}:
+			defer func() { <-b.sem }()
 			if cfg.Headers {
-				setHeaders(c, cfg.MaxConcurrent, len(sem))
+				setHeaders(c, cfg.MaxConcurrent, len(b.sem))
 			}
 			return c.Next()
 		case <-timer.C:
-			return cfg.Reject(c, Result{Key: key, Limit: cfg.MaxConcurrent, InFlight: len(sem), RetryAfter: cfg.Timeout})
+			return cfg.Reject(c, Result{Key: key, Limit: cfg.MaxConcurrent, InFlight: len(b.sem), RetryAfter: cfg.Timeout})
 		case <-c.Done():
 			return c.Err()
 		}

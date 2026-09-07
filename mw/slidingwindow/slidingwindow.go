@@ -97,9 +97,7 @@ func NewLimiter(config ...Config) *Limiter {
 		if c.Rate > 0 {
 			cfg.Rate = c.Rate
 		}
-		if c.Burst > 0 {
-			cfg.Burst = c.Burst
-		}
+		cfg.Burst = c.Burst
 		if c.Window > 0 {
 			cfg.Window = c.Window
 		}
@@ -189,7 +187,7 @@ func Allow(store kv.Store, key string, rate, burst int, windowSize time.Duration
 		currentCount := len(timestamps)
 		remaining = rate - currentCount
 
-		if remaining <= 0 {
+		if currentCount >= rate+burst {
 			allowed = false
 			remaining = 0
 			if len(timestamps) > 0 {
@@ -201,17 +199,6 @@ func Allow(store kv.Store, key string, rate, burst int, windowSize time.Duration
 			} else {
 				retryAfter = 0
 			}
-			next, marshalErr := json.Marshal(windowState{Timestamps: timestamps})
-			if marshalErr != nil {
-				return nil, 0, false, marshalErr
-			}
-			return next, windowSize * 2, true, nil
-		}
-
-		if currentCount >= rate+burst {
-			allowed = false
-			remaining = 0
-			retryAfter = 0
 			next, marshalErr := json.Marshal(windowState{Timestamps: timestamps})
 			if marshalErr != nil {
 				return nil, 0, false, marshalErr
@@ -239,9 +226,7 @@ func New(config ...Config) fh.HandlerFunc {
 		if c.Rate > 0 {
 			cfg.Rate = c.Rate
 		}
-		if c.Burst > 0 {
-			cfg.Burst = c.Burst
-		}
+		cfg.Burst = c.Burst
 		if c.Window > 0 {
 			cfg.Window = c.Window
 		}

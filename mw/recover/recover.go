@@ -86,7 +86,7 @@ func mergeConfig(base Config, override Config) Config {
 }
 
 func DefaultHandler(ctx fh.Ctx, recovered any, stack []byte) error {
-	return ctx.ProblemDetails(500, "Internal Server Error", fmt.Sprintf("An unexpected panic occurred: %v", recovered), "/errors/internal-server-error")
+	return ctx.ProblemDetails(500, "Internal Server Error", "An unexpected internal server error occurred", "/errors/internal-server-error")
 }
 
 func Error(recovered any) error {
