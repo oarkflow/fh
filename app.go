@@ -139,8 +139,14 @@ type Config struct {
 	SendKeepAliveHeader bool
 	// ServerHeader, when non-empty, is sent as the Server response header.
 	// Empty by default (no Server header sent) for security.
-	ServerHeader   string
-	ReadBufferSize int
+	ServerHeader string
+	// AllowedHosts restricts Host/:authority values accepted by the server.
+	// An empty list preserves the historical behavior and accepts any host.
+	AllowedHosts []string
+	// ContentSecurityPolicy adds a CSP response header when hardening is active.
+	// Keep it empty for APIs; set it for browser-facing HTML endpoints.
+	ContentSecurityPolicy string
+	ReadBufferSize        int
 	// WriteBufferSize is the initial size of the per-connection write buffer.
 	// Defaults to ReadBufferSize when zero. Increase for streaming-heavy workloads.
 	WriteBufferSize      int
@@ -378,6 +384,14 @@ func WithMode(mode Mode) Option {
 
 func WithServerHeader(header string) Option {
 	return func(c *Config) { c.ServerHeader = header }
+}
+
+func WithAllowedHosts(hosts ...string) Option {
+	return func(c *Config) { c.AllowedHosts = append([]string(nil), hosts...) }
+}
+
+func WithContentSecurityPolicy(policy string) Option {
+	return func(c *Config) { c.ContentSecurityPolicy = policy }
 }
 
 // NewFast creates an app with benchmark-oriented defaults. Use this only behind
@@ -1660,6 +1674,11 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			_ = writeAll(conn, serverError400)
 			return
 		}
+		if !allowedHost(string(ctx.Header.Host), a.cfg.AllowedHosts) {
+			releaseCtx(ctx)
+			_ = writeAll(conn, serverError400)
+			return
+		}
 		// The request buffer stays alive until the handler completes, so zero-copy request state can
 		// preserve OriginalURL without copying bytes on every request. Rewrite assigns
 		// Header.URI to a separate target slice, leaving originalURI intact.
@@ -1954,6 +1973,10 @@ func (a *App) runRequestHeadHandler(ctx *DefaultCtx) (accepted bool) {
 			accepted = false
 		}
 	}()
+	if !allowedHost(ctx.Hostname(), a.cfg.AllowedHosts) {
+		_ = ctx.Status(StatusBadRequest).SendString("Bad Request")
+		return false
+	}
 	ctx.params = ctx.params[:0]
 	path := ctx.path()
 	if a.router != nil {

@@ -1,7 +1,9 @@
 package fh
 
 import (
+	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,6 +107,9 @@ func defaultHardeningMiddleware(cfg Config) HandlerFunc {
 			[2]string{"Cross-Origin-Resource-Policy", "same-origin"},
 		)
 	}
+	if strings.TrimSpace(cfg.ContentSecurityPolicy) != "" {
+		headers = append(headers, [2]string{"Content-Security-Policy", cfg.ContentSecurityPolicy})
+	}
 
 	// Pre-encode the fixed header set once at build time. These names/values
 	// are hardcoded constants above, never caller input, so it is safe to skip
@@ -127,4 +132,28 @@ func defaultHardeningMiddleware(cfg Config) HandlerFunc {
 		}
 		return c.Next()
 	}
+}
+
+func allowedHost(host string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	for _, candidate := range allowed {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == "" {
+			continue
+		}
+		if host == candidate {
+			return true
+		}
+		// Allow a host-only policy entry to match the same host with a port.
+		if name, _, err := net.SplitHostPort(host); err == nil && name == candidate {
+			return true
+		}
+	}
+	return false
 }

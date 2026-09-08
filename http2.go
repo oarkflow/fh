@@ -754,6 +754,10 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 		h.sendRST(f.streamID, h2ProtocolError)
 		return nil
 	}
+	if newStream && !allowedHost(s.authority, h.app.cfg.AllowedHosts) {
+		h.sendRST(f.streamID, h2ProtocolError)
+		return nil
+	}
 	if newStream && h.app.cfg.RequestHeadHandler != nil && !h.runRequestHeadHandler(s) {
 		return nil
 	}
