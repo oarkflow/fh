@@ -135,7 +135,7 @@ func TestCSRFMiddleware(t *testing.T) {
 	if code != 200 || token == "" {
 		t.Fatalf("token = %d %q", code, token)
 	}
-	cookie := headers.Get("Set-Cookie")
+	cookie := combineCookies(headers)
 	origin := "http://" + addr
 	code, _, _ = request(t, addr, "POST", "/change", "", map[string]string{"Cookie": cookie, "Origin": origin, "X-CSRF-Token": "wrong"})
 	if code != 403 {
@@ -145,6 +145,17 @@ func TestCSRFMiddleware(t *testing.T) {
 	if code != 200 || body != "changed" {
 		t.Fatalf("valid token = %d %q", code, body)
 	}
+}
+
+func combineCookies(headers http.Header) string {
+	var parts []string
+	for _, v := range headers.Values("Set-Cookie") {
+		if semi := strings.IndexByte(v, ';'); semi >= 0 {
+			v = v[:semi]
+		}
+		parts = append(parts, v)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func TestCacheMiddleware(t *testing.T) {

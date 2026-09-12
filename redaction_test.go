@@ -54,6 +54,58 @@ func TestRedactMapNestedSlices(t *testing.T) {
 	}
 }
 
+type testUser struct {
+	Username string
+	Password string
+	APIKey   string
+}
+
+func TestRedactMapStronglyTypedSlice(t *testing.T) {
+	r := NewRedactor(DefaultRedactionConfig())
+
+	in := map[string]any{
+		"users": []testUser{
+			{Username: "alice", Password: "hunter2", APIKey: "sk_live_abc"},
+			{Username: "bob", Password: "s3cret", APIKey: "sk_live_def"},
+		},
+		"nested": struct {
+			Name   string
+			Secret string
+		}{Name: "root", Secret: "topsecret"},
+	}
+
+	out := r.RedactMap(in)
+
+	users, ok := out["users"].([]any)
+	if !ok || len(users) != 2 {
+		t.Fatalf("expected 2-element []any, got %#v", out["users"])
+	}
+	u0, ok := users[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %#v", users[0])
+	}
+	if u0["Password"] != r.Replacement {
+		t.Fatalf("expected Password redacted in strongly-typed struct, got %#v", u0["Password"])
+	}
+	if u0["APIKey"] != r.Replacement {
+		t.Fatalf("expected APIKey redacted in strongly-typed struct, got %#v", u0["APIKey"])
+	}
+	if u0["Username"] != "alice" {
+		t.Fatalf("expected non-sensitive field preserved, got %#v", u0["Username"])
+	}
+
+	nested, ok := out["nested"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %#v", out["nested"])
+	}
+	if nested["Secret"] != r.Replacement {
+		t.Fatalf("expected Secret redacted in nested struct, got %#v", nested["Secret"])
+	}
+	if nested["Name"] != "root" {
+		t.Fatalf("expected Name preserved, got %#v", nested["Name"])
+	}
+}
+
 func TestRedactMapNilAndSensitiveKey(t *testing.T) {
 	r := NewRedactor(DefaultRedactionConfig())
 	if r.RedactMap(nil) != nil {

@@ -51,6 +51,8 @@ const (
 	insecureBindingName  = "csrf_bind"
 	defaultHeaderName    = "X-CSRF-Token"
 	defaultFormField     = "_csrf"
+	bindingFpName        = "__Host-csrf-fp"
+	insecureFpName       = "csrf_fp"
 	nonceSize            = 32
 	bindingSize          = 32
 	macSize              = sha256.Size
@@ -185,6 +187,15 @@ type Config struct {
 
 	// AllowUnprotectedWebSockets explicitly disables the secure WebSocket default.
 	AllowUnprotectedWebSockets bool
+
+	// AutoRotateOnChange automatically re-issues the CSRF token when the
+	// session binding changes (for example after login, logout, or account
+	// switching). When true, the middleware detects binding changes by
+	// comparing a short HMAC fingerprint stored in a companion cookie and
+	// calls RotateToken transparently. This closes the gap where a
+	// pre-authentication CSRF token could remain valid after the session
+	// identity changes.
+	AutoRotateOnChange bool
 
 	// Extractor overrides HeaderName/FormField extraction when non-nil.
 	Extractor TokenExtractor
@@ -341,12 +352,18 @@ func (p *Protector) Middleware(c fh.Ctx) error {
 		return fh.InternalError(fmt.Errorf("csrf: session binding: %w", err))
 	}
 
+	p.rotateOnBindingChange(c, appBinding)
+
 	token := c.GetCookie(p.cfg.CookieName)
 	validCookieToken := token != "" && p.verifyToken(token, binding, appBinding)
 	if !validCookieToken {
 		token, err = p.issueToken(c, binding, appBinding)
 		if err != nil {
 			return fh.InternalError(err)
+		}
+		if p.cfg.AutoRotateOnChange && p.cfg.SessionBinding != nil {
+			fpName := p.fingerprintCookieName()
+			_ = p.setCookie(c, fpName, bindingFingerprint(appBinding), true)
 		}
 	}
 	c.Locals(defaultTokenLocalKey, token)
@@ -614,6 +631,7 @@ func merge(dst *Config, src Config) {
 	dst.TargetOrigin = src.TargetOrigin
 	dst.TargetOriginResolver = src.TargetOriginResolver
 	dst.SessionBinding = src.SessionBinding
+	dst.AutoRotateOnChange = src.AutoRotateOnChange
 	dst.Extractor = src.Extractor
 	dst.Next = src.Next
 }
@@ -654,6 +672,46 @@ func (p *Protector) applicationBinding(c fh.Ctx) ([]byte, error) {
 	// Empty is permitted so applications can support an anonymous pre-login
 	// state, but authenticated integrations should return a stable session ID.
 	return append([]byte(nil), binding...), nil
+}
+
+func (p *Protector) fingerprintCookieName() string {
+	if p.cfg.CookieDomain != "" || p.cfg.AllowInsecureCookie {
+		return insecureFpName
+	}
+	return bindingFpName
+}
+
+// rotateOnBindingChange detects when the session binding has changed (e.g.
+// after login/logout) and transparently re-issues the CSRF token. This
+// prevents a pre-authentication token from surviving an authentication
+// transition.
+func (p *Protector) rotateOnBindingChange(c fh.Ctx, appBinding []byte) {
+	if !p.cfg.AutoRotateOnChange || p.cfg.SessionBinding == nil {
+		return
+	}
+	fpName := p.fingerprintCookieName()
+	prev := c.GetCookie(fpName)
+	cur := bindingFingerprint(appBinding)
+	if prev == "" || prev == cur {
+		return
+	}
+	// Binding changed — clear old token and issue a fresh one.
+	p.expireCookie(c, p.cfg.CookieName, false)
+	browserBinding, err := p.ensureBrowserBinding(c)
+	if err != nil {
+		return
+	}
+	p.issueToken(c, browserBinding, appBinding)
+	_ = p.setCookie(c, fpName, cur, true)
+}
+
+func bindingFingerprint(binding []byte) string {
+	if len(binding) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, binding)
+	_, _ = mac.Write([]byte("fh.csrf.fp"))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
 }
 
 func (p *Protector) issueToken(c fh.Ctx, browserBinding, appBinding []byte) (string, error) {
