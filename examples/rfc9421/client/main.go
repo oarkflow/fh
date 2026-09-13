@@ -11,6 +11,7 @@ import (
 	"time"
 
 	protocol "github.com/oarkflow/fh/pkg/httpsignature"
+	verifyclient "github.com/oarkflow/fh/pkg/httpsignature/httpclient"
 )
 
 func main() {
@@ -29,7 +30,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	client := protocol.Client{
+	client := verifyclient.Client{
 		HTTPClient: &http.Client{Timeout: 5 * time.Second},
 		Verifier: protocol.Verifier{
 			KeyID:       *keyID,

@@ -11,6 +11,7 @@ import (
 
 	"github.com/oarkflow/fh"
 	protocol "github.com/oarkflow/fh/pkg/httpsignature"
+	verifyclient "github.com/oarkflow/fh/pkg/httpsignature/httpclient"
 )
 
 func TestSignedResponseIntegrationAndNonceReplay(t *testing.T) {
@@ -42,7 +43,7 @@ func TestSignedResponseIntegrationAndNonceReplay(t *testing.T) {
 	t.Cleanup(func() { _ = app.ShutdownWithTimeout(time.Second) })
 
 	request, _ := http.NewRequest(http.MethodGet, origin+"/data", nil)
-	client := protocol.Client{
+	client := verifyclient.Client{
 		HTTPClient: &http.Client{Timeout: 3 * time.Second},
 		Verifier:   protocol.Verifier{KeyID: "key-1", PublicKey: publicKey},
 	}
@@ -135,7 +136,7 @@ func TestAllowedOriginSelectsRequestHost(t *testing.T) {
 		return (&net.Dialer{}).DialContext(ctx, network, listener.Addr().String())
 	}}
 	request, _ := http.NewRequest(http.MethodGet, alternative+"/data", nil)
-	client := protocol.Client{
+	client := verifyclient.Client{
 		HTTPClient: &http.Client{Transport: transport, Timeout: 3 * time.Second},
 		Verifier:   protocol.Verifier{KeyID: "key-1", PublicKey: publicKey},
 	}

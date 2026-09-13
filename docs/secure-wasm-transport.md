@@ -37,14 +37,19 @@ The WASM artifact is the final trust anchor. Publish its generated SHA-256/SRI v
 
 ## Build
 
+Requires [TinyGo](https://tinygo.org) and Binaryen's `wasm-opt` (`brew install
+tinygo binaryen`); see [`wasm/README.md`](../wasm/README.md) for the Go/TinyGo
+version pairing this needs.
+
 ```bash
 make wasm
 ```
 
 This performs all of the following:
 
-1. Builds `wasm/cmd/securefetch` using `GOOS=js GOARCH=wasm`.
-2. Copies the matching `wasm_exec.js` from the active Go toolchain.
+1. Builds `wasm/cmd/securefetch` with `tinygo build -target wasm -no-debug`.
+2. Copies the matching `wasm_exec.js` checked in next to `cmd/securefetch` --
+   a patched copy of TinyGo's runtime glue, not the stock TinyGo or Go one.
 3. Compiles the TypeScript facade and encrypted IndexedDB storage bridge.
 4. Writes `wasm/dist/SHA256SUMS` and `wasm/dist/asset-manifest.json` with SHA-256/SRI pins.
 5. Synchronizes a complete runnable copy into `examples/secure_wasm/wasm`.

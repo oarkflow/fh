@@ -1,6 +1,8 @@
 # RFC 9421 response signatures
 
-FH provides a strict response-signature profile in `mw/httpsignature` and a verifier/client in `pkg/httpsignature`. It follows [RFC 9421](https://www.rfc-editor.org/rfc/rfc9421.html) and uses [RFC 9530](https://www.rfc-editor.org/rfc/rfc9530.html) `Content-Digest` values.
+FH provides a strict response-signature profile in `mw/httpsignature` and a verifier in `pkg/httpsignature`. It follows [RFC 9421](https://www.rfc-editor.org/rfc/rfc9421.html) and uses [RFC 9530](https://www.rfc-editor.org/rfc/rfc9530.html) `Content-Digest` values.
+
+`pkg/httpsignature` itself never imports `net/http`, so `Verifier.VerifyMessage` can be called from a WASM browser client (or any caller that already has the response fields extracted) without pulling `net/http`'s dependency graph into the binary — importing `net/http` alone, even unused, adds several megabytes to a compiled Go/WASM build. A native Go client working with real `*http.Request`/`*http.Response` values instead uses the optional `pkg/httpsignature/httpclient` wrapper below.
 
 ## Security property
 
@@ -30,7 +32,7 @@ Install it after authentication/authorization and as the last response-transform
 ## Go client
 
 ```go
-client := httpsignature.Client{
+client := httpclient.Client{
     HTTPClient: &http.Client{Timeout: 5 * time.Second},
     Verifier: httpsignature.Verifier{
         KeyID:       "response-signing-2026-01",
@@ -47,6 +49,8 @@ if err != nil {
     return err
 }
 ```
+
+`httpclient` is `github.com/oarkflow/fh/pkg/httpsignature/httpclient` — a separate package specifically so that importing it (and `net/http` along with it) is opt-in, not a side effect of importing `pkg/httpsignature`.
 
 The public key must be embedded in the client or supplied through a separately authenticated update/configuration channel. Fetching the key beside the signed response does not defend against an attacker who can alter both.
 

@@ -1,12 +1,8 @@
 package httpsignature
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"errors"
-	"fmt"
-	"io"
-	"net/http"
 	"time"
 )
 
@@ -31,19 +27,6 @@ type ResponseMessage struct {
 	ContentType    string
 	SignatureInput string
 	Signature      string
-}
-
-func (v Verifier) Verify(request *http.Request, response *http.Response, body []byte, expectedNonce string) error {
-	if request == nil || response == nil || request.URL == nil || !validNonce(expectedNonce) {
-		return ErrPolicy
-	}
-	return v.VerifyMessage(request.Method, request.URL.String(), ResponseMessage{
-		Status:         response.StatusCode,
-		ContentDigest:  joinedHeader(response.Header, HeaderContentDigest),
-		ContentType:    joinedHeader(response.Header, "Content-Type"),
-		SignatureInput: joinedHeader(response.Header, HeaderSignatureInput),
-		Signature:      joinedHeader(response.Header, HeaderSignature),
-	}, body, expectedNonce)
 }
 
 // VerifyMessage verifies already-extracted HTTP response fields and never
@@ -102,59 +85,6 @@ func (v Verifier) VerifyMessage(method, targetURI string, response ResponseMessa
 		return ErrSignature
 	}
 	return nil
-}
-
-type Client struct {
-	HTTPClient  *http.Client
-	Verifier    Verifier
-	MaxBodySize int64
-}
-
-// Do requests a fresh nonce-bound RFC 9421 response signature, reads and
-// verifies the exact response content, then restores Body for the caller.
-func (c Client) Do(request *http.Request) (*http.Response, error) {
-	if request == nil || request.URL == nil {
-		return nil, ErrPolicy
-	}
-	nonce, err := NewNonce()
-	if err != nil {
-		return nil, err
-	}
-	keyID := c.Verifier.KeyID
-	accept, err := FormatAcceptSignature(c.Verifier.Label, nonce, keyID)
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set(HeaderAcceptSignature, accept)
-	client := c.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	limit := c.MaxBodySize
-	if limit <= 0 {
-		limit = 16 << 20
-	}
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	closeErr := response.Body.Close()
-	if readErr != nil {
-		return nil, readErr
-	}
-	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("%w: response exceeds %d bytes", ErrPolicy, limit)
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	if err := c.Verifier.Verify(request, response, body, nonce); err != nil {
-		return nil, err
-	}
-	response.Body = io.NopCloser(bytes.NewReader(body))
-	response.ContentLength = int64(len(body))
-	return response, nil
 }
 
 func IsVerificationError(err error) bool {

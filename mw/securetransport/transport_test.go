@@ -19,6 +19,7 @@ import (
 	"github.com/oarkflow/fh"
 	responsemiddleware "github.com/oarkflow/fh/mw/httpsignature"
 	responseprotocol "github.com/oarkflow/fh/pkg/httpsignature"
+	responseverify "github.com/oarkflow/fh/pkg/httpsignature/httpclient"
 	protocol "github.com/oarkflow/fh/pkg/securetransport"
 )
 
@@ -341,18 +342,18 @@ func verifySignedCiphertext(t *testing.T, publicKey ed25519.PublicKey, keyID, me
 		httpResponse.Header.Set(name, value)
 	}
 	verifier := responseprotocol.Verifier{KeyID: keyID, PublicKey: publicKey}
-	if err := verifier.Verify(request, httpResponse, response.body, nonce); err != nil {
+	if err := responseverify.Verify(verifier, request, httpResponse, response.body, nonce); err != nil {
 		t.Fatalf("signed ciphertext verification failed: %v", err)
 	}
 	withoutSignature := &http.Response{StatusCode: httpResponse.StatusCode, Header: httpResponse.Header.Clone()}
 	withoutSignature.Header.Del(responseprotocol.HeaderSignature)
-	if err := verifier.Verify(request, withoutSignature, response.body, nonce); err == nil {
+	if err := responseverify.Verify(verifier, request, withoutSignature, response.body, nonce); err == nil {
 		t.Fatal("missing RFC 9421 signature was accepted")
 	}
 
 	tampered := append([]byte(nil), response.body...)
 	tampered[len(tampered)/2] ^= 0x01
-	if err := verifier.Verify(request, httpResponse, tampered, nonce); err == nil {
+	if err := responseverify.Verify(verifier, request, httpResponse, tampered, nonce); err == nil {
 		t.Fatal("tampered secure-transport ciphertext passed RFC 9421 verification")
 	}
 }

@@ -1,11 +1,15 @@
 GO ?= go
 NPM ?= npm
 TSC ?= tsc
-GOROOT := $(shell $(GO) env GOROOT)
+TINYGO ?= tinygo
 WASM_DIR := wasm
 WASM_DIST := $(WASM_DIR)/dist
 WASM_EXAMPLE_DIR := examples/secure_wasm/wasm
-WASM_EXEC_SRC := $(firstword $(wildcard $(GOROOT)/lib/wasm/wasm_exec.js $(GOROOT)/misc/wasm/wasm_exec.js))
+# wasm_exec.js for a TinyGo-compiled binary must come from TinyGo, not the Go
+# toolchain, and specifically from the patched copy checked in next to
+# cmd/securefetch -- see that file's header comment for why the stock
+# TinyGo-bundled wasm_exec.js does not work as-is for this binary.
+WASM_EXEC_SRC := $(WASM_DIR)/cmd/securefetch/wasm_exec.js
 WASM_BINARY := $(WASM_DIST)/securefetch.wasm
 XDP_SOURCE ?= kernel/xdp/fh_xdp.c
 XDP_OBJECT ?= kernel/xdp/fh_xdp.o
@@ -69,21 +73,21 @@ xdp-detach:
 
 wasm: wasm-example
 
+# TinyGo pins a maximum supported Go version well below this module's go.mod
+# floor (0.41.x supports Go 1.19-1.26; go.mod requires >= 1.26.5), so `go` on
+# PATH usually needs to be a matching 1.26.x, not whatever newer toolchain
+# `go build`/`go test` use elsewhere in this repo. See wasm/README.md for the
+# exact `go install golang.org/dl/go1.26.5@latest && go1.26.5 download` +
+# PATH recipe if tinygo reports "requires go version 1.19 through 1.26".
 wasm-go:
+	@command -v $(TINYGO) >/dev/null 2>&1 || (echo "tinygo was not found on PATH. Install it (e.g. 'brew install tinygo') -- see wasm/README.md for the required Go/TinyGo version pairing." >&2; exit 1)
+	@command -v wasm-opt >/dev/null 2>&1 || (echo "wasm-opt was not found on PATH. TinyGo's wasm build shells out to it; install binaryen (e.g. 'brew install binaryen')." >&2; exit 1)
 	@mkdir -p $(WASM_DIST)
-	GOOS=js GOARCH=wasm CGO_ENABLED=0 $(GO) build -trimpath -buildvcs=false -ldflags="-s -w $(WASM_TRUST_LDFLAGS)" -o $(WASM_BINARY) ./wasm/cmd/securefetch
-	@if command -v wasm-opt >/dev/null 2>&1; then \
-		before=$$(wc -c < $(WASM_BINARY)); \
-		wasm-opt -Oz --enable-bulk-memory --enable-sign-ext --enable-nontrapping-float-to-int \
-			--strip-debug --strip-producers -o $(WASM_BINARY).opt $(WASM_BINARY) && mv $(WASM_BINARY).opt $(WASM_BINARY); \
-		after=$$(wc -c < $(WASM_BINARY)); \
-		echo "wasm-opt: $${before} -> $${after} bytes ($$(( (before - after) / 1024 ))KB saved)"; \
-	else \
-		echo "wasm-opt not found (install binaryen) - skipping extra binary size optimization"; \
-	fi
+	$(TINYGO) build -target wasm -no-debug -ldflags="$(WASM_TRUST_LDFLAGS)" -o $(WASM_BINARY) ./wasm/cmd/securefetch
+	@echo "tinygo build: $$(wc -c < $(WASM_BINARY)) bytes"
 
 wasm-runtime:
-	@test -n "$(WASM_EXEC_SRC)" || (echo "wasm_exec.js was not found under $(GOROOT)" >&2; exit 1)
+	@test -s "$(WASM_EXEC_SRC)" || (echo "$(WASM_EXEC_SRC) is missing" >&2; exit 1)
 	@mkdir -p $(WASM_DIST)
 	cp "$(WASM_EXEC_SRC)" "$(WASM_DIST)/wasm_exec.js"
 
@@ -105,7 +109,7 @@ wasm-check: wasm-manifest
 			shasum -a 256 securefetch.wasm wasm_exec.js secure-fetch.js storage.js index.js; \
 		fi; \
 	} > SHA256SUMS
-	@echo "Built $(WASM_BINARY) and copied Go runtime to $(WASM_DIST)/wasm_exec.js"
+	@echo "Built $(WASM_BINARY) and copied TinyGo runtime to $(WASM_DIST)/wasm_exec.js"
 
 wasm-example: wasm-check
 	@mkdir -p $(WASM_EXAMPLE_DIR)

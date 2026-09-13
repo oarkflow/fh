@@ -28,8 +28,8 @@ production checklist are in the application [`README.md`](../../README.md).
 
 | File | Purpose |
 |---|---|
-| `securefetch.wasm` | Go/WASM cryptographic protocol implementation |
-| `wasm_exec.js` | Go runtime matching the compiler used for the WASM binary |
+| `securefetch.wasm` | TinyGo/WASM cryptographic protocol implementation |
+| `wasm_exec.js` | Patched TinyGo runtime glue matching `securefetch.wasm` |
 | `secure-fetch.js` | Secure Fetch facade, trust validation, SRI loading |
 | `storage.js` | IndexedDB bridge for non-extractable browser device keys |
 | `index.js` | Public JavaScript module entrypoint |
@@ -80,6 +80,18 @@ public pins but must still be distributed with integrity.
 
 ## Build a trusted production bundle
 
+Requires [TinyGo](https://tinygo.org) and Binaryen's `wasm-opt` (`brew install
+tinygo binaryen`). TinyGo pins a maximum supported Go version below this
+project's go.mod floor (0.41.x supports Go 1.19-1.26; go.mod requires >=
+1.26.5), so `go` on PATH usually needs to be a matching 1.26.x for this build
+specifically. If `make wasm` reports "requires go version 1.19 through 1.26",
+install one side by side and put it first on PATH:
+
+```sh
+go install golang.org/dl/go1.26.5@latest && go1.26.5 download
+PATH="$(go1.26.5 env GOROOT)/bin:$PATH"
+```
+
 Use the external browser origin and key IDs that exactly match the server:
 
 ```sh
@@ -93,14 +105,19 @@ make wasm
 
 The build:
 
-1. Compiles `github.com/oarkflow/fh/wasm/cmd/securefetch` for
-   `GOOS=js GOARCH=wasm`.
+1. Compiles `github.com/oarkflow/fh/wasm/cmd/securefetch` with
+   `tinygo build -target wasm -no-debug` -- roughly 90% smaller than an
+   equivalent `go build` output for this binary (~600KB instead of ~5.4MB),
+   because it never links the parts of the Go runtime this client doesn't use.
 2. Injects the five public trust values through Go linker variables.
-3. Copies `wasm_exec.js` from the active Go toolchain.
+3. Copies the patched `wasm_exec.js` checked in next to `cmd/securefetch` in
+   the `github.com/oarkflow/fh` module -- TinyGo's own bundled runtime glue
+   does not work as-is for this binary; see that file's header comment.
 4. Regenerates `asset-manifest.json` with SHA-256/SRI metadata.
 
-Use the same Go toolchain for `securefetch.wasm` and `wasm_exec.js`. A runtime
-from a different Go version may fail before the client initializes.
+Use the exact `wasm_exec.js` this build copies for `securefetch.wasm`. Neither
+TinyGo's stock runtime glue nor a plain Go `wasm_exec.js` will instantiate
+this binary.
 
 ## Browser/server flow
 
@@ -127,13 +144,14 @@ rejected.
 - Serve every file from the trusted application origin unless CORS and CSP are
   deliberately configured for a separate immutable asset origin.
 - Serve `.wasm` as `application/wasm`.
-- Keep CSP restricted to `'self'`; Go WASM requires `'wasm-unsafe-eval'`.
+- Keep CSP restricted to `'self'`; the WASM runtime requires `'wasm-unsafe-eval'`.
 - Do not enable redirects for encrypted Fetch requests because redirects break
   exact target binding and can forward credentials unexpectedly.
 - Publish the final artifact hash through a separately authenticated release
   channel, such as signed release metadata or a managed native application.
-- Purge/CDN-version assets atomically so the WASM binary, Go runtime, JavaScript
-  facade, server keys, key IDs, and manifest always describe one release.
+- Purge/CDN-version assets atomically so the WASM binary, runtime glue,
+  JavaScript facade, server keys, key IDs, and manifest always describe one
+  release.
 
 ## Key rotation
 
@@ -174,7 +192,7 @@ Never embed:
 | `HTTP_SIGNATURE_REQUIRED` | Client did not negotiate the configured response-signing key |
 | Embedded trust/origin mismatch | WASM build values do not match `APP_ORIGIN`, public keys, or key IDs |
 | SRI/integrity failure | Asset bytes and `asset-manifest.json` came from different builds |
-| Go runtime initialization failure | `wasm_exec.js` does not match the Go version used for `securefetch.wasm` |
+| Runtime initialization failure (e.g. "function import requires a callable") | `wasm_exec.js` is not the patched copy checked in next to `cmd/securefetch` -- TinyGo's stock runtime glue and a plain Go `wasm_exec.js` both fail to instantiate this binary |
 | Sessions fail after restart | Development ephemeral keys changed; configure persistent keys |
 | Production startup fails | HTTPS origin or required secret/key configuration is missing |
 

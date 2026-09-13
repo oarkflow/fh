@@ -10,7 +10,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
 )
@@ -432,14 +431,6 @@ func defaultString(value, fallback string) string {
 		return fallback
 	}
 	return value
-}
-
-func joinedHeader(header http.Header, name string) string {
-	values := header.Values(name)
-	for i := range values {
-		values[i] = strings.TrimSpace(values[i])
-	}
-	return strings.Join(values, ", ")
 }
 
 func sign(privateKey ed25519.PrivateKey, base []byte) ([]byte, error) {
