@@ -19,7 +19,7 @@ func main() {
 	app.Use(recover.New(recover.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run near the beginning of the chain so it wraps most middleware and handlers.
 ## Production considerations
 
 Log enough detail for debugging but do not leak stack traces to clients in production. Alert on recovered panics.
-

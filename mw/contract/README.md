@@ -19,7 +19,7 @@ func main() {
 	app.Use(contract.New(contract.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run after version extraction and before handlers. In development, run stricter c
 ## Production considerations
 
 Keep contracts under source control. Add CI checks for OpenAPI/schema compatibility and route behavior.
-

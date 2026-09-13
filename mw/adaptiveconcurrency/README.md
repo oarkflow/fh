@@ -19,7 +19,7 @@ func main() {
 	app.Use(adaptiveconcurrency.New(adaptiveconcurrency.Config{MinLimit: 32, MaxLimit: 2048}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Place early, after request ID/tracing/real IP, and before expensive authenticati
 ## Production considerations
 
 Tune minimum and maximum limits per deployment. Watch rejection rate and latency histograms. For multi-node deployments, combine with external load balancing and queue backpressure.
-

@@ -9,7 +9,7 @@ fh has a pluggable body codec system that automatically selects the appropriate 
 | **JSON** | `application/json`, `text/json`, `+json` | Any struct, map, slice |
 | **XML** | `application/xml`, `text/xml`, `+xml` | Any struct |
 | **Form** | `application/x-www-form-urlencoded` | Struct with `form:` tags, map |
-| **Multipart** | `multipart/form-data` | Struct with `form:` tags, `*multipart.Form` |
+| **Multipart** | `multipart/form-data` | Struct with `form:` tags, `*fh.MultipartForm`, maps |
 | **CSV** | `text/csv` | `[][]string`, `[]map[string]string` |
 | **NDJSON** | `application/x-ndjson` | Any struct (newline-delimited JSON) |
 | **Text** | `text/plain`, `text/html`, `text/css`, `text/javascript`, `application/javascript`, `application/graphql`, `application/sql` | `*string`, `*[]byte` |
@@ -25,24 +25,21 @@ err := c.BodyParser(&user)
 // Content-Type detection is automatic
 ```
 
-### Specify Content-Type
+### Content-Type selection
 
 ```go
-c.Request.Header.Set("Content-Type", "application/json")
+// The client must send Content-Type: application/json.
 var user User
-c.BodyParser(&user)
-
-// Or manually set type on context
-c.Type("json")
-c.BodyParser(&user)
+if err := c.BodyParser(&user); err != nil {
+    return fh.NewHTTPError(fh.StatusBadRequest, "INVALID_BODY", err.Error())
+}
 ```
 
-### With Options
+### Defensive limits
 
 ```go
-c.BodyParserWithOpts(&data, fh.CodecOptions{
-    MaxFormPairs: 5000,
-})
+// Configure once during process startup. Zero-valued fields retain defaults.
+fh.SetCodecOptions(fh.CodecOptions{MaxFormPairs: 5000})
 ```
 
 ## JSON Codec
@@ -51,8 +48,8 @@ c.BodyParserWithOpts(&data, fh.CodecOptions{
 var user User
 c.BodyParser(&user)
 
-// Custom JSON engine (default: encoding/json)
-fh.DefaultJSONEngine = jsoniter.ConfigCompatibleWithStandardLibrary
+// Install a custom JSONEngine during process startup.
+fh.MustSetJSONEngine(myJSONEngine)
 ```
 
 **Struct tags:** `json:""` (standard Go)
@@ -95,9 +92,9 @@ c.BodyParser(&filter)
 
 ```go
 type UploadForm struct {
-    Name   string              `form:"name"`
-    Avatar *fh.MultipartFile   `form:"avatar"`
-    Photos []*fh.MultipartFile `form:"photos"`
+    Name   string             `form:"name"`
+    Avatar fh.MultipartFile   `form:"avatar"`
+    Photos []fh.MultipartFile `form:"photos"`
 }
 
 var form UploadForm
@@ -107,7 +104,7 @@ c.BodyParser(&form)
 form.Avatar.Save("/uploads/avatar.jpg")
 
 // Access file info
-form.Avatar.Filename  // original filename
+form.Avatar.FileName  // original filename
 form.Avatar.Size      // file size
 form.Avatar.Header    // multipart.FileHeader
 ```
@@ -116,8 +113,7 @@ form.Avatar.Header    // multipart.FileHeader
 
 ```go
 file.Save(dst string) error          // save to file
-file.Bytes() ([]byte, error)         // read as bytes
-file.Open() (multipart.File, error)  // open for reading
+file.Open() io.ReadCloser            // open an in-memory reader
 ```
 
 ## CSV Codec
@@ -169,20 +165,19 @@ import "github.com/oarkflow/fh"
 
 type YAMLCodec struct{}
 
-func (c *YAMLCodec) ContentTypes() []string {
-    return []string{"application/yaml", "text/yaml"}
-}
+func (c *YAMLCodec) ContentType() string { return "application/yaml" }
 
-func (c *YAMLCodec) Decode(data []byte, v any) error {
+func (c *YAMLCodec) Unmarshal(data []byte, v any) error {
     return yaml.Unmarshal(data, v)
 }
 
-func (c *YAMLCodec) Encode(v any) ([]byte, error) {
+func (c *YAMLCodec) Marshal(v any) ([]byte, error) {
     return yaml.Marshal(v)
 }
 
 func init() {
     fh.RegisterCodec(&YAMLCodec{})
+    fh.RegisterCodecAlias("text/yaml", &YAMLCodec{})
 }
 ```
 
@@ -191,20 +186,20 @@ func init() {
 ```go
 // Basic codec (read-only)
 type Codec interface {
-    ContentTypes() []string
-    Decode(data []byte, v any) error
+    ContentType() string
+    Unmarshal(data []byte, v any) error
 }
 
 // Codec with encoding support
 type EncoderCodec interface {
     Codec
-    Encode(v any) ([]byte, error)
+    Marshal(v any) ([]byte, error)
 }
 
 // Content-type aware codec
 type ContentTypeAwareCodec interface {
     Codec
-    ContentType() string
+    UnmarshalWithContentType(data []byte, contentType string, v any) error
 }
 
 // Resettable codec (for pooling)
@@ -216,7 +211,9 @@ type ResettableCodec interface {
 
 ## Content-Type Detection
 
-The codec is selected by matching the request's `Content-Type` header against the codec's registered content types. Matching is case-insensitive and supports suffix matching (`+json`, `+xml`).
+The codec is selected by normalized media type. Register additional exact media
+types with `RegisterCodecAlias`. The built-in registry includes JSON/XML suffix
+handling such as `application/problem+json` and `application/atom+xml`.
 
 Priority order for content-type matching:
 1. Exact match

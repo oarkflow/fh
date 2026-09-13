@@ -19,7 +19,7 @@ func main() {
 	app.Use(static.New("./public"))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Mount on specific prefixes before fallback routes. Pair with compression, ETag, 
 ## Production considerations
 
 Prevent directory traversal. Disable directory listing unless intentional. Use CDN/object storage for very high traffic assets.
-

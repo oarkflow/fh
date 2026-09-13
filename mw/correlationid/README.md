@@ -19,7 +19,7 @@ func main() {
 	app.Use(correlationid.New(correlationid.Config{Header: "X-Correlation-ID"}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run at the beginning of the chain before logging, tracing, audit, proxy, and han
 ## Production considerations
 
 Validate externally provided IDs to avoid log injection. Forward the correlation ID to downstream services.
-

@@ -4,7 +4,16 @@
 
 **Module:** `github.com/oarkflow/fh` · **Go:** 1.26.5+
 
+**Documentation version:** current `main` after `v0.0.23` · reviewed
+2026-09-13. For deployed applications, use the documentation from the exact
+tag pinned in `go.mod`.
+
 See the [root README](../README.md) for a quick tour. This folder is the full reference.
+
+The exported Go declarations and GoDoc remain the final API source of truth.
+Start with [API Conventions](api-conventions.md) if migrating older examples,
+especially because `fh.Ctx` is an interface and `fh.New` accepts functional
+options rather than a `Config` value.
 
 ---
 
@@ -13,6 +22,7 @@ See the [root README](../README.md) for a quick tour. This folder is the full re
 | Document | Description |
 |---|---|
 | [Getting Started](getting-started.md) | Installation, quick start, basic concepts |
+| [API Conventions](api-conventions.md) | Handler/context types, construction, errors, streaming and lifecycle signatures |
 | [Configuration](configuration.md) | Full `fh.Config` reference (timeouts, buffers, HTTP/2, codec, reliability, static) |
 | [Routing](routing.md) | Router, route groups, parameters, named routes, route listing |
 | [Request & Response](response.md) | All request/response methods and types |
@@ -53,19 +63,20 @@ See the [root README](../README.md) for a quick tour. This folder is the full re
 | [Linux Kernel Transport](kernel-transport.md) | epoll/io_uring reactors, SO_REUSEPORT steering, XDP operations and deployment |
 | [Performance Profiles](performance_profiles.md) | Fast / Production / Enterprise runtime profiles |
 | [Prefork & Zero-Downtime Restarts](prefork.md) | Multi-process `SO_REUSEPORT` prefork and `SIGHUP`-triggered rolling restarts |
+| [Production Readiness](production-readiness.md) | Required security, CI, platform, load, failure and release gates |
 
 ---
 
 ## Key Features
 
-- **Zero external dependencies** — only the Go standard library
+- **Minimal dependencies** — the standard library plus `golang.org/x/crypto`
 - **HTTP/1.1** — keep-alive, pipelining, chunked transfer, trailers, `Expect: 100-continue`
 - **HTTP/2** — TLS ALPN, h2c prior knowledge, h2c upgrade, full framing, flow control, HPACK
 - **WebSocket (RFC 6455)** — low-level `Conn` + high-level `EventHub` pub/sub with rooms, topics, auth
 - **Radix tree router** — compressed trie with named params (`:param`), wildcards (`*wild`), named routes
 - **Route groups** — shared prefix and middleware inheritance, nested groups
 - **Pluggable codec system** — JSON, XML, Form, Multipart, CSV, NDJSON, Text, Binary + custom codecs
-- **65+ built-in middleware packages** — security, CORS, rate limiting, caching, logging, metrics, sessions, CSRF, and more (see [mw/](../mw/README.md))
+- **70+ built-in middleware packages** — security, CORS, rate limiting, caching, logging, metrics, sessions, CSRF, and more (see [mw/](../mw/README.md))
 - **Typed endpoints** — generic `PostTyped[T, U]`-style handlers with automatic validation, struct binding, schema generation
 - **OpenAPI 3.1** — auto-generated spec from routes and typed endpoints
 - **Reliability layer** — request journaling, idempotency keys, durable async queue, outbox/inbox, DLQ

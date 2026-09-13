@@ -19,7 +19,7 @@ func main() {
 	app.Use(cors.New(cors.Config{AllowOrigins: []string{"https://example.com"}}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -39,4 +39,3 @@ Avoid `*` with credentials. Prefer explicit origins, methods, and headers. Log u
 ## File-backed origin store
 
 By default the allow-list comes from `Config.AllowOrigins` (in-memory). To manage it from a file instead, set `Config.OriginStore` to `cors.NewFileOriginStore(path, reloadInterval)`, where `path` points to a JSON array of origin patterns (same syntax as `AllowOrigins`: exact origins, `"*"`, or `"https://*.example.com"` subdomain wildcards). Pass a non-zero `reloadInterval` to poll the file for changes; a malformed edit is ignored and the last known-good list keeps serving.
-

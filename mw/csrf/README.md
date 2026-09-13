@@ -16,10 +16,10 @@ import (
 
 func main() {
 	app := fh.New()
-app.Use(csrf.New(csrf.Config{}))
+	app.Use(csrf.New(csrf.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```

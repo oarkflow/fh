@@ -18,7 +18,7 @@
 //
 // Usage with middleware (for non-typed routes):
 //
-//	app.Post("/users", validate.Body(&CreateUserRequest{}), handler)
+//	app.Post("/users", validate.Body(func() any { return &CreateUserRequest{} }), handler)
 //	app.Get("/search", validate.Query(&SearchQuery{}), handler)
 //	app.Get("/data", validate.Headers(&AuthHeaders{}), handler)
 package validate

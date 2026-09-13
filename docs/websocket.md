@@ -1,145 +1,166 @@
 # WebSocket
 
-fh implements WebSocket (RFC 6455) entirely from scratch, including both low-level connection handling and a high-level pub/sub EventHub.
+fh provides an RFC 6455 implementation in `pkg/websocket` and supports both
+HTTP/1.1 Upgrade and HTTP/2 extended CONNECT (RFC 8441). Application code uses
+the same handler on either transport.
 
-Every handler below works unmodified over both HTTP/1.1 (`Connection: Upgrade`)
-and HTTP/2 (RFC 8441 extended CONNECT) clients — `c.Upgrade("websocket", ...)`
-detects the transport automatically. See [HTTP/2 § Extended
-CONNECT](http2.md#extended-connect-rfc-8441) for the protocol-level details.
-
-## Architecture
-
-- **`pkg/websocket`** — Core WebSocket implementation
-  - **`Conn`** — Low-level WebSocket connection (read/write frames, masking, control frames, rate limiting)
-  - **`EventHub`** — High-level pub/sub with rooms, topics, channels, auth, heartbeat, reconnect
-
-## Low-Level WebSocket
-
-### Server-Side Upgrade
+## Low-level handler
 
 ```go
-import "github.com/oarkflow/fh/pkg/websocket"
+package main
 
-app.Get("/ws", func(c *fh.Ctx) error {
-    return c.Upgrade("websocket", func(conn *websocket.Conn) {
-        defer conn.Close()
+import (
+    "log"
 
+    "github.com/oarkflow/fh"
+    "github.com/oarkflow/fh/pkg/websocket"
+)
+
+func main() {
+    app := fh.New(fh.WithSecureByDefault(true))
+
+    cfg := websocket.DefaultConfig()
+    cfg.AllowedOrigins = []string{"https://app.example.com"}
+
+    app.Get("/ws", websocket.NewWithConfig(cfg, func(conn *websocket.Conn) error {
         for {
-            msgType, data, err := conn.ReadMessage()
+            opcode, payload, err := conn.ReadMessage()
             if err != nil {
-                break
+                if websocket.IsNormalClose(err) {
+                    return nil
+                }
+                return err
             }
-
-            switch msgType {
-            case websocket.TextMessage:
-                log.Printf("Received text: %s", data)
-                conn.WriteMessage(websocket.TextMessage, []byte("echo: "+string(data)))
-            case websocket.BinaryMessage:
-                log.Printf("Received binary: %d bytes", len(data))
-                conn.WriteMessage(websocket.BinaryMessage, data)
-            case websocket.PingMessage:
-                conn.WriteMessage(websocket.PongMessage, nil)
+            if opcode == websocket.Text || opcode == websocket.Binary {
+                if err := conn.WriteMessage(opcode, payload); err != nil {
+                    return err
+                }
             }
         }
-    })
+    }))
+
+    log.Fatal(app.ListenWithGracefulShutdown(":8080"))
+}
+```
+
+`websocket.New(handler)` uses bounded defaults. `NewWithConfig` additionally
+configures message/frame/fragment limits, read and write deadlines, heartbeat,
+message rate, origins, subprotocols, connection management and callbacks.
+
+Browser requests containing `Origin` are rejected when neither
+`AllowedOrigins` nor `CheckOrigin` is configured. Do not set `AllowAllOrigins`
+for a public browser endpoint.
+
+## Configuration
+
+```go
+type Config struct {
+    MaxMessageSize       int           // default 1 MiB
+    MaxFrameSize         int           // default 64 KiB
+    MaxFragments         int           // default 32
+    ReadTimeout          time.Duration // default 90s
+    WriteTimeout         time.Duration // default 10s
+    PingInterval         time.Duration // default 30s
+    PongTimeout          time.Duration // default 75s
+    MaxMessagesPerSecond int           // default 128
+    AllowAllOrigins      bool
+    AllowedOrigins       []string
+    CheckOrigin          func(fh.Ctx) bool
+    Subprotocols         []string
+    EnableHeartbeat      bool
+    Manager              *Manager
+    OnOpen               func(*Conn)
+    OnClose              func(*Conn, error)
+    OnError              func(*Conn, error)
+    OnMessage            func(*Conn, byte, int64)
+}
+```
+
+Opcodes are `websocket.Continuation`, `Text`, `Binary`, `Close`, `Ping` and
+`Pong`. Important connection methods include `ReadMessage`, `WriteMessage`,
+`ReadJSON`, `WriteJSON`, `Ping`, `Pong`, `CloseWithStatus`, deadline
+setters and `SetReadLimit`.
+
+## EventHub
+
+`EventHub` adds typed JSON envelopes, event handlers, topic/channel
+subscriptions, request/ack correlation, bounded writer queues, authorization,
+presence and metrics.
+
+```go
+hub := websocket.NewEventHub(websocket.EventHubConfig{
+    Auth: func(client *websocket.EventConn, env websocket.Envelope) error {
+        // Authenticate every non-ack envelope. A successful upgrade alone is
+        // not permanent authorization.
+        return nil
+    },
+    Authorize: func(client *websocket.EventConn, action, topic, channel string) error {
+        // Enforce subscribe, unsubscribe and fanout policy.
+        return nil
+    },
+})
+defer hub.Close()
+
+hub.On("chat.message", func(ctx *websocket.HandlerContext) (any, error) {
+    var input struct {
+        Text string `json:"text"`
+    }
+    if err := ctx.Bind(&input); err != nil {
+        return nil, err
+    }
+    return map[string]any{"received": input.Text}, nil
+})
+
+wsCfg := websocket.DefaultConfig()
+wsCfg.AllowedOrigins = []string{"https://app.example.com"}
+
+app.Get("/ws", hub.Handler(wsCfg, func(c fh.Ctx) map[string]string {
+    // Return only server-validated metadata.
+    return map[string]string{"remote_ip": c.IP()}
+}))
+
+_ = hub.BroadcastEvent("chat", "general", "chat.message", map[string]any{
+    "text": "maintenance starts soon",
 })
 ```
 
-### Conn Methods
+The client envelope protocol supports emit, subscribe, unsubscribe, ack,
+request, broadcast, notify, presence, hello and error messages. Incoming
+envelopes and payloads are independently bounded by `MaxEnvelopeBytes` and
+`MaxPayloadBytes`.
+
+Key server APIs:
 
 ```go
-conn.ReadMessage() (messageType int, data []byte, err error)
-conn.WriteMessage(messageType int, data []byte) error
-conn.WriteJSON(v any) error
-conn.ReadJSON(v any) error
-conn.Close() error
-conn.SetReadLimit(limit int64)
-conn.SetReadDeadline(t time.Time)
-conn.SetWriteDeadline(t time.Time)
+hub.Use(middleware)
+hub.On(event, handler, middleware...)
+hub.OnAny(handler)
+hub.Off(event)
+hub.EmitTo(clientID, event, payload)
+hub.RequestTo(clientID, event, payload, timeout)
+hub.BroadcastEvent(topic, channel, event, payload)
+hub.NotifyEvent(topic, channel, event, payload)
+hub.Client(clientID)
+hub.Clients()
+hub.Subscriptions()
+hub.Stats()
+hub.Close()
 ```
 
-### Message Types
+`EventConn` exposes `Emit`, `EmitScoped`, `Request`, `RequestScoped`, `Ack`,
+`Join`, `Leave`, `Subscriptions`, metadata access and `Close`.
 
-```go
-websocket.TextMessage   = 1
-websocket.BinaryMessage = 2
-websocket.CloseMessage  = 8
-websocket.PingMessage   = 9
-websocket.PongMessage   = 10
-```
+## Production rules
 
-## EventHub (High-Level Pub/Sub)
+- Authenticate the HTTP upgrade and reauthorize every event/topic operation.
+- Use exact allowed origins for browser clients.
+- Keep message, frame, fragment, rate, queue and connection limits enabled.
+- Apply idle deadlines and heartbeat checks.
+- Treat metadata extracted from headers as untrusted unless prior middleware
+  validated the proxy or authentication chain.
+- Close the hub during application shutdown.
+- Use a shared authorization source when multiple instances serve the same
+  logical room; EventHub membership itself is process-local.
 
-The EventHub provides a publish/subscribe pattern over WebSocket connections with rooms, topics, authentication, and acknowledgements.
-
-### Basic Usage
-
-```go
-import "github.com/oarkflow/fh/pkg/websocket"
-
-hub := websocket.NewEventHub()
-
-app.Get("/ws", func(c *fh.Ctx) error {
-    return c.Upgrade("websocket", func(conn *websocket.Conn) {
-        client := hub.Connect(conn)
-        defer hub.Disconnect(client)
-
-        // Join rooms
-        client.Join("room:general")
-        client.Join("user:42")
-
-        // Handle events
-        client.On("message", func(data []byte) {
-            hub.Publish("room:general", "message", data)
-        })
-
-        // Block until disconnect
-        client.Wait()
-    })
-})
-```
-
-### Features
-
-| Feature | Description |
-|---------|-------------|
-| **Rooms** | Named groups for message routing |
-| **Topics** | Event types within rooms |
-| **Channels** | Direct client-to-client messaging |
-| **Auth** | Per-connection authentication |
-| **Acknowledgements** | Reliable message delivery |
-| **Heartbeat** | Keep-alive ping/pong |
-| **Reconnect** | Automatic reconnection support |
-
-### EventHub API
-
-```go
-hub := websocket.NewEventHub()
-
-// Publish an event to all clients in a room
-hub.Publish("room:general", "message", data)
-
-// Publish to a specific client
-hub.PublishTo(clientID, "private", data)
-
-// Broadcast to all connected clients
-hub.Broadcast("announcement", data)
-
-// Get room info
-clients := hub.Clients("room:general")
-
-// Client methods
-client.On("event", handler)      // register event handler
-client.Once("event", handler)    // one-time handler
-client.Off("event")              // remove handler
-client.Emit("event", data)       // emit event to this client
-client.Join("room")              // join a room
-client.Leave("room")             // leave a room
-client.Auth(token)               // authenticate
-client.ID() string               // client ID
-client.Wait()                    // block until disconnect
-```
-
-## Complete Example
-
-See `examples/websocket/` for a complete runnable example.
+See [HTTP/2](http2.md#extended-connect-rfc-8441) for transport details and
+[Security](security.md#browser-and-websocket-security) for deployment guidance.

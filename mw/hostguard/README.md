@@ -19,7 +19,7 @@ func main() {
 	app.Use(hostguard.New(hostguard.Config{Allowed: []string{"api.example.com"}}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run very early, after trusted proxy normalization if Host is rewritten by infras
 ## Production considerations
 
 Configure every legitimate domain, including internal health-check names if used. Be careful with wildcard hosts.
-

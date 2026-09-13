@@ -19,7 +19,7 @@ func main() {
 	app.Use(policy.New(policy.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run after identity, tenant, and request metadata extraction. Run before handlers
 ## Production considerations
 
 Version policies, test with fixtures, log decisions, and keep fail-open/fail-closed behavior explicit.
-

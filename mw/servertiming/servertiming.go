@@ -6,12 +6,12 @@
 //
 //	app.Use(servertiming.New())
 //
-//	app.Get("/slow", func(c *fh.Ctx) error {
+//	app.Get("/slow", func(c fh.Ctx) error {
 //	    t := servertiming.Get(c)
 //	    t.Start("db")
 //	    // ... database query ...
 //	    t.Stop("db")
-//	    t.AddMetric("rows", "1000", "")
+//	    t.AddMetric("rows", "returned row count")
 //	    return c.JSON(data)
 //	})
 //

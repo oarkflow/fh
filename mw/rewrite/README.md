@@ -18,7 +18,7 @@ func main() {
 	app := fh.New()
 	app.Use(rewrite.New(rewrite.Rule{From: "/old", To: "/new"}))
 
-	app.Get("/new", func(c fh.Ctx) error { return c.String(fh.StatusOK, "new") })
+	app.Get("/new", func(c fh.Ctx) error { return c.Status(fh.StatusOK).SendString("new") })
 }
 ```
 
@@ -33,4 +33,3 @@ Run before router-dependent middleware/handlers if the rewritten path should dri
 ## Production considerations
 
 Keep rewrite rules explicit and tested. Avoid open redirect patterns and log rewrites during migrations.
-

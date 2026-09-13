@@ -19,7 +19,7 @@ func main() {
 	app.Use(slowlog.New(slowlog.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run near the outside of the chain to measure total request latency.
 ## Production considerations
 
 Set route-specific thresholds where needed. Include request ID, route, status, and dependency metadata without leaking secrets.
-

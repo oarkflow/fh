@@ -11,6 +11,7 @@ package main
 
 import (
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/logger"
 	"github.com/oarkflow/fh/mw/skip"
 )
 
@@ -18,7 +19,7 @@ func main() {
 	app := fh.New()
 	app.Use(skip.New(logger.New(logger.Config{}), func(c fh.Ctx) bool { return c.Path() == "/health" }))
 
-	app.Get("/health", func(c fh.Ctx) error { return c.String(fh.StatusOK, "ok") })
+	app.Get("/health", func(c fh.Ctx) error { return c.Status(fh.StatusOK).SendString("ok") })
 }
 ```
 
@@ -33,4 +34,3 @@ Wrap only the middleware that should be skipped. Keep predicates cheap and deter
 ## Production considerations
 
 Avoid broad skips that bypass security accidentally. Add tests for protected and skipped paths.
-

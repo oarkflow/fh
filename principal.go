@@ -255,12 +255,12 @@ func StaticString(value string) Extractor[string] {
 // it straight into ID/TenantID/Roles (e.g. via PrincipalExtractors or
 // TenantResolver) lets any caller set their own identity, tenant, or roles
 // by sending the header themselves — there is no verification step here,
-// unlike mw/jwt (signature-verified claims) or mw/mtls (TLS-verified
+// unlike a verified bearer-token integration or mw/mtls (TLS-verified
 // certificate). Only use HeaderString for identity/authorization fields when
 // a trusted upstream (e.g. an API gateway or sidecar on a network path the
 // caller cannot reach directly) strips or overwrites this header before it
 // reaches fh; otherwise prefer an extractor backed by a verified source
-// (JWT claims, verified mTLS subject, or a session store).
+// (verified bearer-token claims, an mTLS subject, or a session store).
 func HeaderString(name string) Extractor[string] {
 	return func(c Ctx) (string, bool, error) {
 		if c == nil {

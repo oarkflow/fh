@@ -16,7 +16,12 @@ import (
 
 func main() {
 	app := fh.New()
-	app.Use(reliability.New(fh.ReliabilityPolicy{}))
+	app.Use(reliability.New(fh.ReliabilityPolicy{
+		Enabled: true,
+		Journal: true,
+		RequireIdempotency: true,
+		ReplayResponse: true,
+	}))
 
 	app.Post("/work", func(c fh.Ctx) error { return c.JSON(fh.Map{"queued": true}) })
 }
@@ -33,4 +38,3 @@ Run around unsafe operations that need reliability guarantees. Pair with body li
 ## Production considerations
 
 Use SQL/Redis/NATS/Kafka-style backends for production. Test crash recovery and duplicate request behavior.
-

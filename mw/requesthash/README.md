@@ -19,7 +19,7 @@ func main() {
 	app.Use(requesthash.New(requesthash.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run after body limit and before idempotency/reliability/handlers that need the h
 ## Production considerations
 
 Avoid hashing very large streaming bodies unless explicitly supported. Use bounded memory and restore the body for downstream handlers.
-

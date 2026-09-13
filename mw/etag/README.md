@@ -19,7 +19,7 @@ func main() {
 	app.Use(etag.New(etag.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run with cache/conditional/static middleware. Avoid wrapping streaming responses
 ## Production considerations
 
 Use stable representation hashes. Avoid ETags that reveal sensitive versioning information for private resources.
-

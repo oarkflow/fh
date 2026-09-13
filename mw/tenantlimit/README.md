@@ -16,10 +16,10 @@ import (
 
 func main() {
 	app := fh.New()
-	app.Use(tenantlimit.New(tenantlimit.Config{MaxConcurrent: 64}))
+	app.Use(tenantlimit.New(tenantlimit.Config{Limit: 64}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run after tenant extraction and before expensive handlers.
 ## Production considerations
 
 Tune per-tenant limits by plan or SLA. Emit metrics for accepted/rejected counts by tenant category, not raw tenant IDs if high cardinality.
-

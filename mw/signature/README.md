@@ -16,10 +16,14 @@ import (
 
 func main() {
 	app := fh.New()
-	app.Use(signature.New(signature.Config{SecretResolver: func(c fh.Ctx, keyID string) [][]byte { return [][]byte{[]byte("secret")} }}))
+	app.Use(signature.New(signature.Config{
+		Resolve: func(c fh.Ctx, keyID string) [][]byte {
+			return [][]byte{[]byte("secret")}
+		},
+	}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```

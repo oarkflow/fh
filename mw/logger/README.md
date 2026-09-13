@@ -19,7 +19,7 @@ func main() {
 	app.Use(logger.New(logger.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run after request/correlation ID and real IP so logs include normalized identifi
 ## Production considerations
 
 Redact secrets, authorization headers, cookies, and sensitive query parameters. Use sampling for very high RPS routes.
-

@@ -19,7 +19,7 @@ func main() {
 	app.Use(security.New(security.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run late enough to apply headers to normal responses, but before response is sen
 ## Production considerations
 
 Tune CSP carefully; start with report-only where needed. Enable HSTS only when HTTPS is permanent for the domain.
-

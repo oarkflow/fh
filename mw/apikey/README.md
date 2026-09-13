@@ -19,7 +19,7 @@ func main() {
 	app.Use(apikey.New(apikey.Config{Header: "X-API-Key", Lookup: func(c fh.Ctx, key string) bool { return key == "dev-key" }}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```

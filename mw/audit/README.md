@@ -19,7 +19,7 @@ func main() {
 	app.Use(audit.New(audit.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run after authentication/tenant extraction and before handlers. Run after reques
 ## Production considerations
 
 Redact secrets and regulated data. Use append-only durable sinks for compliance. Define retention and access controls. Avoid logging request bodies by default.
-

@@ -12,7 +12,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 - **WebSocket** — RFC 6455 server implementation with `EventHub` pub/sub layer, transparently served over HTTP/1.1 or HTTP/2
 - **Trie-based router** — radix tree with named (`:param`) and wildcard (`*wild`) parameters
 - **Codec system** — pluggable body parsers for JSON, XML, form, multipart, CSV, NDJSON, text, binary
-- **65+ built-in middleware packages** — see [Middleware](#middleware) below
+- **70+ built-in middleware packages** — see [Middleware](#middleware) below
 - **Typed endpoints & OpenAPI 3.1** — generic request/response handlers with auto-generated specs
 - **Reliability layer** — request journaling, idempotency, durable async queue, outbox/inbox, DLQ
 - **Compliance layer** — Business/Professional/Enterprise/Security profiles, audit ledger, route security metadata
@@ -42,16 +42,20 @@ Requires Go 1.26.5 or later.
 ```go
 package main
 
-import "github.com/oarkflow/fh"
+import (
+    "log"
+
+    "github.com/oarkflow/fh"
+)
 
 func main() {
     app := fh.New()
 
-    app.Get("/", func(c *fh.Ctx) error {
+    app.Get("/", func(c fh.Ctx) error {
         return c.SendString("Hello, World!")
     })
 
-    app.Listen(":8080")
+    log.Fatal(app.ListenWithGracefulShutdown(":8080"))
 }
 ```
 
@@ -119,10 +123,10 @@ app.All("/path", handler)          // register all methods
 app.Add("GET", "/path", handler)   // explicit method string
 
 // Route parameters
-app.Get("/users/:id", func(c *fh.Ctx) error {
+app.Get("/users/:id", func(c fh.Ctx) error {
     return c.SendString("User: " + c.Params("id"))
 })
-app.Get("/files/*path", func(c *fh.Ctx) error {
+app.Get("/files/*path", func(c fh.Ctx) error {
     return c.SendString("File: " + c.Params("path"))
 })
 
@@ -158,7 +162,6 @@ Commonly used packages:
 | Package | Description |
 |---|---|
 | `mw/basicauth` | HTTP Basic Authentication (single-user, multi-user, storage-backed) |
-| `mw/jwt` | Dependency-free JWT verification, principal population |
 | `mw/apikey` | API key authentication via header or query |
 | `mw/cors` | Cross-Origin Resource Sharing |
 | `mw/csrf` | CSRF protection |
@@ -178,7 +181,10 @@ Commonly used packages:
 | `mw/httpsignature` | Nonce-bound RFC 9421 Ed25519 response signatures |
 | `mw/metrics` | Prometheus-style metrics endpoint |
 
-This is a subset — fh ships **65+ middleware packages** under `mw/`, each with its own `README.md`. See [`docs/middleware.md`](docs/middleware.md) for the full reference and recommended ordering, or [`mw/README.md`](mw/README.md) for the package index.
+This is a subset — fh ships **70+ middleware packages** under `mw/`, each with
+its own `README.md`. See [`docs/middleware.md`](docs/middleware.md) for the full
+reference and recommended ordering, or [`mw/README.md`](mw/README.md) for the
+package index.
 
 ## Body Parsing & Codecs
 
@@ -224,10 +230,11 @@ See [Request & Response](docs/response.md) for the full method reference.
 ## Static Files
 
 ```go
+import "os"
+
 app.Static("/static", "./public")
 
-app.StaticFS("/", fh.StaticConfig{
-    Root:         "./public",
+app.StaticFS("/", os.DirFS("./public"), fh.StaticConfig{
     Compress:     true,
     Browse:       true,
     IndexFiles:   []string{"index.html", "index.htm"},
@@ -242,14 +249,15 @@ fh supports TLS + ALPN (`app.ListenTLS(":443", "cert.pem", "key.pem")`), h2c pri
 ## WebSocket
 
 ```go
-app.Get("/ws", func(c *fh.Ctx) error {
-    conn, err := c.Upgrade()
+import "github.com/oarkflow/fh/pkg/websocket"
+
+app.Get("/ws", websocket.New(func(conn *websocket.Conn) error {
+    opcode, payload, err := conn.ReadMessage()
     if err != nil {
         return err
     }
-    msg, err := conn.ReadMessage()
-    return conn.WriteMessage(msg)
-})
+    return conn.WriteMessage(opcode, payload)
+}))
 ```
 
 For pub/sub with rooms, topics, auth, and heartbeats, use `pkg/websocket.EventHub`:
@@ -257,20 +265,23 @@ For pub/sub with rooms, topics, auth, and heartbeats, use `pkg/websocket.EventHu
 ```go
 import "github.com/oarkflow/fh/pkg/websocket"
 
-hub := websocket.NewEventHub()
+hub := websocket.NewEventHub(websocket.EventHubConfig{
+    Auth: func(client *websocket.EventConn, env websocket.Envelope) error {
+        // Revalidate authorization for every non-ack event.
+        return nil
+    },
+})
+defer hub.Close()
 
-app.Get("/ws", func(c *fh.Ctx) error {
-    conn, err := c.Upgrade()
-    if err != nil {
-        return err
-    }
-    hub.Serve(conn)
+hub.On("chat.message", func(ctx *websocket.HandlerContext) (any, error) {
+    return map[string]any{"accepted": true}, nil
 })
 
-hub.Publish("chat:general", "Hello everyone!")
-hub.OnConnect(func(ctx *websocket.Context) {
-    ctx.Join("room:golang")
-})
+wsConfig := websocket.DefaultConfig()
+wsConfig.AllowedOrigins = []string{"https://app.example.com"}
+app.Get("/ws", hub.Handler(wsConfig, nil))
+
+_ = hub.BroadcastEvent("chat", "general", "chat.message", "Hello everyone!")
 ```
 
 See [WebSocket](docs/websocket.md).
@@ -285,8 +296,8 @@ return fh.Unauthorized("Sign in required")
 return fh.NewHTTPError(fh.StatusConflict, "USER_EXISTS", "User already exists")
 
 app := fh.NewWithConfig(fh.Config{
-    ErrorHandler: func(c *fh.Ctx, err error) { _ = c.ErrorResponse(err) },
-    NotFoundHandler: func(c *fh.Ctx) error {
+    ErrorHandler: func(c fh.Ctx, err error) { _ = c.ErrorResponse(err) },
+    NotFoundHandler: func(c fh.Ctx) error {
         return c.Status(fh.StatusNotFound).JSON(fh.Map{"error": "missing"})
     },
 })
@@ -297,7 +308,7 @@ See [Error Framework](docs/ERROR_FRAMEWORK.md).
 ## Configuration
 
 ```go
-app := fh.New(fh.Config{
+app := fh.NewWithConfig(fh.Config{
     ReadTimeout:          10 * time.Second,
     WriteTimeout:         10 * time.Second,
     IdleTimeout:          120 * time.Second,
@@ -329,7 +340,7 @@ smw := session.New(session.Config{
 })
 app.Use(smw.Middleware)
 
-app.Get("/login", func(c *fh.Ctx) error {
+app.Get("/login", func(c fh.Ctx) error {
     sess := session.Get(c)
     sess.Set("user_id", 42)
     return sess.Save()
@@ -391,7 +402,7 @@ See [ACME](docs/acme.md).
 An optional, stdlib-only runtime for request journaling, idempotency, and a durable async job queue — no external queue dependency required.
 
 ```go
-app := fh.New(fh.Config{
+app := fh.NewWithConfig(fh.Config{
     Reliability: fh.ReliabilityConfig{
         Enabled:            true,
         DataDir:            ".fh-data",
@@ -483,25 +494,12 @@ Full working examples in [`examples/`](examples/):
 | Example | Description |
 |---|---|
 | `basic` | Minimal "Hello World" |
-| `header_parser` | Binding request headers into a struct via `header` tags |
-| `query` | `app.Query`/`app.QueryTyped` handlers |
-| `validation` | Typed endpoint request validation |
-| `http_client` | Outbound `fh.NewClient` usage |
-| `budget` | Hierarchical per-request execution budgets |
-| `configreload` | Atomic config/route/cert reload |
-| `merkle_audit` | Tamper-evident audit logging with Merkle checkpoints |
-| `privacy` | Privacy-aware telemetry filtering (logs/traces/metrics/audit) |
-| `requestdedup` | Request deduplication |
-| `scheduler` | Priority-based request scheduling with concurrency pools |
-| `slo` | Route-level SLO monitoring with burn-rate alerts |
+| `flash-messages` | Session-backed one-time flash messages and redirects |
+| `http-modern` | Modern HTTP helpers and protocol behavior |
+| `kernel_server` | Kernel-assisted server configuration and readiness |
+| `prefork` | Multi-process prefork serving |
 | `secure_wasm` | Session + secure WASM client demo for encrypted API calls |
 | `rfc9421` | RFC 9421 signed-response server plus fail-closed Go and WebCrypto clients |
-| `production` | Combined production middleware stack |
-| `workflow` | Checkout workflow: sequential/parallel/branch steps, retry, timeout, compensation, async job handoff |
-| `webhook-receiver` | Secure, idempotent webhook ingestion: signature verification, replay protection, business-level dedup |
-| `api-gateway` | Public API edge: security headers, CORS, rate limiting, API key auth, circuit breaker, reverse proxy, metrics |
-| `multi-tenant-api` | Multi-tenant SaaS API: JWT auth, tenant resolution, per-tenant concurrency isolation, audit trail |
-| `resilient-upstream` | Fault-isolated upstream calls: load shedding, bulkhead, timeout, circuit breaker, reverse proxy |
 
 ## Testing & Benchmarks
 
@@ -518,7 +516,11 @@ Full reference documentation is in [`docs/README.md`](docs/README.md), covering 
 
 ## Known Limitations
 
-fh is production-ready for HTTP/1.1, HTTP/2, and WebSocket workloads on a single host or behind a load balancer with sticky/instance-local state. A few gaps to plan around, deliberately left out to preserve the zero-third-party-dependency design rather than half-implemented:
+fh is a production-oriented, pre-v1 framework. The core HTTP/1.1, HTTP/2 and
+WebSocket paths have extensive unit, integration, race and fuzz coverage, but a
+specific deployment is production-ready only after the release gates in
+[`docs/production-readiness.md`](docs/production-readiness.md) are satisfied.
+The following product limitations must also be planned around:
 
 - **No HTTP/3 / QUIC.** Only HTTP/1.1 and HTTP/2 are implemented. Terminate HTTP/3 at an edge proxy (e.g. a CDN) in front of fh if you need it.
 - **No OpenTelemetry (OTLP) export.** `mw/tracing` propagates/parses `traceparent` headers and `mw/metrics` exposes a hand-rolled Prometheus text endpoint, but neither ships an OTLP exporter to a collector (Grafana Tempo/Datadog/etc.). Bridge these yourself, or scrape the Prometheus endpoint and configure trace propagation compatible with your existing collector.

@@ -10,6 +10,8 @@ Normalizes the client IP from trusted proxy headers such as `X-Forwarded-For` or
 package main
 
 import (
+	"net"
+
 	"github.com/oarkflow/fh"
 	"github.com/oarkflow/fh/mw/realip"
 )
@@ -20,7 +22,7 @@ func main() {
 	app.Use(realip.New(realip.Config{TrustedProxies: []*net.IPNet{edge}}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```

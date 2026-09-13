@@ -19,7 +19,7 @@ func main() {
 	app.Use(tenant.New(tenant.Config{Header: "X-Tenant-ID"}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run after authentication if tenant comes from the principal; otherwise after tru
 ## Production considerations
 
 Do not trust public tenant headers unless set by a trusted gateway. Validate tenant membership against the authenticated subject.
-

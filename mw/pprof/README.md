@@ -21,7 +21,7 @@ func main() {
 		Auth: pprof.StaticToken("X-Admin-Token", "change-me"),
 	})
 
-	app.Get("/", func(c fh.Ctx) error { return c.String(fh.StatusOK, "ok") })
+	app.Get("/", func(c fh.Ctx) error { return c.Status(fh.StatusOK).SendString("ok") })
 }
 ```
 
@@ -36,4 +36,3 @@ Register separately from public routes. Keep behind admin authentication and pri
 ## Production considerations
 
 Never expose pprof publicly. Use temporary access during incidents and audit access.
-

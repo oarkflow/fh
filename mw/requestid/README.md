@@ -19,7 +19,7 @@ func main() {
 	app.Use(requestid.New(requestid.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run first or near first before logging, tracing, audit, metrics, and handlers.
 ## Production considerations
 
 Validate incoming IDs to prevent log injection. Use high-entropy IDs when generating new IDs.
-

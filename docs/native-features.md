@@ -17,7 +17,7 @@ type CreateUserResponse struct {
     Email string `json:"email"`
 }
 
-app.PostTyped("/users", func(c *fh.Ctx, req CreateUserRequest) (CreateUserResponse, error) {
+app.PostTyped("/users", func(c fh.Ctx, req CreateUserRequest) (CreateUserResponse, error) {
     // req is automatically validated (if it implements Validator)
     user := createUser(req)
     return CreateUserResponse{
@@ -57,7 +57,7 @@ type SearchResponse struct {
     Total   int            `json:"total"`
 }
 
-app.QueryTyped("/search", func(c *fh.Ctx, req SearchRequest) (SearchResponse, error) {
+app.QueryTyped("/search", func(c fh.Ctx, req SearchRequest) (SearchResponse, error) {
     results, total := search(req.Query, req.Page)
     return SearchResponse{Results: results, Total: total}, nil
 })
@@ -80,7 +80,7 @@ If the request type implements the `Validator` interface, it is automatically va
 ```go
 func (r CreateUserRequest) Validate() error {
     if r.Name == "" {
-        return fh.NewHTTPError(422, "name is required")
+        return fh.NewHTTPError(422, "INVALID_NAME", "name is required")
     }
     return nil
 }
@@ -144,48 +144,54 @@ app.EnableDocs("/docs")
 
 ## Server-Sent Events (SSE)
 
-Native SSE support with the `Event()` and `Comment()` methods.
+Native SSE support with bounded connection lifetime inherited from the request
+context and streaming writes through `fh.SSE`.
 
 ```go
-app.Get("/events", func(c *fh.Ctx) error {
-    c.Response.Header.Set("Content-Type", "text/event-stream")
-    c.Response.Header.Set("Cache-Control", "no-cache")
-    c.Response.Header.Set("Connection", "keep-alive")
-
-    return c.SSE(func(events *fh.SSEWriter) {
+app.Get("/events", func(c fh.Ctx) error {
+    return c.SSE(func(events *fh.SSE) error {
         for i := 0; i < 10; i++ {
-            events.Event(fh.SSEMessage{
+            if err := events.WriteEvent(fh.SSEEvent{
                 Event: "update",
                 Data:  fmt.Sprintf("Message %d", i),
                 ID:    fmt.Sprintf("%d", i),
-            })
+            }); err != nil {
+                return err
+            }
 
-            // Or send a comment
-            events.Comment("keepalive")
+            if err := events.Comment("keepalive"); err != nil {
+                return err
+            }
 
             time.Sleep(1 * time.Second)
         }
+        return nil
     })
 })
 ```
 
-### SSEMessage
+### SSEEvent
 
 ```go
-type SSEMessage struct {
-    Event string // event type
-    Data  string // event data (can be JSON string)
-    ID    string // event ID (for Last-Event-ID tracking)
-    Retry int    // reconnection time in ms
+type SSEEvent struct {
+    ID      string
+    Event   string
+    Data    any
+    Retry   time.Duration
+    Comment string
 }
 ```
 
-### SSEWriter Methods
+### SSE methods
 
 ```go
-events.Event(msg SSEMessage)     // send event
-events.Comment(text string)      // send comment
-events.Retry(ms int)             // set retry interval
+events.WriteEvent(event)         // send a complete event
+events.Send(data)                // ordinary message event
+events.SendEvent(name, data)     // named event
+events.Comment(text)             // comment/heartbeat
+events.Ping()                    // standard ping comment
+events.SetRetry(duration)        // client reconnect delay
+events.Done()                    // closed when request disconnects
 ```
 
 ---
@@ -210,19 +216,19 @@ redacted := fh.RedactSecret("sk_live_abc123def456")
 ### Cookie Signing
 
 ```go
-signed := fh.SignCookie("session_value", "secret")
-valid := fh.VerifySignedCookie(signed, "secret")
+secret := []byte("replace-with-at-least-32-random-bytes")
+signed := fh.SignCookie("session_value", secret)
+value, valid := fh.VerifySignedCookie(signed, secret)
 ```
 
 ### Data Sensitivity
 
 ```go
-redactor := fh.NewRedactor([]string{"password", "secret", "token"})
-safeJSON := redactor.Redact(jsonData)
-
-envelope := fh.NewSecureEnvelope([]byte("encryption-key"))
-secured, _ := envelope.Seal(plaintext)
-opened, _ := envelope.Open(secured)
+redactor := fh.NewRedactor(fh.RedactionConfig{
+    Enabled: true,
+    Fields: []string{"password", "secret", "token"},
+})
+safeMetadata := redactor.RedactMap(metadata)
 ```
 
 ## Route Information
@@ -234,9 +240,16 @@ type RouteInfo struct {
     Method      string
     Path        string
     Name        string
-    Middlewares int
-    Typed       any
-    Schema      any
+    Typed          bool
+    RequestType    string
+    ResponseType   string
+    RequestSchema  fh.JSONSchema
+    ResponseSchema fh.JSONSchema
+    Deprecated     bool
+    Tags           []string
+    Security       fh.RouteSecurityConfig
+    Data           fh.DataPolicy
+    Meta           map[string]any
 }
 ```
 
@@ -250,7 +263,7 @@ for _, r := range routes {
 }
 
 // HTTP endpoint
-app.EnableRouteList("/_fh/routes")
+app.EnableRouteList("/_fh/routes", authenticationMiddleware)
 // GET /_fh/routes -> JSON array of route info
 ```
 
@@ -287,10 +300,9 @@ app.Use(apiversion.New(apiversion.Config{
 ## Pluggable JSON Engine
 
 ```go
-import jsoniter "github.com/json-iterator/go"
-
-fh.DefaultJSONEngine = jsoniter.ConfigCompatibleWithStandardLibrary
-// All JSON codec operations now use json-iterator
+// Implement fh.JSONEngine, then install it once during startup.
+fh.MustSetJSONEngine(myJSONEngine)
+// Body codecs and JSON response helpers now use the installed engine.
 ```
 
 ## Pluggable Template Engine

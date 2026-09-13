@@ -19,7 +19,7 @@ func main() {
 	app.Use(conditional.New(conditional.Config{ETag: func(c fh.Ctx) string { return `"v1"` }}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run before expensive handlers if tags can be computed cheaply. Pair with ETag/st
 ## Production considerations
 
 Use strong validators for write preconditions. Ensure ETags change whenever the representation changes.
-

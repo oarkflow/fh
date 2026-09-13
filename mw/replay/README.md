@@ -20,7 +20,7 @@ func main() {
 	app.Use(replay.New(replay.Config{Store: kv.NewMemoryStore()}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```

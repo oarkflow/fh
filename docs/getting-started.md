@@ -6,7 +6,8 @@
 go get github.com/oarkflow/fh
 ```
 
-**Requirements:** Go 1.26.5 or later
+**Requirements:** Go 1.26.5 or later. The module is currently pre-v1, so pin a
+specific release and review release notes before upgrading.
 
 ## Quick Start
 
@@ -14,31 +15,49 @@ go get github.com/oarkflow/fh
 package main
 
 import (
+    "log"
+
     "github.com/oarkflow/fh"
 )
 
 func main() {
-    app := fh.New()
+    app := fh.New(fh.WithSecureByDefault(true))
 
-    app.Get("/", func(c *fh.Ctx) error {
+    app.Get("/", func(c fh.Ctx) error {
         return c.JSON(map[string]string{"hello": "world"})
     })
 
-    app.Listen(":8080")
+    log.Fatal(app.ListenWithGracefulShutdown(":8080"))
 }
 ```
+
+This example enables the strict, fail-closed protocol baseline.
+Authentication, authorization, CORS, CSRF, trusted-host policy and
+application rate limits remain application-specific and must be configured
+explicitly.
 
 ## Basic Concepts
 
 ### Creating an App
 
 ```go
-app := fh.New()                           // default config
-app := fh.New(fh.Config{                  // custom config
+app := fh.New()                           // production mode and bounded I/O defaults
+app := fh.NewProduction()                 // explicit spelling of production mode
+app := fh.NewWithConfig(fh.Config{        // config-struct form
     ReadTimeout: 5 * time.Second,
     WriteTimeout: 10 * time.Second,
 })
+app := fh.New(                            // functional-option form
+    fh.WithSecureByDefault(true),
+    fh.WithAllowedHosts("api.example.com"),
+)
 ```
+
+`New()` defaults to `ModeProduction`, but `SecureByDefault` is deliberately
+opt-in. Use `NewFast()` only for trusted benchmarks or behind an edge that
+supplies the omitted protections. `NewEnterprise()` enables compliance,
+reliability and audit-oriented defaults and must be supplied authentication for
+its evidence endpoints.
 
 ### Defining Routes
 
@@ -54,10 +73,12 @@ app.Options("/users", optionsUsers)
 app.All("/webhook", webhookHandler) // matches any HTTP method
 app.Add("PURGE", "/cache", purgeCache) // custom method
 
-// QUERY (RFC 9485) — safe/idempotent method with request body for search/query
-app.Query("/search", func(c *fh.Ctx) error {
+// QUERY (RFC 10008) — safe/idempotent method with a request body
+app.Query("/search", func(c fh.Ctx) error {
     var q SearchRequest
-    c.BodyParser(&q)
+    if err := c.BodyParser(&q); err != nil {
+        return fh.NewHTTPError(fh.StatusBadRequest, "INVALID_QUERY", err.Error())
+    }
     return c.JSON(search(q))
 })
 ```
@@ -65,7 +86,7 @@ app.Query("/search", func(c *fh.Ctx) error {
 ### Handler Signature
 
 ```go
-func handler(c *fh.Ctx) error {
+func handler(c fh.Ctx) error {
     // ... handle request
     return c.SendString("ok")
 }
@@ -104,19 +125,21 @@ app.ShutdownWithTimeout(30 * time.Second)
 ### Lifecycle Hooks
 
 ```go
-app.OnListen(func() {
+app.OnListen(func() error {
     log.Println("Server started")
+    return nil
 })
-app.OnShutdown(func() {
+app.OnShutdown(func() error {
     log.Println("Server shutting down")
+    return nil
 })
-app.OnConnect(func(c *fh.Ctx) {
-    log.Printf("New connection from %s", c.IP())
+app.OnConnect(func(conn net.Conn) {
+    log.Printf("New connection from %s", conn.RemoteAddr())
 })
-app.OnClose(func(c *fh.Ctx) {
-    log.Printf("Connection closed: %s", c.IP())
+app.OnClose(func(conn net.Conn) {
+    log.Printf("Connection closed: %s", conn.RemoteAddr())
 })
-app.OnError(func(c *fh.Ctx, err error) {
+app.OnError(func(err error) {
     log.Printf("Error: %v", err)
 })
 ```
@@ -133,10 +156,9 @@ c.Path()              // /users/123
 c.OriginalURL()       // /users/123?page=1
 c.Hostname()          // example.com
 c.IP()                // 192.168.1.1
-c.Port()              // 8080
-c.Scheme()            // http or https
-c.Protocol()          // HTTP/1.1 or HTTP/2
-c.IsTLS()             // true if TLS
+c.Protocol()          // "http" or "https"
+c.Secure()            // true if TLS
+c.ConnectProtocol()   // RFC 8441 extended CONNECT protocol, when present
 ```
 
 ### Route Parameters
@@ -157,7 +179,7 @@ c.Query("sort", "asc") // with default
 ### Headers
 
 ```go
-c.Get("Content-Type")     // single header
+c.Get("Content-Type")     // single request header
 c.GetReqHeaders()         // all request headers
 ```
 
@@ -192,7 +214,7 @@ user := c.Locals("user").(*User)
 ### Middleware / Next
 
 ```go
-func myMiddleware(c *fh.Ctx) error {
+func myMiddleware(c fh.Ctx) error {
     // before
     err := c.Next()
     // after
@@ -206,7 +228,7 @@ func myMiddleware(c *fh.Ctx) error {
 // Typed HTTP errors
 return fh.ErrNotFound
 return fh.ErrBadRequest
-return fh.NewHTTPError(429, "Rate limit exceeded")
+return fh.NewHTTPError(429, "RATE_LIMITED", "Rate limit exceeded")
 
 // Problem Details (RFC 9457)
 return c.Problem(fh.Problem{
@@ -216,12 +238,15 @@ return c.Problem(fh.Problem{
 })
 
 // Custom error handler
-app := fh.New(fh.Config{
-    ErrorHandler: func(c *fh.Ctx, err error) error {
-        return c.JSON(map[string]string{"error": err.Error()})
+app := fh.NewWithConfig(fh.Config{
+    ErrorHandler: func(c fh.Ctx, err error) {
+        _ = c.SafeErrorResponse(err)
     },
 })
 ```
+
+`ErrorHandler` does not return an error. Prefer `SafeErrorResponse` in
+production so private causes are not disclosed.
 
 ## Full Example
 
@@ -231,16 +256,18 @@ package main
 import (
     "log"
     "time"
+
     "github.com/oarkflow/fh"
-    "github.com/oarkflow/fh/mw/recover"
-    "github.com/oarkflow/fh/mw/logger"
     "github.com/oarkflow/fh/mw/compress"
+    "github.com/oarkflow/fh/mw/logger"
+    "github.com/oarkflow/fh/mw/recover"
 )
 
 func main() {
-    app := fh.New(fh.Config{
+    app := fh.NewWithConfig(fh.Config{
         ReadTimeout:  10 * time.Second,
         WriteTimeout: 10 * time.Second,
+        SecureByDefault: true,
     })
 
     // Global middleware
@@ -249,14 +276,22 @@ func main() {
     app.Use(compress.New())
 
     // Routes
-    app.Get("/", func(c *fh.Ctx) error {
+    app.Get("/", func(c fh.Ctx) error {
         return c.SendString("Hello, World!")
     })
 
     api := app.Group("/api")
-    api.Get("/users", listUsers)
-    api.Post("/users", createUser)
+    api.Get("/users", func(c fh.Ctx) error {
+        return c.JSON([]string{"Ada", "Linus"})
+    })
+    api.Post("/users", func(c fh.Ctx) error {
+        var input map[string]any
+        if err := c.BodyParser(&input); err != nil {
+            return fh.NewHTTPError(fh.StatusBadRequest, "INVALID_BODY", err.Error())
+        }
+        return c.Status(fh.StatusCreated).JSON(input)
+    })
 
-    log.Fatal(app.Listen(":8080"))
+    log.Fatal(app.ListenWithGracefulShutdown(":8080"))
 }
 ```

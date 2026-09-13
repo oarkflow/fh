@@ -16,10 +16,14 @@ import (
 
 func main() {
 	app := fh.New()
-	app.Use(webhook.New(webhook.Config{Secret: func(c fh.Ctx) ([]byte, error) { return []byte("secret"), nil }}))
+	app.Use(webhook.New(webhook.Config{
+		SecretFunc: func(c fh.Ctx) ([]byte, error) {
+			return []byte("secret"), nil
+		},
+	}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```

@@ -19,7 +19,7 @@ func main() {
 	app.Use(tracing.New(tracing.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run at the start of the chain after request ID/correlation ID or before logger/m
 ## Production considerations
 
 Propagate W3C trace context to downstream services. Avoid high-cardinality attributes and redact sensitive data.
-

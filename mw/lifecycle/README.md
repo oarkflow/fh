@@ -19,7 +19,7 @@ func main() {
 	app.Use(lifecycle.New(lifecycle.Hooks{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run near the outside of the middleware chain so it can observe most behavior.
 ## Production considerations
 
 Hooks must be fast and safe. Do not panic in hooks. Avoid blocking external calls in lifecycle callbacks.
-

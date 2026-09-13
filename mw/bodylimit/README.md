@@ -19,7 +19,7 @@ func main() {
 	app.Use(bodylimit.New(10 << 20))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run before body parsing, typed handlers, compression, validation, or handlers th
 ## Production considerations
 
 Set different limits by route where needed. File-upload routes should use streaming and explicit limits. Return clear errors without echoing payload content.
-

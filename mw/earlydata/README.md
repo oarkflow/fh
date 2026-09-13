@@ -19,7 +19,7 @@ func main() {
 	app.Use(earlydata.New(earlydata.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run before handlers for unsafe methods and before idempotency-sensitive operatio
 ## Production considerations
 
 Only allow early data for safe, idempotent operations. Document behavior behind TLS terminators/CDNs.
-

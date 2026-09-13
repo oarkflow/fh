@@ -42,9 +42,10 @@ func newPushState(maxConcurrentStreams uint32) *h2PushState {
 //
 // Usage:
 //
-//	app.Get("/page", func(c *fh.Ctx) error {
-//	    c.Push("/static/style.css", "GET", nil)
-//	    c.Push("/static/app.js", "GET", nil)
+//	app.Get("/page", func(c fh.Ctx) error {
+//	    dc := c.(*fh.DefaultCtx)
+//	    dc.Push("/static/style.css", "GET", nil)
+//	    dc.Push("/static/app.js", "GET", nil)
 //	    return c.JSON(pageData)
 //	})
 func (c *DefaultCtx) Push(path string, method string, headers map[string]string) bool {
@@ -248,7 +249,7 @@ func (h *h2Conn) releasePushReservation() {
 //
 // Usage:
 //
-//	app.Get("/page", func(c *fh.Ctx) error {
+//	app.Get("/page", func(c fh.Ctx) error {
 //	    c.EarlyHint("/static/style.css")
 //	    c.EarlyHint("/static/app.js")
 //	    // ... expensive computation ...

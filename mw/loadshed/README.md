@@ -19,7 +19,7 @@ func main() {
 	app.Use(loadshed.New(loadshed.Config{MaxInFlight: 10000}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run early, before expensive middleware and handlers.
 ## Production considerations
 
 Return `Retry-After` where useful. Monitor sheds by route and tenant. Combine with adaptive concurrency and backpressure.
-

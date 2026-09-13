@@ -19,7 +19,7 @@ func main() {
 	app.Use(apiversion.New(apiversion.Config{Header: "X-API-Version", Supported: []string{"v1", "v2"}, Default: "v1"}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run before contract validation and handlers. Run after rewrite/proxy normalizati
 ## Production considerations
 
 Document deprecation dates, use `Sunset`/deprecation headers where applicable, and add contract tests per supported version.
-

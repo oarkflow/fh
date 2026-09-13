@@ -19,7 +19,7 @@ func main() {
 	app.Use(backpressure.New(backpressure.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Place before endpoints that enqueue background work. Combine with load shedding 
 ## Production considerations
 
 Set thresholds according to queue depth, lag, and worker capacity. Monitor rejection counts, queue lag, and DLQ growth.
-

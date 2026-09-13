@@ -15,11 +15,15 @@ app.Static("/static", "./public")
 app.Static("/static", "./public", fh.StaticConfig{
     Compress:      true,     // enable gzip compression for text files
     MaxAge:        86400,    // Cache-Control max-age (seconds)
+    CacheControl:  "public, max-age=86400, immutable", // supersedes MaxAge
     Browse:        true,     // enable directory listing
     Index:         "index.html", // index file name
+    IndexFiles:    []string{"index.html", "index.htm"}, // supersedes Index
     CacheDuration: 5 * time.Minute, // file metadata cache
     StripSlash:    false,    // trailing slash handling
-	MaxRanges:      16,        // maximum ranges in one request
+    ShowHidden:    false,    // never list dotfiles by default
+    PreCompressed: true,     // serve .br/.gz sidecars when accepted
+    MaxRanges:     16,       // maximum ranges in one request
 })
 ```
 
@@ -29,10 +33,15 @@ app.Static("/static", "./public", fh.StaticConfig{
 |-------|---------|-------------|
 | `Compress` | false | Gzip compress text responses |
 | `MaxAge` | 0 | `Cache-Control: max-age` in seconds |
+| `CacheControl` | empty | Complete Cache-Control value; supersedes `MaxAge` |
 | `Browse` | false | Enable directory listing |
 | `Index` | `"index.html"` | Index file for directories |
+| `IndexFiles` | empty | Ordered index candidates; supersedes `Index` |
 | `CacheDuration` | 0 | File metadata cache TTL |
 | `StripSlash` | false | Remove trailing slash from path |
+| `ShowHidden` | false | Include dotfiles in directory listings |
+| `NotFoundHandler` | nil | Custom not-found/SPA fallback handler |
+| `PreCompressed` | false | Serve precompressed Brotli/gzip sidecars |
 | `MaxRanges` | 16 | Maximum byte ranges accepted per request; zero uses 16 |
 
 ## From `embed.FS`
@@ -56,6 +65,11 @@ app.StaticFS("/static", publicFiles, fh.StaticConfig{
 
 - **Path traversal protection:** Resolved paths are validated against the root directory. Requests containing `..` segments are rejected.
 - **Safe path resolution:** All paths are cleaned and checked before serving.
+- **Symlink confinement:** OS-backed roots permit symlinks only when the
+  resolved target remains inside the configured root. A caller-supplied
+  `fs.FS` is responsible for its own confinement semantics.
+- **Directory listings:** Dotfiles are omitted unless `ShowHidden` is explicitly
+  enabled. Avoid browsing on roots that contain secrets or metadata.
 
 ## Caching Features
 

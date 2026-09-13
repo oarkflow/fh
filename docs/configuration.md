@@ -4,8 +4,14 @@
 
 ```go
 type Config struct {
+    Kernel               KernelConfig
+    SecureByDefault      bool
+    Mode                 Mode
+    Compliance           ComplianceConfig
+    Audit                AuditConfig
+    Redaction            RedactionConfig
     ReadTimeout          time.Duration            // Default: 10s
-	ReadHeaderTimeout    time.Duration            // Default: 5s (production)
+    ReadHeaderTimeout    time.Duration            // Default: 5s
     RequestBodyTimeout   time.Duration            // Default: 10s
     WriteTimeout         time.Duration            // Default: 30s
     HandlerTimeout       time.Duration            // Default: 0 (no handler deadline)
@@ -13,7 +19,11 @@ type Config struct {
     TLSHandshakeTimeout  time.Duration            // Default: 10s
     HTTP2IdleTimeout     time.Duration            // Default: 120s
     MaxConnections       int                      // Default: 10,000
-	MaxConnectionsPerIP  int                      // Default: 100 in production/secure profiles
+    MaxConnectionsPerIP  int                      // Default: 100 in production mode
+    MaxInFlightRequests  int64                    // Default: 0; 5,000 with SecureByDefault
+    MaxGoroutines        int                      // Default: 0; 20,000 with SecureByDefault
+    MaxHeapBytes         uint64                   // Default: 0; 1 GiB with SecureByDefault
+    ResourceCheckInterval time.Duration           // Default: 250ms when guards are enabled
     ReadBufferSize       int                      // Default: 16384 (16KB)
     WriteBufferSize      int                      // Default: ReadBufferSize
     MaxRequestBodySize   int                      // Default: 4194304 (4MB)
@@ -24,20 +34,51 @@ type Config struct {
     DisableKeepAlive     bool                     // Default: false
     DisableHTTP2         bool                     // Default: false
     DisableH2C           bool                     // Default: false; true in SecureByDefault
+    DisablePanicRecovery bool                     // Default: false
+    SafeParams           bool                     // Copy route params for use after request
+    CaptureResponseBody  bool                     // Default: false
+    SendDateHeader       bool                     // Enabled in production mode
+    SendKeepAliveHeader  bool
+    ServerHeader         string                   // Empty by default
+    AllowedHosts         []string
+    ContentSecurityPolicy string
+    HSTSPreload          bool
     RequestHeadHandler   HandlerFunc              // Optional pre-body admission/auth hook
-	StreamRequestBody     bool                     // Defer request body buffering; use Ctx.StreamBody
+    StreamRequestBody     bool                     // Defer request body buffering; use Ctx.StreamBody
     ConnContext          func(context.Context, net.Conn) context.Context // Optional per-connection context hook
     BaseContext          func(net.Listener) context.Context             // Optional listener base context hook
     ErrorHandler         ErrorHandler             // Default: logs + problem JSON
     NotFoundHandler      NotFoundHandler          // Default: 404 text/plain
     MethodNotAllowed     MethodNotAllowedHandler  // Default: 405 + Allow header
     OptionsHandler       OptionsHandler           // Default: 204 No Content
-    Logger               *log.Logger              // Default: log.Default()
+    Logger               Logger                   // Default: slog-backed logger
     TemplateEngine       TemplateEngine           // Default: nil
     Reliability          ReliabilityConfig        // Default: disabled
+    Environment          Environment              // Default: production
+    ErrorOptions         ErrorOptions
     Debug                bool                     // Default: false
+    ShutdownTimeout      time.Duration
+    StartupBanner        StartupBannerConfig
 }
 ```
+
+The declaration above is a field guide; comments and nested configuration types
+are authoritative in `app.go`. Prefer functional options when zero is a
+meaningful override. `NewWithConfig` fills zero-valued duration and size fields
+from defaults, whereas an option such as `WithWriteTimeout(0)` can explicitly
+disable a default.
+
+### Profiles and security boundary
+
+| Constructor/profile | Intended use | Important behavior |
+|---|---|---|
+| `fh.New()` / `fh.NewProduction()` | Normal services | Production mode, bounded I/O, panic recovery and redaction |
+| `fh.New(...WithSecureByDefault(true))` | Internet-facing strict baseline | Strict parsing, h2c disabled, resource ceilings, HSTS and isolation headers |
+| `fh.NewEnterprise(...)` | Compliance-oriented deployments | Audit/reliability/compliance defaults; protect evidence endpoints with `WithComplianceEndpointAuth` |
+| `fh.NewFast()` | Trusted benchmarks | Trades shutdown and timeout protections for hot-path performance |
+
+No constructor can infer authentication, authorization, CORS, CSRF, allowed
+hosts or business-specific rate limits. Configure those explicitly.
 
 ### Timeouts
 
@@ -149,19 +190,14 @@ type CodecOptions struct {
 | `MaxNDJSONLineBytes` | 8MB | Maximum NDJSON line length |
 | `MaxCSVRecordBytes` | 8MB | Maximum CSV record length |
 
-**Apply globally:**
+**Apply process-wide at startup:**
 
 ```go
-fh.DefaultCodecOptions.MaxFormPairs = 5000
+fh.SetCodecOptions(fh.CodecOptions{MaxFormPairs: 5000})
 ```
 
-**Apply per-parse:**
-
-```go
-c.BodyParserWithOpts(&data, fh.CodecOptions{
-    MaxFormPairs: 5000,
-})
-```
+Codec options are process-wide and concurrency-safe. Configure them during
+startup for predictable behavior; `Ctx` does not expose a per-parse override.
 
 ---
 
@@ -189,6 +225,7 @@ type ReliabilityConfig struct {
     QueuePollInterval           time.Duration
     QueueBackoff                time.Duration
     QueueConcurrencyLimitByKey  bool
+    QueueLogError                func(string, ...any)
 }
 ```
 
@@ -204,8 +241,14 @@ type StaticConfig struct {
     MaxAge        int               // Cache-Control max-age in seconds
     Browse        bool              // Directory listing enabled
     Index         string            // Index filename (default: "index.html")
+    IndexFiles    []string          // Ordered index candidates; supersedes Index
+    CacheControl  string            // Supersedes MaxAge
     CacheDuration time.Duration     // File metadata cache duration
     StripSlash    bool              // Trailing slash handling
+    ShowHidden    bool              // Default false
+    NotFoundHandler fh.HandlerFunc  // Optional SPA/custom fallback
+    PreCompressed bool              // Serve .br/.gz sidecars when accepted
+    MaxRanges     int               // Default: 16
 }
 ```
 

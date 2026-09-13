@@ -21,7 +21,7 @@ func main() {
 		Auth: admin.StaticToken("X-Admin-Token", "change-me"),
 	})
 
-	app.Get("/", func(c fh.Ctx) error { return c.String(fh.StatusOK, "ok") })
+	app.Get("/", func(c fh.Ctx) error { return c.Status(fh.StatusOK).SendString("ok") })
 }
 ```
 
@@ -36,4 +36,3 @@ Register after the app is created and after queue/runtime features are configure
 ## Production considerations
 
 Always protect with mTLS, VPN/private network, IP allowlist, or strong token auth. Rotate admin tokens and audit every admin call. Never expose debug or queue mutation endpoints publicly.
-

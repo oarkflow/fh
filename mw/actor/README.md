@@ -19,7 +19,7 @@ func main() {
 	app.Use(actor.New(actor.Config{Key: func(c fh.Ctx) string { return c.Get("X-Actor-ID") }}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run after authentication or header normalization middleware if the actor is deri
 ## Production considerations
 
 Do not trust public actor headers unless they are set by a trusted gateway. Prefer deriving the actor from `fh.Principal`, JWT claims, mTLS identity, or a verified API key.
-

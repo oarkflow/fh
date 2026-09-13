@@ -14,7 +14,7 @@
 //	    Name string `json:"name"`
 //	}
 //
-//	app.Post("/users", fh.TypedHandler(func(c *fh.Ctx, req CreateUserReq) (UserRes, error) {
+//	app.Post("/users", fh.TypedHandler(func(c fh.Ctx, req CreateUserReq) (UserRes, error) {
 //	    user := UserRes{ID: 1, Name: req.Name}
 //	    return user, nil
 //	}))

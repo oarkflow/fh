@@ -20,7 +20,7 @@ func main() {
 	app.Use(m.Middleware())
 	app.Get("/_fh/metrics", m.Handler())
 
-	app.Get("/", func(c fh.Ctx) error { return c.String(fh.StatusOK, "ok") })
+	app.Get("/", func(c fh.Ctx) error { return c.Status(fh.StatusOK).SendString("ok") })
 }
 ```
 
@@ -35,4 +35,3 @@ Run near the outside of the chain after request ID/tracing. Register the metrics
 ## Production considerations
 
 Use stable route labels to avoid high-cardinality metrics. Avoid labeling by raw path, user, token, or request ID.
-

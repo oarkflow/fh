@@ -23,7 +23,7 @@ func main() {
 	manager := session.NewSessionManager(store, session.SessionSecret([]byte("at-least-32-bytes-of-random-secret")))
 	app.Use(session.New(manager))
 
-	app.Get("/", func(c fh.Ctx) error { return c.String(fh.StatusOK, "ok") })
+	app.Get("/", func(c fh.Ctx) error { return c.Status(fh.StatusOK).SendString("ok") })
 }
 ```
 

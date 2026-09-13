@@ -20,11 +20,8 @@ err := c.StreamBody(func(r io.Reader) error {
 var user User
 c.BodyParser(&user)
 
-// Specify codec options
-var users []User
-c.BodyParserWithOpts(&users, fh.CodecOptions{
-    MaxFormPairs: 5000,
-})
+// Defensive codec limits are configured process-wide during startup.
+fh.SetCodecOptions(fh.CodecOptions{MaxFormPairs: 5000})
 ```
 
 ### Route Parameters
@@ -55,17 +52,17 @@ c.Get("Content-Type")           // single request header
 c.GetReqHeaders()               // all request headers
 c.Hostname()                    // host without port
 c.IP()                          // remote IP
-c.Port()                        // remote port
-c.Scheme()                      // http or https
-c.Protocol()                    // HTTP/1.1 or HTTP/2
-c.IsTLS()                       // true if TLS
+c.Protocol()                    // http or https
+c.Secure()                      // true if TLS
+c.ConnectProtocol()             // extended CONNECT protocol, if present
 ```
 
 ### Cookies
 
 ```go
-cookie := c.Cookie("session")   // get cookie value
-c.Cookies()                     // all cookies (map[string]string)
+cookie := c.GetCookie("session") // get cookie value
+c.SetCookie(&fh.Cookie{Name: "theme", Value: "dark", Path: "/"})
+c.DelCookie("session")
 ```
 
 ### Multipart / File Upload
@@ -82,8 +79,7 @@ err := c.SaveFile(file, "/uploads/avatar.jpg") // save to disk
 c.Method()                      // HTTP method
 c.Path()                        // request path
 c.OriginalURL()                 // original URL with query string
-c.BodySize()                    // content length
-c.IsGet() / c.IsPost() / ...    // method checks
+c.Method() == fh.MethodGet      // method check
 ```
 
 ### Locals (Request-Scoped Storage)
@@ -134,9 +130,7 @@ c.Send(data)                    // alias for SendBytes
 
 // Structured
 c.JSON(data)                    // application/json
-c.JSONPretty(data, "  ")        // pretty-printed JSON
 c.XML(data)                     // application/xml
-c.XMLPretty(data, "  ")        // pretty-printed XML
 c.HTML("<h1>Title</h1>")       // text/html
 
 // Files
@@ -150,7 +144,7 @@ c.SendStatus(201)               // with generated status text
 // Redirect
 c.Redirect("/login")            // default 302
 c.Redirect("/login", 301)       // permanent redirect
-c.RedirectTo("user.profile", "id", "42") // named route redirect
+c.RedirectTo("user.profile", map[string]string{"id": "42"})
 c.RedirectBack("/", 302)        // redirect to referrer or fallback
 
 // Templates
@@ -169,27 +163,35 @@ c.Problem(fh.Problem{
 })
 
 // Streaming
-c.Stream(func(w io.Writer) {
+c.Stream(func(w *fh.StreamWriter) error {
     for i := 0; i < 10; i++ {
-        fmt.Fprintf(w, "chunk %d\n", i)
+        if _, err := fmt.Fprintf(w, "chunk %d\n", i); err != nil {
+            return err
+        }
         time.Sleep(100 * time.Millisecond)
     }
+    return nil
 })
 
 // Server-Sent Events
-c.SSE(func(events *fh.SSEWriter) {
+c.SSE(func(events *fh.SSE) error {
     for i := 0; i < 5; i++ {
-        events.Event(fh.SSEMessage{Event: "update", Data: "hello"})
+        if err := events.WriteEvent(fh.SSEEvent{Event: "update", Data: "hello"}); err != nil {
+            return err
+        }
         time.Sleep(1 * time.Second)
     }
+    return nil
 })
 
 // Protocol Upgrade
-c.Hijack(func(conn net.Conn) {
+c.Hijack(func(conn *fh.ResponseConn) error {
     // raw connection access
+    return nil
 })
-c.Upgrade("websocket", func(conn *websocket.Conn) {
-    // WebSocket handling
+c.Upgrade("example-protocol", func(conn net.Conn) error {
+    // upgraded HTTP/1 connection or HTTP/2 extended-CONNECT stream
+    return nil
 })
 ```
 
@@ -197,7 +199,7 @@ c.Upgrade("websocket", func(conn *websocket.Conn) {
 
 ```go
 c.Set("X-Custom", "value")      // set response header
-c.SetRespHeaders(headers)       // set multiple headers
+for key, value := range headers { c.Set(key, value) }
 c.Type("json")                  // set Content-Type shortcut
 c.Append("Vary", "Accept")      // append to header
 ```
@@ -211,21 +213,21 @@ c.Status(201)                   // set status code (chainable)
 ### Cookies
 
 ```go
-c.Cookie(&fh.Cookie{
+c.SetCookie(&fh.Cookie{
     Name:     "session",
     Value:    "abc123",
     HTTPOnly: true,
     Secure:   true,
     MaxAge:   3600,
     Path:     "/",
-    SameSite: "Lax",
+    SameSite: fh.SameSiteLax,
 })
 ```
 
 ### Hooks
 
 ```go
-c.OnBeforeResponse(func(c *fh.Ctx) error {
+c.OnBeforeResponse(func(c fh.Ctx) error {
     // called just before response is written
     return nil
 })

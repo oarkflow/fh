@@ -27,7 +27,7 @@ FH now includes an environment-aware error framework for professional HTTP APIs 
 ## Production configuration
 
 ```go
-app := fh.New(fh.Config{
+app := fh.NewWithConfig(fh.Config{
     Environment: fh.EnvProduction,
     ErrorOptions: fh.ErrorOptions{
         Environment:      fh.EnvProduction,
@@ -59,7 +59,7 @@ Production responses never expose private causes by default:
 ## Development configuration
 
 ```go
-app := fh.New(fh.Config{
+app := fh.NewWithConfig(fh.Config{
     Environment: fh.EnvDevelopment,
     ErrorOptions: fh.ErrorOptions{
         Environment:  fh.EnvDevelopment,
@@ -75,7 +75,7 @@ Debug output is still passed through `RedactSecrets`, so values such as `passwor
 ## Returning errors from handlers
 
 ```go
-app.Get("/users/:id", func(c *fh.Ctx) error {
+app.Get("/users/:id", func(c fh.Ctx) error {
     user, err := loadUser(c.Param("id"))
     if errors.Is(err, fs.ErrNotExist) {
         return fh.NotFound("User not found")

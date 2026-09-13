@@ -117,8 +117,8 @@ register the handler once with `app.Get`, exactly as for HTTP/1.1 upgrades.
 ## Testing
 
 ```bash
-# TLS with ALPN (requires TLS certs)
-go run examples/http2/main.go
+# Modern HTTP feature example
+go run ./examples/http-modern
 
 # h2c prior knowledge
 curl --http2-prior-knowledge http://localhost:8080

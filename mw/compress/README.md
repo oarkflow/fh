@@ -19,7 +19,7 @@ func main() {
 	app.Use(compress.New(compress.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run late enough to see the response body, but avoid compressing already-compress
 ## Production considerations
 
 Set minimum body size. Disable or be careful for sensitive reflected content if BREACH-style risks apply. Do not compress images, archives, or already-compressed data.
-

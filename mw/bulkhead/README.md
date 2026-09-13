@@ -19,7 +19,7 @@ func main() {
 	app.Use(bulkhead.New(bulkhead.Config{MaxConcurrent: 128}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Place around expensive route groups or before handlers that call constrained dep
 ## Production considerations
 
 Tune limits per dependency capacity. Expose metrics for in-flight, accepted, and rejected requests. Combine with timeouts and circuit breakers.
-

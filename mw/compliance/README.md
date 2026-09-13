@@ -19,7 +19,7 @@ func main() {
 	app.Use(compliance.New(compliance.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run after identity/tenant extraction and before audit/logging/handlers that need
 ## Production considerations
 
 Define data classification, retention, redaction, and audit rules. Validate behavior with compliance tests and privacy reviews.
-

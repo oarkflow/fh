@@ -1,9 +1,9 @@
 # Middleware
 
-fh ships 65+ built-in middleware packages under `mw/`. This page documents the most commonly used ones in depth; every package (including those not detailed below) has its own `README.md` in its `mw/<package>/` directory — see the [full index](#full-package-index). All middleware follows the standard handler signature:
+fh ships 70+ built-in middleware packages under `mw/`. This page documents the most commonly used ones in depth; every package (including those not detailed below) has its own `README.md` in its `mw/<package>/` directory — see the [full index](#full-package-index). All middleware follows the standard handler signature:
 
 ```go
-func(c *fh.Ctx) error
+func(c fh.Ctx) error
 ```
 
 ## Global Middleware
@@ -44,7 +44,7 @@ Serializes requests by a computed actor/key, ensuring stateful serial processing
 import "github.com/oarkflow/fh/mw/actor"
 
 app.Use(actor.New(actor.Config{
-    Key: func(c *fh.Ctx) string {
+    Key: func(c fh.Ctx) string {
         return c.Params("id") // serialize requests per user ID
     },
 }))
@@ -384,11 +384,11 @@ Request lifecycle hooks around handler execution.
 import "github.com/oarkflow/fh/mw/lifecycle"
 
 app.Use(lifecycle.New(lifecycle.Config{
-    Before: func(c *fh.Ctx) error {
+    Before: func(c fh.Ctx) error {
         c.Locals("start", time.Now())
         return c.Next()
     },
-    After: func(c *fh.Ctx) error {
+    After: func(c fh.Ctx) error {
         elapsed := time.Since(c.Locals("start").(time.Time))
         log.Printf("Request took: %v", elapsed)
         return nil
@@ -498,9 +498,11 @@ app.Use(ratelimiter.New(ratelimiter.Config{
 |--------|-------------|
 | `Max` | Max requests per window |
 | `Window` | Time window duration |
-| `Key` | Custom key function (default: IP) |
+| `KeyFunc` | Custom key function (default: IP) |
 | `Skip` | Paths to skip |
-| `ErrorHandler` | Custom rate limit error handler |
+| `Store` | Shared/in-process `kv.Store` counter backend |
+| `SendHeaders` | Emit limit, remaining and reset headers |
+| `LimitReached` | Custom rejection handler |
 
 ### recover
 
@@ -510,8 +512,8 @@ Panic recovery with stack trace logging.
 import "github.com/oarkflow/fh/mw/recover"
 
 app.Use(recover.New(recover.Config{
-    LogStack: true,
-    ErrorHandler: func(c *fh.Ctx, err error) error {
+    EnableStackTrace: true,
+    Handler: func(c fh.Ctx, recovered any, stack []byte) error {
         return c.Status(500).SendString("Internal Server Error")
     },
 }))
@@ -524,7 +526,12 @@ Per-route reliability policy and typed endpoint wrapper. See [Reliability Layer]
 ```go
 import "github.com/oarkflow/fh/mw/reliability"
 
-app.Use(reliability.New(reliability.Config{}))
+app.Use(reliability.New(fh.ReliabilityPolicy{
+    Enabled: true,
+    Journal: true,
+    RequireIdempotency: true,
+    ReplayResponse: true,
+}))
 ```
 
 ### replay
@@ -732,9 +739,9 @@ Adds a context deadline with a configurable timeout response.
 ```go
 import "github.com/oarkflow/fh/mw/timeout"
 
-app.Use(timeout.New(timeout.Config{
+app.Use(timeout.NewWithConfig(timeout.Config{
     Timeout: 5 * time.Second,
-    ErrorHandler: func(c *fh.Ctx) error {
+    OnTimeout: func(c fh.Ctx, err error) error {
         return c.Status(503).SendString("Service timeout")
     },
 }))
@@ -791,30 +798,36 @@ wf := workflow.New("checkout").
 app.Post("/orders", wf.Handler())
 ```
 
-See [`mw/workflow/README.md`](../mw/workflow/README.md) and [`examples/workflow`](../examples/workflow) for the full API and a runnable example.
+See [`mw/workflow/README.md`](../mw/workflow/README.md) for the full API and
+[`mw/workflow/workflow_test.go`](../mw/workflow/workflow_test.go) for executable
+success, failure, retry, timeout, branch and compensation examples.
 
 ---
 
 ## Recommended Middleware Order (Production Baseline)
 
 ```go
+metricsCollector := metrics.New()
 app.Use(
     recover.New(),           // 1. Panic recovery (safety net)
     requestid.New(),         // 2. Request tracking
     correlationid.New(),     // 3. Correlation propagation
-    security.New(),          // 4. Security headers
-    cors.New(),              // 5. CORS (if needed)
-    bodylimit.New(),         // 6. Body size limits
-    timeout.New(),           // 7. Request timeout
-    ratelimiter.New(),       // 8. Rate limiting
-    ipwhitelist.New(),       // 9. IP access control
-    apikey.New(),            // 10. Authentication
-    logger.New(),            // 11. Access logging
-    metrics.New(),           // 12. Metrics
-    cache.New(),             // 13. Response caching
-    compress.New(),          // 14. Compression
+    logger.New(),            // 4. Observe downstream rejections and failures
+    metricsCollector.Middleware(),
+    security.New(),          // 5. Response security headers
+    bodylimit.New(4 << 20),  // 6. Route-level body ceiling
+    timeout.New(30*time.Second),
 )
+
+app.Get("/_fh/metrics", metricsAuth, metricsCollector.Handler())
 ```
+
+Add CORS only for browser cross-origin use. Install trusted real-IP handling
+before IP-based controls. Place rate limits and authentication/authorization
+before expensive handlers; apply CSRF after session/auth identity is available
+on cookie-authenticated browser routes. Cache only responses whose identity and
+`Vary` dimensions are represented in the cache key, then compress the selected
+representation.
 
 ---
 
@@ -840,7 +853,6 @@ Remaining packages — see `mw/<package>/README.md` for full usage:
 | `mw/etag` | Adds/validates ETag headers |
 | `mw/hostguard` | Rejects requests with unexpected Host headers |
 | `mw/httpsignature` | Nonce-bound RFC 9421 Ed25519 response signatures |
-| `mw/jwt` | Verifies signed JWTs, stores claims, sets `fh.Principal` |
 | `mw/maintenance` | Runtime maintenance-mode switch for controlled downtime |
 | `mw/mtls` | Validates verified client cert chains for high-trust routes |
 | `mw/pprof` | Protected Go profiling endpoints |

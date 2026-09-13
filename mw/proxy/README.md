@@ -19,7 +19,7 @@ func main() {
 	app.Use(proxy.New(proxy.Config{Target: "http://localhost:8081"}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```

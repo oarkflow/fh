@@ -37,11 +37,11 @@ app := fh.New(
 Use these when the response is already known or can be appended safely:
 
 ```go
-app.Get("/json", func(c *fh.Ctx) error {
+app.Get("/json", func(c fh.Ctx) error {
     return c.JSONString(`{"message":"Hello, World!"}`)
 })
 
-app.Get("/search", func(c *fh.Ctx) error {
+app.Get("/search", func(c fh.Ctx) error {
     q := c.Query("q")
     return c.JSONAppend(func(dst []byte) ([]byte, error) {
         dst = append(dst, `{"query":"`...)
@@ -51,7 +51,7 @@ app.Get("/search", func(c *fh.Ctx) error {
     })
 })
 
-app.Post("/echo", func(c *fh.Ctx) error {
+app.Post("/echo", func(c fh.Ctx) error {
     return c.EchoJSON()
 })
 ```

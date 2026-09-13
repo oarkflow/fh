@@ -64,7 +64,7 @@ app.All("/webhook", webhookHandler)
 // Register custom method
 app.Add("PURGE", "/cache", purgeHandler)
 
-// QUERY method (RFC 9485) — safe, idempotent, body-bearing method for search
+// QUERY method (RFC 10008) — safe, idempotent, body-bearing method for search
 app.Query("/search", func(c fh.Ctx) error {
     var q SearchRequest
     c.BodyParser(&q)
@@ -174,11 +174,8 @@ app.EnableRouteList("/_fh/routes")
 
 After `app.Listen()` or `app.Serve()` is called, the router is frozen (read-only) for lock-free concurrent reads. Routes cannot be modified after freezing.
 
-To manually freeze:
-
-```go
-app.Router().Freeze()
-```
+There is no public manual-freeze operation. Finish route registration before
+calling a serving method; attempts to mutate the route table afterward panic.
 
 ---
 

@@ -10,6 +10,8 @@ Applies a request deadline and returns a controlled timeout response when handle
 package main
 
 import (
+	"time"
+
 	"github.com/oarkflow/fh"
 	"github.com/oarkflow/fh/mw/timeout"
 )
@@ -19,7 +21,7 @@ func main() {
 	app.Use(timeout.New(5 * time.Second))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +37,3 @@ Run before handlers and dependency calls. Pair with context-aware downstream cli
 ## Production considerations
 
 Choose route-specific timeouts. Ensure handlers honor context cancellation and release resources.
-

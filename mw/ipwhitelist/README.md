@@ -19,7 +19,7 @@ func main() {
 	app.Use(ipwhitelist.New("10.0.0.0/8", "127.0.0.1"))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```

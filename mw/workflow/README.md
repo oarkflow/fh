@@ -131,4 +131,5 @@ Use for request-scoped workflows with a handful of steps, not as a replacement f
 - Bound every external call with `WithTimeout`; a slow step without a timeout blocks the whole request.
 - Use `OnError` for compensation, not to silently mask bugs — log every compensated error.
 - Test each branch and the parallel fan-out under both success and failure independently.
-- See [`examples/workflow`](../../examples/workflow) for a runnable checkout example.
+- See [`workflow_test.go`](workflow_test.go) for executable success, failure,
+  retry, timeout, branch and compensation examples.

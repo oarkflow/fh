@@ -19,7 +19,7 @@ func main() {
 	app.Use(retrybudget.New(retrybudget.Config{}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```
@@ -35,4 +35,3 @@ Run before handlers or proxy routes that perform retries. Pair with circuit brea
 ## Production considerations
 
 Budget by tenant, route, upstream, or API key. Monitor exhausted budgets and tune refill rates.
-

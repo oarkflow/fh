@@ -10,16 +10,22 @@ Limits request rate by IP, user, tenant, API key, or custom key to protect fairn
 package main
 
 import (
+	"time"
+
 	"github.com/oarkflow/fh"
 	"github.com/oarkflow/fh/mw/ratelimiter"
 )
 
 func main() {
 	app := fh.New()
-	app.Use(ratelimiter.New(ratelimiter.Config{Limit: 100}))
+	app.Use(ratelimiter.New(ratelimiter.Config{
+		Max:         100,
+		Window:      time.Minute,
+		SendHeaders: true,
+	}))
 
 	app.Get("/", func(c fh.Ctx) error {
-		return c.String(fh.StatusOK, "ok")
+		return c.Status(fh.StatusOK).SendString("ok")
 	})
 }
 ```

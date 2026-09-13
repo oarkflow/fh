@@ -5,7 +5,7 @@ fh includes an optional, built-in reliability layer for production-grade request
 ## Enabling Reliability
 
 ```go
-app := fh.New(fh.Config{
+app := fh.NewWithConfig(fh.Config{
     Reliability: fh.ReliabilityConfig{
         Enabled:            true,
         JournalEnabled:     true,
@@ -29,13 +29,13 @@ Persists request lifecycle events to a JSONL file for audit and tracing.
 // 2. On completion: { "event": "completed", "id": "...", "status": 200, ... }
 ```
 
-The journal file is at `{DataDir}/journal.jsonl`.
+The default journal file is `{DataDir}/request-journal.jsonl`.
 
 ### Custom Journal Store
 
 ```go
 type RequestJournalStore interface {
-    Append(entry []byte) error
+    Append(fh.RequestJournalEntry) error
     Close() error
 }
 ```
@@ -44,7 +44,10 @@ type RequestJournalStore interface {
 
 ## Idempotency
 
-Ensures that unsafe methods (POST, PUT, PATCH, DELETE) are processed exactly once.
+Deduplicates retries of unsafe methods (POST, PUT, PATCH and DELETE) and replays
+completed responses. This provides idempotent HTTP retry behavior; it does not
+by itself create an exactly-once transaction across an external database and
+the idempotency repository.
 
 ```go
 type CreateOrderRequest struct {
@@ -57,13 +60,13 @@ type CreateOrderResponse struct {
     Status  string `json:"status"`
 }
 
-app.PostTyped("/orders", reliability.Endpoint[CreateOrderRequest, CreateOrderResponse]{
-    Handler: func(c *fh.Ctx, req CreateOrderRequest) (CreateOrderResponse, error) {
-        // This handler will only be called once per unique Idempotency-Key
+app.Post("/orders", reliability.Endpoint(reliability.EndpointOptions[CreateOrderRequest, CreateOrderResponse]{
+    Policy: fh.ReliabilityPolicy{Enabled: true, RequireIdempotency: true},
+    Handle: func(ctx context.Context, c fh.Ctx, req CreateOrderRequest) (CreateOrderResponse, error) {
         order, err := createOrder(req)
         return CreateOrderResponse{OrderID: order.ID, Status: "created"}, err
     },
-})
+}))
 ```
 
 ### How It Works
@@ -90,9 +93,9 @@ Reliability: fh.ReliabilityConfig{
 
 ```go
 type IdempotencyRepository interface {
-    Get(key string) ([]byte, bool, error)
-    Set(key string, data []byte, ttl time.Duration) error
-    Delete(key string) error
+    Begin(key, requestHash, method, path string) (fh.IdempotencyDecision, *fh.IdempotencyRecord, error)
+    Complete(key, requestHash string, status int, contentType string,
+        headers map[string][]string, response []byte) error
     Close() error
 }
 ```
@@ -104,9 +107,12 @@ type IdempotencyRepository interface {
 File-backed async job queue with crash recovery, retries, and worker processing.
 
 ```go
-app.Post("/process", func(c *fh.Ctx) error {
-    // Enqueue a job
-    return c.ServerOutbox().Enqueue("process-payment", paymentData)
+app.Post("/process", func(c fh.Ctx) error {
+    id, err := c.Queue().Enqueue("process-payment", paymentData)
+    if err != nil {
+        return err
+    }
+    return c.Status(fh.StatusAccepted).JSON(fh.Map{"job_id": id})
 })
 ```
 
@@ -123,15 +129,9 @@ app.Post("/process", func(c *fh.Ctx) error {
 ### Worker Processing
 
 ```go
-// Workers are started automatically when QueueEnabled is set
-// Each worker picks up jobs from the pending directory,
-// processes them, and moves them to done or failed.
-
-// Custom worker registration:
-app.OnListen(func() {
-    app.ServerOutbox().RegisterWorker("send-email", func(job Job) error {
-        return sendEmail(job.Data)
-    })
+// Register handlers before serving. Workers start with the reliability runtime.
+app.Queue().Register("send-email", func(ctx context.Context, job *fh.QueueJob) error {
+    return sendEmail(ctx, job.Payload)
 })
 ```
 
@@ -161,10 +161,13 @@ Reliability: fh.ReliabilityConfig{
 
 ```go
 type QueueStorage interface {
-    Enqueue(job *Job) error
-    Dequeue() (*Job, error)
-    Ack(id string) error
-    Nack(id string, requeue bool) error
+    Enqueue(context.Context, *fh.QueueJob) error
+    Claim(context.Context, time.Time) (*fh.QueueJob, error)
+    Complete(context.Context, *fh.QueueJob) error
+    Retry(context.Context, *fh.QueueJob, error, time.Duration) error
+    Fail(context.Context, *fh.QueueJob, error) error
+    Recover(context.Context) error
+    Stats(context.Context) (fh.QueueStats, error)
     Close() error
 }
 ```
@@ -180,22 +183,27 @@ Reliable event publishing and webhook deduplication helpers.
 ```go
 // In handler:
 outbox := c.ServerOutbox()
-outbox.Enqueue("order.created", orderEvent)
+id, err := outbox.Publish(c.Context(), fh.OutboxEvent{
+    Topic: "order.created",
+    Key: order.ID,
+    Payload: payload,
+})
 
-// Register worker at startup:
-app.OnListen(func() {
-    app.ServerOutbox().RegisterWorker("order.created", func(job Job) error {
-        return publishEvent("order.created", job.Data)
-    })
+// Outbox events are queued as "outbox." + Topic.
+app.Queue().Register("outbox.order.created", func(ctx context.Context, job *fh.QueueJob) error {
+    return publishEvent(ctx, job.Payload)
 })
 ```
 
 ### Inbox
 
 ```go
-// For webhook handlers with idempotency:
 inbox := c.ServerInbox()
-// Automatically deduplicates based on webhook ID
+jobID, err := inbox.Accept(c.Context(), fh.InboxEvent{
+    Source: "payments",
+    EventID: providerEventID,
+    Payload: payload,
+}, "payments.webhook")
 ```
 
 ---
@@ -205,50 +213,73 @@ inbox := c.ServerInbox()
 Failed jobs that exceed max attempts are moved to the dead-letter queue.
 
 ```go
-// Retry failed jobs
-app.ServerOutbox().RetryFailed()
+ctx := context.Background()
+queue := app.Queue()
 
-// Discard failed jobs
-app.ServerOutbox().DiscardFailed()
+// Inspect failed jobs when the configured QueueStorage supports QueueJobLister.
+failedJobs, err := queue.ListJobs(ctx, "failed", 100)
 
-// List failed jobs
-failedJobs, err := app.ServerOutbox().ListFailed()
+// Retry or discard a specific failed job ID.
+err = queue.RetryFailed(ctx, jobID)
+err = queue.DiscardFailed(ctx, jobID)
 ```
 
 ---
 
-## AtomicJob (Request-to-Job Handoff)
+## Request-to-job handoff
 
-Atomically processes a request and enqueues a follow-up job in a single reliability transaction.
+`AtomicHandoff` creates a queue job with optional priority, schedule and
+concurrency-key fields. Despite its historical name, it does not make an
+external application database transaction atomic with the queue write; use a
+transactional outbox in that database when that guarantee is required.
 
 ```go
 import "github.com/oarkflow/fh"
 
-app.Post("/orders", func(c *fh.Ctx) error {
+app.Post("/orders", func(c fh.Ctx) error {
     var req CreateOrderRequest
     c.BodyParser(&req)
 
-    return fh.AtomicJob(c, req, "order.fulfill", func() error {
-        // This runs atomically with job enqueue
-        return createOrder(req)
+    id, err := fh.AtomicHandoff(c, "order.fulfill", req, fh.QueueJob{
+        Priority: 10,
+        ConcurrencyKey: "customer:" + req.CustomerID,
     })
+    if err != nil { return err }
+    return c.Status(fh.StatusAccepted).JSON(fh.Map{"job_id": id})
+})
+```
+
+For raw payload bytes and the complete job option set, use `AtomicJob`:
+
+```go
+result, err := fh.AtomicJob(c, fh.AtomicJobOptions{
+    Type: "order.fulfill",
+    Body: payload,
+    Priority: fh.PriorityHigh,
+    ConcurrencyKey: "customer:" + customerID,
 })
 ```
 
 ---
 
-## BeginTx (Transactional API)
+## Staged reliability transaction
+
+`Reliability.BeginTx` stages fh journal and queue writes until `Commit`. It is
+an in-process transaction boundary, not a transaction spanning an external
+database. Always roll it back on an early return.
 
 ```go
 import "github.com/oarkflow/fh"
 
-app.Post("/transfer", func(c *fh.Ctx) error {
-    return fh.BeginTx(c, func() error {
-        // All operations within this transaction are reliable
-        c.ServerOutbox().Enqueue("audit.log", event)
-        c.ServerInbox().Process(webhookID, data)
-        return nil
-    })
+app.Post("/transfer", func(c fh.Ctx) error {
+    tx, err := c.Reliability().BeginTx(c.Context())
+    if err != nil { return err }
+    defer tx.Rollback()
+
+    if err := tx.Journal().Append(entry); err != nil { return err }
+    if err := tx.Queue().Enqueue(c.Context(), job); err != nil { return err }
+    if err := tx.Commit(); err != nil { return err }
+    return c.SendStatus(fh.StatusAccepted)
 })
 ```
 
@@ -260,12 +291,23 @@ app.Post("/transfer", func(c *fh.Ctx) error {
 package main
 
 import (
+    "context"
+    "log"
+
     "github.com/oarkflow/fh"
     "github.com/oarkflow/fh/mw/reliability"
 )
 
+type CreateOrderRequest struct {
+    CustomerID string `json:"customer_id"`
+}
+
+type CreateOrderResponse struct {
+    OrderID string `json:"order_id"`
+}
+
 func main() {
-    app := fh.New(fh.Config{
+    app := fh.NewWithConfig(fh.Config{
         Reliability: fh.ReliabilityConfig{
             Enabled:            true,
             JournalEnabled:     true,
@@ -276,18 +318,15 @@ func main() {
         },
     })
 
-    // Reliability middleware (generates request IDs, handles idempotency)
-    app.Use(reliability.New())
-
-    // Typed endpoint with idempotency
-    app.PostTyped("/orders", reliability.Endpoint[CreateOrderRequest, CreateOrderResponse]{
-        Handler: func(c *fh.Ctx, req CreateOrderRequest) (CreateOrderResponse, error) {
-            // Create order (only once per Idempotency-Key)
+    // Typed request/response wrapper with route-local reliability policy.
+    app.Post("/orders", reliability.Endpoint(reliability.EndpointOptions[CreateOrderRequest, CreateOrderResponse]{
+        Policy: fh.ReliabilityPolicy{Enabled: true, RequireIdempotency: true},
+        Handle: func(ctx context.Context, c fh.Ctx, req CreateOrderRequest) (CreateOrderResponse, error) {
             return CreateOrderResponse{OrderID: "ord_123"}, nil
         },
-    })
+    }))
 
-    app.Listen(":8080")
+    log.Fatal(app.ListenWithGracefulShutdown(":8080"))
 }
 ```
 
@@ -322,7 +361,7 @@ type QueueStorage interface {
 Wire custom stores through configuration:
 
 ```go
-app := fh.New(fh.Config{
+app := fh.NewWithConfig(fh.Config{
     Reliability: fh.ReliabilityConfig{
         Enabled:                true,
         JournalEnabled:         true,
