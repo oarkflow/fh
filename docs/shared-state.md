@@ -123,6 +123,50 @@ permissions. It survives restarts on one host, but it is not a distributed
 store and should not be placed on a filesystem that lacks the required atomic
 rename and locking semantics.
 
+### Distributed: Redis and PostgreSQL (fh-contrib)
+
+For a multi-replica deployment, `github.com/oarkflow/fh-contrib` provides
+`kv.Provider`/`kv.Store` adapters backed by Redis and PostgreSQL, satisfying
+the same interfaces and the adapter checklist below:
+
+```go
+import (
+    "github.com/redis/go-redis/v9"
+    kvredis "github.com/oarkflow/fh-contrib/pkg/storage/kv/redis"
+)
+
+client := redis.NewClient(&redis.Options{Addr: "redis:6379"})
+state := kvredis.New(client) // caller owns client; Provider.Close doesn't close it
+```
+
+```go
+import (
+    "github.com/oarkflow/squealx/drivers/postgres"
+    kvpostgres "github.com/oarkflow/fh-contrib/pkg/storage/kv/postgres"
+)
+
+db, err := postgres.Open("host=... dbname=... sslmode=disable", "shared-state")
+if err != nil {
+    return err
+}
+state := kvpostgres.New(db) // caller owns db; Provider.Close doesn't close it
+```
+
+Both adapters make `Mutate` atomic across every process sharing the backend —
+Redis via an optimistic WATCH/MULTI transaction with bounded retry, Postgres
+via a `pg_advisory_xact_lock` keyed to `(namespace, key)` (so a Mutate on a
+key that doesn't exist yet still serializes correctly, unlike a plain
+`SELECT ... FOR UPDATE`). Each package also exposes an owning constructor
+(`kvredis.Open`, `kvpostgres.Open`-from-DSN) whose `Provider.Close()` closes
+the connection it opened, versus the caller-supplied-client constructors
+above, whose `Close()` never touches a connection you might be using
+elsewhere. See each package's README for the full production notes
+(connection pooling, auth/TLS, index maintenance).
+
+fh-contrib is a separate module specifically so the root fh module keeps its
+zero-required-third-party-dependency property — pull it in only where you
+need it.
+
 ## Recommended namespaces
 
 Use stable, explicit names in the form `feature/instance`:

@@ -34,7 +34,10 @@ type StartupBannerConfig struct {
 	// Writer receives the banner. Default: os.Stdout.
 	Writer io.Writer
 	// Render allows complete custom rendering. When set, fh passes StartupBannerData
-	// and prints the returned string as-is.
+	// and prints the returned string as-is. data.SecureDefaultsNotice (when
+	// non-empty) is still appended after Render's output unless
+	// HideSecureDefaultsNotice is set — render it yourself from data and set
+	// HideSecureDefaultsNotice to avoid it appearing twice.
 	Render func(StartupBannerData) string
 	// ExtraLines are appended as key/value rows after the built-in rows.
 	ExtraLines []StartupBannerLine
@@ -46,6 +49,14 @@ type StartupBannerConfig struct {
 	HideGoVersion bool
 	// HideMode hides the configured fh mode.
 	HideMode bool
+	// HideSecureDefaultsNotice suppresses the printed reminder that
+	// production mode / SecureByDefault bound protocol input and harden
+	// response headers only — they do not add authentication, CSRF
+	// protection, rate limiting, or a Host allow-list. Shown by default so
+	// this is genuinely unmissable at process start, not just in
+	// ValidateSecurity()/the compliance endpoints. Set once a team has
+	// internalized the distinction.
+	HideSecureDefaultsNotice bool
 }
 
 // StartupBannerLine is one key/value row inside the startup banner.
@@ -68,6 +79,12 @@ type StartupBannerData struct {
 	Mode      Mode
 	HTTP2     bool
 	Extra     []StartupBannerLine
+	// SecureDefaultsNotice is non-empty when the app is running in a mode
+	// (or with SecureByDefault) where the boundary between "protocol/response
+	// hardening is on" and "auth/CSRF/rate-limiting are on" is worth
+	// restating at every boot. Empty means either the notice doesn't apply
+	// (a permissive/benchmark mode) or it was explicitly hidden.
+	SecureDefaultsNotice string
 }
 
 // WithStartupBanner replaces the whole startup banner configuration.
@@ -128,6 +145,13 @@ func (a *App) printStartupBanner(ln net.Listener) {
 	if !strings.HasSuffix(out, "\n") {
 		out += "\n"
 	}
+	if data.SecureDefaultsNotice != "" {
+		notice := data.SecureDefaultsNotice
+		if cfg.Color {
+			notice = startupColor(true, startupYellow, notice)
+		}
+		out += notice + "\n"
+	}
 	_, _ = io.WriteString(w, out)
 }
 
@@ -159,19 +183,26 @@ func (a *App) startupBannerData(ln net.Listener) StartupBannerData {
 		}
 	}
 	extra = append(extra, cfg.ExtraLines...)
+	notice := ""
+	if !cfg.HideSecureDefaultsNotice && (isProductionLikeMode(a.cfg) || a.cfg.SecureByDefault) {
+		notice = "SecureByDefault/production mode bounds protocol input and hardens response\n" +
+			"headers only. It does NOT add authentication, CSRF protection, or rate\n" +
+			"limiting — mount those explicitly. Run app.ValidateSecurity() for specifics."
+	}
 	return StartupBannerData{
-		Name:      name,
-		Version:   strings.TrimSpace(cfg.Version),
-		Subtitle:  strings.TrimSpace(cfg.Subtitle),
-		URL:       url,
-		Address:   addr,
-		Scheme:    scheme,
-		Routes:    len(a.Routes()),
-		PID:       os.Getpid(),
-		GoVersion: runtime.Version(),
-		Mode:      a.cfg.Mode,
-		HTTP2:     !a.cfg.DisableHTTP2,
-		Extra:     extra,
+		Name:                 name,
+		Version:              strings.TrimSpace(cfg.Version),
+		Subtitle:             strings.TrimSpace(cfg.Subtitle),
+		URL:                  url,
+		Address:              addr,
+		Scheme:               scheme,
+		Routes:               len(a.Routes()),
+		PID:                  os.Getpid(),
+		GoVersion:            runtime.Version(),
+		Mode:                 a.cfg.Mode,
+		HTTP2:                !a.cfg.DisableHTTP2,
+		Extra:                extra,
+		SecureDefaultsNotice: notice,
 	}
 }
 

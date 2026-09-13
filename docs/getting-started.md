@@ -34,7 +34,11 @@ func main() {
 This example enables the strict, fail-closed protocol baseline.
 Authentication, authorization, CORS, CSRF, trusted-host policy and
 application rate limits remain application-specific and must be configured
-explicitly.
+explicitly — this applies equally to `NewProduction()` below, despite the
+name. See [Production Readiness](production-readiness.md#newproduction-and-securebydefault-are-narrower-than-they-sound)
+for exactly what each constructor does and does not cover, and call
+`app.ValidateSecurity()` for a live reminder plus concrete findings (e.g. a
+missing `AllowedHosts` policy).
 
 ## Basic Concepts
 

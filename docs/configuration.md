@@ -78,8 +78,16 @@ disable a default.
 | `fh.NewEnterprise(...)` | Compliance-oriented deployments | Audit/reliability/compliance defaults; protect evidence endpoints with `WithComplianceEndpointAuth` |
 | `fh.NewFast()` | Trusted benchmarks | Trades shutdown and timeout protections for hot-path performance |
 
-No constructor can infer authentication, authorization, CORS, CSRF, allowed
-hosts or business-specific rate limits. Configure those explicitly.
+**No constructor — including `NewProduction()` and `WithSecureByDefault(true)`
+— can infer authentication, authorization, CORS, CSRF, allowed hosts, or
+business-specific rate limits.** "Production mode" and "secure by default"
+bound protocol/transport input and response headers only; assuming either one
+also means "authenticated" or "rate-limited" is the most common
+misconfiguration risk in fh. Configure those explicitly, and call
+`app.ValidateSecurity()` to get an explicit reminder plus a concrete
+`HOST_POLICY_MISSING` finding if `AllowedHosts` is unset. See
+[Production Readiness](production-readiness.md#newproduction-and-securebydefault-are-narrower-than-they-sound)
+for the full breakdown of what each constructor does and does not cover.
 
 ### Timeouts
 

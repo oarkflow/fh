@@ -63,8 +63,12 @@ type Config struct {
 	// SecureByDefault enables the framework's fail-closed protocol and response
 	// baseline. It is resolved once while the app is built, so disabled servers
 	// pay no request-path cost. Application-specific authentication,
-	// authorization, CORS, CSRF, and rate-limit policies must still be installed
-	// explicitly because the framework cannot infer them safely.
+	// authorization, CORS, CSRF, rate-limit, and Host allow-list (AllowedHosts)
+	// policies must still be installed explicitly because the framework cannot
+	// infer them safely. This is true of every mode, including
+	// ModeProduction/NewProduction — "production mode" and "secure by default"
+	// are two separate, narrower-than-they-sound opt-ins. See
+	// docs/production-readiness.md.
 	SecureByDefault bool
 	// Mode controls secure default and compliance validation behavior.
 	Mode Mode
@@ -316,6 +320,14 @@ func WithSendKeepAliveHeader(enabled bool) Option {
 
 // WithSecureByDefault enables the fail-closed framework security baseline.
 // It is equivalent to setting Config.SecureByDefault.
+//
+// This bounds protocol input (buffer/connection/body-size limits) and
+// hardens response headers (HSTS, COOP/CORP, Referrer-Policy, ...). It does
+// NOT add authentication, authorization, CSRF protection, rate limiting, or
+// a Host allow-list — see Config.SecureByDefault and NewProduction for the
+// full scope, and mount mw/basicauth/mw/apikey/mw/session (or another
+// principal extractor), mw/csrf, mw/ratelimiter, and WithAllowedHosts
+// explicitly for those.
 func WithSecureByDefault(enabled bool) Option {
 	return func(c *Config) { c.SecureByDefault = enabled }
 }
@@ -424,6 +436,20 @@ func NewFast(opts ...Option) *App {
 
 // NewProduction creates an app with production-safe protocol defaults while
 // keeping the request hot path allocation-sensitive.
+//
+// "Production-safe protocol defaults" means exactly Config.Mode =
+// ModeProduction: tighter protocol validation and the connection/timeout
+// bounds ValidateSecurity checks for. Despite the name, NewProduction does
+// NOT by itself add authentication, authorization, CSRF protection, rate
+// limiting, or a Host allow-list (Config.AllowedHosts) — every one of those
+// remains the application's responsibility to mount explicitly (mw/basicauth,
+// mw/apikey, mw/session, mw/csrf, mw/ratelimiter, WithAllowedHosts, ...).
+// Layering WithSecureByDefault(true) on top additionally hardens response
+// headers and bounds every untrusted protocol dimension (buffer sizes,
+// connection/body limits) — it still does not touch auth/CSRF/rate-limiting.
+// Call app.ValidateSecurity() (or GET /_fh/compliance/findings if compliance
+// endpoints are mounted) to see what's actually configured for a given app,
+// and see docs/production-readiness.md for the full release-gate checklist.
 func NewProduction(opts ...Option) *App {
 	all := append([]Option{WithMode(ModeProduction)}, opts...)
 	return New(all...)
@@ -516,6 +542,12 @@ type connState struct {
 //	    fh.WithWriteTimeout(10*time.Second),
 //	    fh.WithDebug(true),
 //	)
+//
+// New defaults to Config.Mode = ModeProduction, which only tightens protocol
+// and connection-handling behavior (see NewProduction). It does not enable
+// authentication, CSRF protection, rate limiting, or a Host allow-list, and
+// it does not imply SecureByDefault — see WithSecureByDefault for what that
+// separate, still application-scoped, opt-in adds.
 func New(opts ...Option) *App {
 	cfg := defaultConfig
 	for _, opt := range opts {

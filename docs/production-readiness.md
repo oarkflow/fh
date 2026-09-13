@@ -5,6 +5,37 @@ specific release, application configuration and deployment environment—not of
 the framework name alone. Complete the gates below before serving public or
 sensitive traffic.
 
+## `NewProduction()` and `SecureByDefault` are narrower than they sound
+
+This is the single most common misconfiguration risk in fh, so it gets its
+own section instead of a passing mention: **neither `fh.NewProduction()` nor
+`fh.WithSecureByDefault(true)` — together or separately — adds
+authentication, authorization, CSRF protection, rate limiting, or a Host
+allow-list.** Both are real, but they only cover protocol/transport hygiene:
+
+| | `NewProduction()` (`ModeProduction`) | `WithSecureByDefault(true)` |
+|---|---|---|
+| Stricter protocol validation | ✅ | ✅ |
+| Read/write/body/HTTP-2-idle timeout floors | ✅ (flagged by `ValidateSecurity` if unset) | ✅ (sets bounds) |
+| Connection/body-size ceilings | partial | ✅ (sets bounds) |
+| Hardened response headers (HSTS, COOP/CORP, `Referrer-Policy`) | ✗ | ✅ |
+| h2c (cleartext HTTP/2) disabled | ✗ (flagged if left on) | ✅ |
+| Authentication / authorization | ✗ — always your middleware | ✗ — always your middleware |
+| CSRF protection | ✗ — mount `mw/csrf` | ✗ — mount `mw/csrf` |
+| Rate limiting | ✗ — mount `mw/ratelimiter` | ✗ — mount `mw/ratelimiter` |
+| Host allow-list | ✗ — set `Config.AllowedHosts` | ✗ — set `Config.AllowedHosts` |
+
+Call `app.ValidateSecurity()` (or `GET /_fh/compliance/findings` once
+compliance endpoints are mounted with auth) on any app running in a
+production-like mode or with `SecureByDefault` — it always returns a
+`SECURE_DEFAULTS_SCOPE` finding restating this, plus a `HOST_POLICY_MISSING`
+finding if `Config.AllowedHosts` is empty. The startup banner prints the same
+reminder at every process boot (`StartupBannerConfig.HideSecureDefaultsNotice`
+silences it once your team doesn't need reminding). `ValidateSecurity` cannot
+detect whether auth/CSRF/rate-limiting middleware is actually mounted — a
+`HandlerFunc` gives it nothing to introspect — which is exactly why the
+reminder is unconditional rather than a "detected" claim.
+
 ## Supported deployment shape
 
 The best-supported shape is HTTP/1.1 or HTTP/2 behind a trusted CDN, WAF or

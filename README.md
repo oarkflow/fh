@@ -16,7 +16,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 - **Typed endpoints & OpenAPI 3.1** — generic request/response handlers with auto-generated specs
 - **Reliability layer** — request journaling, idempotency, durable async queue, outbox/inbox, DLQ
 - **Compliance layer** — Business/Professional/Enterprise/Security profiles, audit ledger, route security metadata
-- **Opt-in fail-closed baseline** — `fh.WithSecureByDefault(true)` bounds every protocol input, enables strict parsing, recovery, redaction, and hardened response headers
+- **Opt-in fail-closed baseline** — `fh.WithSecureByDefault(true)` bounds every protocol input, enables strict parsing, recovery, redaction, and hardened response headers. Neither this nor `fh.NewProduction()` adds authentication, CSRF protection, rate limiting, or a Host allow-list — see [Production Readiness](docs/production-readiness.md#newproduction-and-securebydefault-are-narrower-than-they-sound)
 - **Template engine** — agnostic interface, any engine implementing `Render(w, name, data, layout...)`
 - **Static file serving** — direct streaming, range requests, streaming gzip, precompressed Brotli/gzip, cache control
 - **Streaming uploads** — opt-in incremental HTTP/1 body consumption with bounded draining and trailer support
@@ -526,7 +526,7 @@ The following product limitations must also be planned around:
 
 - **No HTTP/3 / QUIC.** Only HTTP/1.1 and HTTP/2 are implemented. Terminate HTTP/3 at an edge proxy (e.g. a CDN) in front of fh if you need it.
 - **No OpenTelemetry (OTLP) export.** `mw/tracing` propagates/parses `traceparent` headers and `mw/metrics` exposes a hand-rolled Prometheus text endpoint, but neither ships an OTLP exporter to a collector (Grafana Tempo/Datadog/etc.). Bridge these yourself, or scrape the Prometheus endpoint and configure trace propagation compatible with your existing collector.
-- **Process-local defaults.** Middleware and cluster state use the shared `pkg/storage/kv.Store` interface. Defaults are in-process, so rate limits, caches, sessions, replay markers, and cluster leases are per instance. `kv.Provider` and `fh.WithSharedState` now provide isolated application-wide namespaces and lifecycle management; the built-in providers are memory and single-host files. A distributed deployment still needs a compatible Redis/PostgreSQL adapter. See [Shared State](docs/shared-state.md).
+- **Process-local defaults.** Middleware and cluster state use the shared `pkg/storage/kv.Store` interface. Defaults are in-process, so rate limits, caches, sessions, replay markers, and cluster leases are per instance unless you configure a shared provider. `kv.Provider` and `fh.WithSharedState` give isolated application-wide namespaces and lifecycle management; the built-in providers are memory and single-host files. For a distributed deployment, [`fh-contrib`](https://github.com/oarkflow/fh-contrib) provides Redis and PostgreSQL `kv.Provider` adapters with cross-process-atomic `Mutate`. See [Shared State](docs/shared-state.md).
 - **No gRPC or GraphQL protocol handlers.** Only MIME-type constants exist for GraphQL; there's no built-in gRPC server. Both are addressable via a reverse-proxy route (`mw/proxy`) to a dedicated service if needed.
 
 ## Security

@@ -71,3 +71,77 @@ func TestComplianceStrictFindings(t *testing.T) {
 func containsString(s, sub string) bool {
 	return len(sub) == 0 || (len(s) >= len(sub) && (s == sub || containsString(s[1:], sub) || s[:len(sub)] == sub))
 }
+
+func findingByCode(findings []SecurityFinding, code string) (SecurityFinding, bool) {
+	for _, f := range findings {
+		if f.Code == code {
+			return f, true
+		}
+	}
+	return SecurityFinding{}, false
+}
+
+// TestNewProductionAloneFlagsMissingHostPolicyAndScopeReminder guards the
+// "NewProduction()/WithSecureByDefault(true) is unmistakable" fix: neither
+// enables a Host allow-list, and ValidateSecurity must say so explicitly
+// rather than silently accepting any Host header, plus always carry the
+// SECURE_DEFAULTS_SCOPE reminder that protocol hardening isn't auth/CSRF/
+// rate-limiting.
+func TestNewProductionAloneFlagsMissingHostPolicyAndScopeReminder(t *testing.T) {
+	app := NewProduction(WithStartupBannerDisabled(true))
+	findings := app.ValidateSecurity()
+
+	if _, ok := findingByCode(findings, "HOST_POLICY_MISSING"); !ok {
+		t.Fatalf("expected HOST_POLICY_MISSING finding for NewProduction() with no AllowedHosts, got %#v", findings)
+	}
+	if _, ok := findingByCode(findings, "SECURE_DEFAULTS_SCOPE"); !ok {
+		t.Fatalf("expected SECURE_DEFAULTS_SCOPE reminder finding, got %#v", findings)
+	}
+}
+
+// TestAllowedHostsClearsHostPolicyFinding proves the check is a real signal,
+// not always-on noise.
+func TestAllowedHostsClearsHostPolicyFinding(t *testing.T) {
+	app := NewProduction(WithAllowedHosts("api.example.com"), WithStartupBannerDisabled(true))
+	findings := app.ValidateSecurity()
+	if _, ok := findingByCode(findings, "HOST_POLICY_MISSING"); ok {
+		t.Fatalf("expected no HOST_POLICY_MISSING finding once AllowedHosts is set, got %#v", findings)
+	}
+}
+
+// TestSecureByDefaultAloneStillCarriesScopeReminder proves the reminder isn't
+// gated only on Mode — SecureByDefault(true) with the default (fast/dev-ish)
+// mode still gets it, since it's the specific thing this fix must never let
+// slip through: "secure" alone must never read as "auth/CSRF/rate-limiting
+// included".
+func TestSecureByDefaultAloneStillCarriesScopeReminder(t *testing.T) {
+	app := New(WithSecureByDefault(true), WithStartupBannerDisabled(true))
+	findings := app.ValidateSecurity()
+	if _, ok := findingByCode(findings, "SECURE_DEFAULTS_SCOPE"); !ok {
+		t.Fatalf("expected SECURE_DEFAULTS_SCOPE reminder finding for SecureByDefault(true), got %#v", findings)
+	}
+}
+
+// TestStartupBannerCarriesSecureDefaultsNotice proves the reminder is also
+// unmissable at the one place every operator actually looks: process
+// startup output, not just a report endpoint nobody queries by default.
+func TestStartupBannerCarriesSecureDefaultsNotice(t *testing.T) {
+	app := NewProduction()
+	data := app.startupBannerData(nil)
+	if data.SecureDefaultsNotice == "" {
+		t.Fatal("expected non-empty SecureDefaultsNotice for NewProduction()")
+	}
+	if !containsString(data.SecureDefaultsNotice, "does NOT add authentication") {
+		t.Fatalf("expected notice to state the scope explicitly, got %q", data.SecureDefaultsNotice)
+	}
+
+	appHidden := NewProduction(WithStartupBanner(StartupBannerConfig{HideSecureDefaultsNotice: true}))
+	if got := appHidden.startupBannerData(nil).SecureDefaultsNotice; got != "" {
+		t.Fatalf("expected empty notice when HideSecureDefaultsNotice is set, got %q", got)
+	}
+
+	appFast := NewFast()
+	if got := appFast.startupBannerData(nil).SecureDefaultsNotice; got != "" {
+		t.Fatalf("expected no notice for a non-production, non-SecureByDefault app, got %q", got)
+	}
+}

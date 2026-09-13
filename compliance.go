@@ -383,12 +383,20 @@ func (a *App) ComplianceControls() []ComplianceControl {
 	return controls
 }
 
+// isProductionLikeMode reports whether cfg is running in a mode where
+// ValidateSecurity's production-only checks, and the SECURE_DEFAULTS_SCOPE /
+// startup-banner reminder that "protocol hardening" is not "auth/CSRF/rate
+// limiting", apply.
+func isProductionLikeMode(cfg Config) bool {
+	return cfg.Mode == ModeProduction || cfg.Mode == ModeStrict || cfg.Mode == ModeEnterprise || cfg.Compliance.Enabled
+}
+
 func (a *App) ValidateSecurity() []SecurityFinding {
 	if a == nil {
 		return nil
 	}
 	var f []SecurityFinding
-	prod := a.cfg.Mode == ModeProduction || a.cfg.Mode == ModeStrict || a.cfg.Mode == ModeEnterprise || a.cfg.Compliance.Enabled
+	prod := isProductionLikeMode(a.cfg)
 	if prod && a.cfg.Debug {
 		f = append(f, SecurityFinding{"critical", "DEBUG_ENABLED", "debug error exposure is enabled in production/compliance mode", "disable Config.Debug", ""})
 	}
@@ -433,6 +441,23 @@ func (a *App) ValidateSecurity() []SecurityFinding {
 	}
 	if a.cfg.Compliance.ExposeEndpoints && len(a.cfg.Compliance.EndpointAuth) == 0 {
 		f = append(f, SecurityFinding{"critical", "COMPLIANCE_ENDPOINTS_UNAUTHENTICATED", "compliance endpoint exposure was requested without authentication; fail-closed endpoint mounting left the endpoints disabled", "set Config.Compliance.EndpointAuth (or fh.WithComplianceEndpointAuth) to an auth middleware", ""})
+	}
+	if prod && len(a.cfg.AllowedHosts) == 0 {
+		f = append(f, SecurityFinding{"high", "HOST_POLICY_MISSING", "Config.AllowedHosts is empty; any Host/:authority value is accepted", "set Config.AllowedHosts (fh.WithAllowedHosts) to your public hostnames", ""})
+	}
+	// SecureByDefault and every Production/Strict/Enterprise mode bound protocol
+	// input (timeouts, body/connection limits, response headers) and nothing
+	// application-layer. They do not, and cannot, detect or enable
+	// authentication, CSRF protection, or rate limiting: those are middleware
+	// (mw/basicauth, mw/apikey, mw/session, mw/jwt-style principal extractors,
+	// mw/csrf, mw/ratelimiter, ...) that ValidateSecurity has no reliable,
+	// generic way to confirm are mounted, since HandlerFunc gives it nothing to
+	// introspect. This finding is unconditional advisory context, not a
+	// detected gap — repeated here (and on the startup banner) specifically so
+	// "secure/production mode is on" is never mistaken for "auth/CSRF/rate
+	// limiting are on". See docs/production-readiness.md.
+	if prod || a.cfg.SecureByDefault {
+		f = append(f, SecurityFinding{"info", "SECURE_DEFAULTS_SCOPE", "SecureByDefault/production mode bounds protocol input and hardens response headers only — it does NOT add authentication, CSRF protection, or rate limiting. Verify those are mounted explicitly.", "mount mw/basicauth, mw/apikey, mw/session, or another principal extractor for auth; mw/csrf for state-changing routes; mw/ratelimiter for abuse limits", ""})
 	}
 	for _, r := range a.Routes() {
 		unsafe := r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" || r.Method == "DELETE"
