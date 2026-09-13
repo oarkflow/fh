@@ -1,10 +1,15 @@
 package logger
 
 import (
+	"io"
 	"log/slog"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/oarkflow/fh"
 )
 
 func TestNewMiddlewareDefaultConfig(t *testing.T) {
@@ -272,8 +277,92 @@ func TestSlogOutput(t *testing.T) {
 		Slog:         sl,
 		DisableAsync: true,
 	})
-	if !m.slogOn {
-		t.Error("expected slogOn to be true")
+	if !m.recordOn {
+		t.Error("expected recordOn to be true")
 	}
 	_ = m
+}
+
+type capturedLog struct {
+	message string
+	args    []any
+}
+
+type captureLogger struct {
+	mu      sync.Mutex
+	records []capturedLog
+}
+
+func (l *captureLogger) append(message string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.records = append(l.records, capturedLog{message: message, args: append([]any(nil), args...)})
+}
+
+func (l *captureLogger) Printf(format string, args ...any) { l.append(format, args...) }
+func (l *captureLogger) Info(message string, args ...any)  { l.append(message, args...) }
+func (l *captureLogger) Warn(message string, args ...any)  { l.append(message, args...) }
+func (l *captureLogger) Error(message string, args ...any) { l.append(message, args...) }
+func (l *captureLogger) Debug(message string, args ...any) { l.append(message, args...) }
+
+func TestJSONLoggerUsesStructuredFieldsWithoutDoubleEncoding(t *testing.T) {
+	logs := new(captureLogger)
+	m := NewMiddleware(Config{Logger: logs, FormatName: "json", DisableAsync: true, SkipDefaultStatic: false})
+	app := fh.New(fh.WithMode(fh.ModeDevelopment))
+	app.Use(m.Handler())
+	app.Get("/profile", func(c fh.Ctx) error { return c.SendStatus(fh.StatusNoContent) })
+
+	resp, err := app.Test(httptest.NewRequest("GET", "http://localhost/profile", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != fh.StatusNoContent {
+		t.Fatalf("response status=%d", resp.StatusCode)
+	}
+	if len(logs.records) != 1 {
+		t.Fatalf("got %d logger calls, want 1", len(logs.records))
+	}
+	record := logs.records[0]
+	if record.message != "http_request" {
+		t.Fatalf("message=%q, want http_request", record.message)
+	}
+	if strings.Contains(record.message, `\"method\"`) || strings.HasPrefix(record.message, "{") {
+		t.Fatalf("request record was JSON-encoded into the message: %q", record.message)
+	}
+
+	fields := make(map[string]any, len(record.args)/2)
+	for i := 0; i+1 < len(record.args); i += 2 {
+		key, ok := record.args[i].(string)
+		if !ok {
+			t.Fatalf("field key %d has type %T", i, record.args[i])
+		}
+		fields[key] = record.args[i+1]
+	}
+	if fields["method"] != "GET" || fields["path"] != "/profile" || fields["status"] != fh.StatusNoContent {
+		t.Fatalf("unexpected structured fields: %#v", fields)
+	}
+	if _, exists := fields["query"]; exists {
+		t.Fatalf("empty query field should be omitted: %#v", fields)
+	}
+	if _, exists := fields["error"]; exists {
+		t.Fatalf("empty error field should be omitted: %#v", fields)
+	}
+}
+
+func TestHandlerLogsStatusFromReturnedHTTPError(t *testing.T) {
+	var output strings.Builder
+	m := NewMiddleware(Config{FormatName: "json", Writers: []io.Writer{&output}, DisableAsync: true, SkipDefaultStatic: false})
+	app := fh.New(fh.WithMode(fh.ModeDevelopment))
+	app.Use(m.Handler())
+	app.Get("/", func(fh.Ctx) error { return fh.NewHTTPError(fh.StatusTeapot, "TEAPOT", "short and stout") })
+	resp, err := app.Test(httptest.NewRequest("GET", "http://localhost/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != fh.StatusTeapot {
+		t.Fatalf("response status=%d", resp.StatusCode)
+	}
+	if !strings.Contains(output.String(), `"status":418`) {
+		t.Fatalf("log did not contain final error status: %s", output.String())
+	}
 }

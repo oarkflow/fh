@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: check test run wasm
+.PHONY: check test run keys wasm
 
 check:
 	$(GO) test ./...
@@ -9,10 +9,15 @@ test:
 	$(GO) test ./...
 
 run:
-	$(GO) run ./cmd/server
+	./run.sh
+
+keys:
+	@$(GO) run ./cmd/server -generate-transport-key
+	@$(GO) run ./cmd/server -generate-signing-key
 
 wasm:
 	@mkdir -p web/wasm
-	GOOS=js GOARCH=wasm CGO_ENABLED=0 $(GO) build -trimpath -buildvcs=false -o web/wasm/securefetch.wasm github.com/oarkflow/fh/wasm/cmd/securefetch
-	@command -v wasm_exec.js >/dev/null 2>&1 || true
-	@echo "Copy wasm_exec.js, secure-fetch.js, storage.js, and index.js from the fh release bundle into web/wasm"
+	@test -n "$(WASM_TRUSTED_ORIGIN)" -a -n "$(WASM_TRUSTED_TRANSPORT_KEY)" -a -n "$(WASM_TRUSTED_TRANSPORT_KEY_ID)" -a -n "$(WASM_TRUSTED_RESPONSE_KEY)" -a -n "$(WASM_TRUSTED_RESPONSE_KEY_ID)" || (echo "all five WASM_TRUSTED_* values are required" >&2; exit 1)
+	GOOS=js GOARCH=wasm CGO_ENABLED=0 $(GO) build -trimpath -buildvcs=false -ldflags="-s -w -X main.embeddedTrustedOrigin=$(WASM_TRUSTED_ORIGIN) -X main.embeddedTransportPublicKey=$(WASM_TRUSTED_TRANSPORT_KEY) -X main.embeddedTransportKeyID=$(WASM_TRUSTED_TRANSPORT_KEY_ID) -X main.embeddedResponseSigningPublicKey=$(WASM_TRUSTED_RESPONSE_KEY) -X main.embeddedResponseSigningKeyID=$(WASM_TRUSTED_RESPONSE_KEY_ID)" -o web/wasm/securefetch.wasm github.com/oarkflow/fh/wasm/cmd/securefetch
+	cp "$$($(GO) env GOROOT)/lib/wasm/wasm_exec.js" web/wasm/wasm_exec.js
+	$(GO) run github.com/oarkflow/fh/wasm/cmd/manifest -dir web/wasm

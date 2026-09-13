@@ -27,6 +27,10 @@ type Config struct {
 	// AllowedOrigins adds exact alternative external origins. The request Host
 	// selects one of these validated origins; unlisted hosts fail closed.
 	AllowedOrigins []string
+	// AllowInsecureDevelopmentOrigins permits explicit HTTP origins outside
+	// loopback. Use only for development servers intentionally exposed to a LAN.
+	// The default is false, so production remains HTTPS-only.
+	AllowInsecureDevelopmentOrigins bool
 
 	Validity    time.Duration
 	MaxBodySize int
@@ -45,7 +49,7 @@ func New(config Config) (fh.HandlerFunc, error) {
 	config.Label = defaultString(config.Label, protocol.DefaultLabel)
 	origins := make([]*url.URL, 0, len(config.AllowedOrigins)+1)
 	for _, rawOrigin := range append([]string{config.Origin}, config.AllowedOrigins...) {
-		origin, err := parseOrigin(rawOrigin)
+		origin, err := parseOrigin(rawOrigin, config.AllowInsecureDevelopmentOrigins)
 		if err != nil {
 			return nil, err
 		}
@@ -153,12 +157,12 @@ func New(config Config) (fh.HandlerFunc, error) {
 	}, nil
 }
 
-func parseOrigin(raw string) (*url.URL, error) {
+func parseOrigin(raw string, allowInsecureDevelopment bool) (*url.URL, error) {
 	origin, err := url.Parse(strings.TrimRight(strings.TrimSpace(raw), "/"))
 	if err != nil || origin.Scheme == "" || origin.Host == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
 		return nil, errors.New("http signature middleware: Origin must be an absolute origin without path, query, credentials, or fragment")
 	}
-	if origin.Scheme != "https" && !isLoopback(origin.Hostname()) {
+	if origin.Scheme != "https" && !isLoopback(origin.Hostname()) && !allowInsecureDevelopment {
 		return nil, errors.New("http signature middleware: HTTPS is required outside loopback development")
 	}
 	origin.Path = ""

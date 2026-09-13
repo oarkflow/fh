@@ -54,7 +54,7 @@ func run(args []string) error {
 		return fmt.Errorf("directory %s is not empty; use -force to continue", root)
 	}
 
-	return fs.WalkDir(templateFS, "template", func(path string, entry fs.DirEntry, walkErr error) error {
+	if err := fs.WalkDir(templateFS, "template", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -77,5 +77,36 @@ func run(args []string) error {
 			mode = 0o755
 		}
 		return os.WriteFile(destination, data, mode)
-	})
+	}); err != nil {
+		return err
+	}
+	return createEnvironmentFile(root)
+}
+
+// createEnvironmentFile gives a new application runnable development defaults.
+// O_EXCL is intentional: -force may refresh generated source, but must never
+// replace environment-specific values or secrets in an existing .env file.
+func createEnvironmentFile(root string) error {
+	data, err := os.ReadFile(filepath.Join(root, ".env.example"))
+	if err != nil {
+		return fmt.Errorf("read .env.example: %w", err)
+	}
+	destination := filepath.Join(root, ".env")
+	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("create .env: %w", err)
+	}
+
+	_, writeErr := file.Write(data)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return fmt.Errorf("initialize .env: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close .env: %w", closeErr)
+	}
+	return nil
 }

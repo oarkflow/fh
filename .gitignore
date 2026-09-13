@@ -5,7 +5,12 @@ dagflow/data/*
 .fh-data
 .fh-reliability
 .idea
+.env
+!.env.example
 *.wasm
+!cmd/fh-init/template/web/wasm/securefetch.wasm
+!examples/production-ready/web/wasm/securefetch.wasm
+examples/production-ready/data/
 *.key
 *.pem
 *.p12

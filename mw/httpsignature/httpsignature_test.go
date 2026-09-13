@@ -101,6 +101,12 @@ func TestRequiresNegotiatedSignature(t *testing.T) {
 	if _, err := New(Config{PrivateKey: privateKey, KeyID: "key-1", Origin: "http://api.example.test"}); err == nil {
 		t.Fatal("non-loopback HTTP origin was accepted")
 	}
+	if _, err := New(Config{
+		PrivateKey: privateKey, KeyID: "key-1", Origin: "http://devbox.local:8080",
+		AllowInsecureDevelopmentOrigins: true,
+	}); err != nil {
+		t.Fatalf("explicit development HTTP origin was rejected: %v", err)
+	}
 }
 
 func TestAllowedOriginSelectsRequestHost(t *testing.T) {

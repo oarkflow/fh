@@ -59,6 +59,28 @@ func main() {
 }
 ```
 
+## Production application template
+
+Generate a structured server with secure sessions, strict Host/origin policy,
+RBAC, bounded requests, rate limiting, audit logs, protected health/metrics,
+SQLite persistence, graceful shutdown, and encrypted WASM Fetch with signed
+ciphertext responses:
+
+```bash
+go run ./cmd/fh-init -module example.com/acme/service -dir ./service
+cd service
+./run.sh
+```
+
+The generator initializes `.env` from `.env.example` and preserves it on
+subsequent `-force` regeneration.
+
+Loopback development uses short-lived process-local cryptographic keys. The
+generated server fails closed outside the explicit `development` environment
+unless HTTPS and persistent session, login, operations, transport, and response
+signing secrets are configured. See the generated README and
+[secure WASM transport guide](docs/secure-wasm-transport.md) before deployment.
+
 ## Cross-platform kernel-assisted transport
 
 `fh` keeps protocol parsing, TLS, routing, middleware, reliability and handlers in memory-safe Go while using the native kernel network facility on each supported server OS:

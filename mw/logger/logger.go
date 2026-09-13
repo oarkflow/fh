@@ -119,8 +119,8 @@ type Middleware struct {
 	json      bool
 	output    *asyncOutput
 	skip      skipMatcher
-	slogOn    bool
-	textOn    bool
+	recordOn  bool
+	lineOn    bool
 	closeOnce sync.Once
 }
 
@@ -210,26 +210,27 @@ func NewMiddleware(config ...Config) *Middleware {
 		cfg.MaxLineBytes = 4096
 	}
 
-	textOn := len(cfg.Writers) > 0 || cfg.Logger != nil
-	slogOn := cfg.Slog != nil
-
 	if cfg.Logger == nil && cfg.Slog == nil && len(cfg.Writers) == 0 {
 		cfg.Logger = fh.NewDefaultLogger()
 	}
 
+	jsonMode := strings.EqualFold(cfg.FormatName, "json")
+	lineOn := len(cfg.Writers) > 0 || (cfg.Logger != nil && !jsonMode)
+	recordOn := cfg.Slog != nil || (cfg.Logger != nil && jsonMode)
+
 	m := &Middleware{
-		cfg:    cfg,
-		json:   strings.EqualFold(cfg.FormatName, "json"),
-		skip:   newSkipMatcher(cfg),
-		slogOn: slogOn,
-		textOn: textOn,
+		cfg:      cfg,
+		json:     jsonMode,
+		skip:     newSkipMatcher(cfg),
+		recordOn: recordOn,
+		lineOn:   lineOn,
 	}
 
 	if !m.json {
 		m.tokens = parseLogFormat(cfg.Format)
 	}
 
-	m.output = newAsyncOutput(cfg, textOn, slogOn)
+	m.output = newAsyncOutput(cfg, lineOn, recordOn)
 	return m
 }
 
@@ -251,6 +252,14 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 		end := time.Now()
 		lat := end.Sub(start)
 		status := ctx.StatusCode()
+		// Error responses are materialized by the app's outer error handler after
+		// this middleware returns. Classify the pending error now so logs do not
+		// report a stale 200 for a request that will become a 4xx/5xx response.
+		if err != nil {
+			if report := ctx.ErrorReport(err); report.Error != nil {
+				status = report.Error.Status
+			}
+		}
 
 		if m.skip.post(status) {
 			return err
@@ -269,7 +278,7 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 			errText = err.Error()
 		}
 
-		if m.textOn {
+		if m.lineOn {
 			buf := renderBufPool.Get().(*bytes.Buffer)
 			buf.Reset()
 
@@ -294,7 +303,7 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 			renderBufPool.Put(buf)
 		}
 
-		if m.slogOn {
+		if m.recordOn {
 			rec := slogRecordPool.Get().(*slogRecord)
 			rec.Time = end
 			rec.Method = string(method)
@@ -433,15 +442,15 @@ func (m *Middleware) renderJSON(
 }
 
 type asyncOutput struct {
-	cfg     Config
-	textOn  bool
-	slogOn  bool
-	ch      chan *logEntry
-	pool    sync.Pool
-	done    chan struct{}
-	closed  atomic.Bool
-	dropped atomic.Uint64
-	wg      sync.WaitGroup
+	cfg      Config
+	lineOn   bool
+	recordOn bool
+	ch       chan *logEntry
+	pool     sync.Pool
+	done     chan struct{}
+	closed   atomic.Bool
+	dropped  atomic.Uint64
+	wg       sync.WaitGroup
 }
 
 type logEntry struct {
@@ -455,13 +464,13 @@ const (
 	entrySlog
 )
 
-func newAsyncOutput(cfg Config, textOn bool, slogOn bool) *asyncOutput {
+func newAsyncOutput(cfg Config, lineOn bool, recordOn bool) *asyncOutput {
 	o := &asyncOutput{
-		cfg:    cfg,
-		textOn: textOn,
-		slogOn: slogOn,
-		ch:     make(chan *logEntry, cfg.QueueSize),
-		done:   make(chan struct{}),
+		cfg:      cfg,
+		lineOn:   lineOn,
+		recordOn: recordOn,
+		ch:       make(chan *logEntry, cfg.QueueSize),
+		done:     make(chan struct{}),
 	}
 	o.pool.New = func() any {
 		return &logEntry{
@@ -571,7 +580,7 @@ func (o *asyncOutput) run() {
 func (o *asyncOutput) writeEntry(e *logEntry) {
 	switch e.kind {
 	case entryLine:
-		if o.textOn {
+		if o.lineOn {
 			if len(o.cfg.Writers) > 0 {
 				for _, w := range o.cfg.Writers {
 					if w != nil {
@@ -585,14 +594,37 @@ func (o *asyncOutput) writeEntry(e *logEntry) {
 		}
 
 	case entrySlog:
-		if o.slogOn && o.cfg.Slog != nil && e.rec != nil {
+		if o.recordOn && e.rec != nil {
+			if o.cfg.Logger != nil && strings.EqualFold(o.cfg.FormatName, "json") {
+				args := []any{
+					"ip", e.rec.IP,
+					"method", e.rec.Method,
+					"path", e.rec.Path,
+					"uri", e.rec.URI,
+					"status", e.rec.Status,
+					"latency_us", e.rec.Latency.Microseconds(),
+				}
+				if e.rec.Query != "" {
+					args = append(args, "query", e.rec.Query)
+				}
+				if e.rec.RequestID != "" {
+					args = append(args, "request_id", e.rec.RequestID)
+				}
+				if e.rec.Error != "" {
+					args = append(args, "error", e.rec.Error)
+				}
+				o.cfg.Logger.Info("http_request", args...)
+			}
+			if o.cfg.Slog == nil {
+				break
+			}
 			attrs := []slog.Attr{
 				slog.String("ip", e.rec.IP),
 				slog.String("method", e.rec.Method),
 				slog.String("path", e.rec.Path),
 				slog.String("uri", e.rec.URI),
 				slog.Int("status", e.rec.Status),
-				slog.Duration("latency", e.rec.Latency),
+				slog.Int64("latency_us", e.rec.Latency.Microseconds()),
 			}
 
 			if e.rec.Query != "" {
