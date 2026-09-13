@@ -113,9 +113,52 @@ func NewWithConfig(cfg Config) fh.HandlerFunc {
 			defer c.SetContext(parent)
 		}
 
+		// Guard against the common case of a handler that does not observe
+		// deadlineCtx.Done() and instead writes its own response directly
+		// (SendString/SendBytes/JSON/...). Ctx write methods serialize and
+		// flush to the connection synchronously, so by the time Next()
+		// returns below any such response is already on the wire and
+		// c.Status()/c.Set() calls made afterward (e.g. from handleTimeout)
+		// have no effect. AddBodyTransform intercepts the body right
+		// before it is actually serialized (on both HTTP/1.1 and HTTP/2
+		// paths), which lets the deadline still win even for a handler
+		// that never checks it. This only carries the plain status
+		// code/message/header from cfg, not a custom OnTimeout callback:
+		// invoking an arbitrary caller-supplied callback (which may itself
+		// call Send*/JSON) from inside a body-transform would reenter the
+		// write path and risk corrupting the response, so OnTimeout keeps
+		// firing only for the cooperative path below.
+		overridden := false
+		c.AddBodyTransform(func(body []byte) ([]byte, error) {
+			if overridden || !errors.Is(deadlineCtx.Err(), context.DeadlineExceeded) {
+				return body, nil
+			}
+			overridden = true
+			c.Status(cfg.StatusCode)
+			if cfg.HeaderName != "" {
+				value := cfg.HeaderValue
+				if value == "" {
+					value = strconv.FormatInt(int64(cfg.Timeout/time.Millisecond), 10) + "ms"
+				}
+				c.Set(cfg.HeaderName, value)
+			}
+			return []byte(cfg.Message), nil
+		})
+
 		err := c.Next()
 
+		if overridden {
+			return err
+		}
+
 		if isTimedOut(deadlineCtx, err) {
+			// From here on, this middleware is writing the timeout
+			// response itself (honoring OnTimeout for this cooperative
+			// path, where the handler hasn't written anything yet). Mark
+			// overridden so the body-transform above treats that write as
+			// already-decided and passes it through unchanged, instead of
+			// intercepting its own outer middleware's legitimate response.
+			overridden = true
 			return handleTimeout(c, cfg, err)
 		}
 

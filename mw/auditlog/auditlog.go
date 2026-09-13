@@ -72,7 +72,24 @@ func New(cfg Config) fh.HandlerFunc {
 		err := c.Next()
 		dur := time.Since(start)
 
+		// c.StatusCode() only reflects an explicit c.Status(...) call. A
+		// handler that returns a typed error (e.g. fh.Unauthorized(...)) —
+		// the idiomatic pattern throughout this codebase — never calls
+		// Status itself; the framework only assigns the real status code
+		// to the response after this middleware's c.Next() has already
+		// returned, when the default error handler runs. Left unchecked,
+		// that meant every such error was audited as its stale pre-call
+		// status (typically 200/info), silently hiding auth failures, rate
+		// limits, and server errors from the audit trail. c.ErrorReport
+		// performs the same classification the framework is about to use
+		// to answer the request, without side effects on the response, so
+		// use its status when an error is present.
 		status := c.StatusCode()
+		if err != nil {
+			if report := c.ErrorReport(err); report.Error != nil {
+				status = report.Error.Status
+			}
+		}
 		severity := classifyStatus(status)
 
 		if severityRank(severity) < severityRank(cfg.MinSeverity) {

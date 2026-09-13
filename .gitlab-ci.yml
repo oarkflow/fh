@@ -1,0 +1,216 @@
+# CI for fh (github.com/oarkflow/fh).
+#
+# Runner-tag assumption: this pipeline expects self-hosted runners tagged
+# `linux`, `macos` and `windows` respectively (see the `tags:` key on each
+# job below — GitLab CI/CD does not support variable expansion inside
+# `tags:`, so the three OSes are separate job templates rather than one
+# parameterized job). If your runner fleet uses different tags, update the
+# `tags:` list on each job to match before relying on this pipeline; it has
+# not been validated against a specific runner fleet.
+#
+# GO_DECLARED is parsed from go.mod (the minimum Go version fh declares
+# support for); GO_CURRENT is resolved at run time from https://go.dev, so
+# this pipeline always tests the currently-current Go release without
+# needing to be edited when a new one ships. Per the roadmap this covers
+# "CI for the declared Go version plus current Go on Linux, macOS and
+# Windows."
+
+stages:
+  - lint
+  - test
+  - fuzz
+  - release-gate
+
+variables:
+  GOFLAGS: "-mod=mod"
+  GOTOOLCHAIN: "local"
+
+.resolve_versions_unix: &resolve_versions_unix
+  - GO_DECLARED=$(awk '/^go /{print $2; exit}' go.mod)
+  - GO_CURRENT=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1 | sed 's/^go//')
+  - echo "declared=$GO_DECLARED current=$GO_CURRENT"
+
+# ── Reusable: install an exact Go toolchain by version, without Docker ──────
+# Used on macOS/Windows shell runners where a `golang:<tag>` image isn't an
+# option. Linux jobs use the official golang Docker image instead (see below).
+
+.install_go_unix: &install_go_unix |
+  GOOS_NAME=$(uname -s | tr '[:upper:]' '[:lower:]')
+  case "$GOOS_NAME" in
+    darwin) GOARCH_NAME="darwin-$(test "$(uname -m)" = arm64 && echo arm64 || echo amd64)" ;;
+    *) GOARCH_NAME="linux-amd64" ;;
+  esac
+  curl -fsSL "https://go.dev/dl/go${GO_VERSION}.${GOARCH_NAME}.tar.gz" -o /tmp/go.tar.gz
+  rm -rf "$CI_PROJECT_DIR/.gotoolchain" && mkdir -p "$CI_PROJECT_DIR/.gotoolchain"
+  tar -C "$CI_PROJECT_DIR/.gotoolchain" -xzf /tmp/go.tar.gz
+  export PATH="$CI_PROJECT_DIR/.gotoolchain/go/bin:$PATH"
+  export GOPATH="$CI_PROJECT_DIR/.gocache"
+  go version
+
+# ============================================================================
+# lint (Linux only — one canonical toolchain; staticcheck/govulncheck/gofmt
+# results don't vary meaningfully by OS, and this keeps the lint stage fast).
+# Note: staticcheck's unused-code analysis (U1000) is GOOS-sensitive — code
+# behind `_linux.go`/`_windows.go`/`_darwin.go` build tags is invisible to a
+# single-OS run. The test stage below runs on all three OSes so a symbol used
+# only on, say, Windows is still exercised there even though this lint job
+# only evaluates the Linux view.
+# ============================================================================
+lint:
+  stage: lint
+  image: golang:1.27
+  tags: [linux]
+  before_script:
+    - go install honnef.co/go/tools/cmd/staticcheck@latest
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+  script:
+    - test -z "$(gofmt -l . | grep -v '^wasm/dist/')" || (gofmt -l . && exit 1)
+    - go vet ./...
+    - staticcheck ./...
+    - govulncheck ./...
+
+# ============================================================================
+# test — Linux, matrixed across the declared Go version and current Go,
+# using the official Docker image (fast, no manual toolchain install needed).
+# ============================================================================
+test:linux:
+  stage: test
+  image: golang:${GO_VERSION}
+  tags: [linux]
+  parallel:
+    matrix:
+      - GO_VERSION: ["1.26.5", "1.27"]
+  script:
+    - go build ./...
+    - go test ./... -count=1
+    - go test ./... -race -count=1
+
+# ============================================================================
+# test — macOS, matrixed across the declared Go version and current Go.
+# Assumes a shell-executor runner tagged `macos` with network access and a
+# writable $CI_PROJECT_DIR (no Docker — macOS runners are almost always
+# shell/VM executors, not container executors).
+# ============================================================================
+test:macos:
+  stage: test
+  tags: [macos]
+  parallel:
+    matrix:
+      - GO_VERSION_SPEC: ["declared", "current"]
+  before_script:
+    - *resolve_versions_unix
+    - |
+      if [ "$GO_VERSION_SPEC" = "declared" ]; then export GO_VERSION="$GO_DECLARED"; else export GO_VERSION="$GO_CURRENT"; fi
+    - *install_go_unix
+  script:
+    - go build ./...
+    - go test ./... -count=1
+    - go test ./... -race -count=1
+
+# ============================================================================
+# test — Windows, matrixed across the declared Go version and current Go.
+# Assumes a shell-executor (PowerShell) runner tagged `windows`.
+# ============================================================================
+test:windows:
+  stage: test
+  tags: [windows]
+  parallel:
+    matrix:
+      - GO_VERSION_SPEC: ["declared", "current"]
+  before_script:
+    - $env:GO_DECLARED = (Select-String -Path go.mod -Pattern '^go (\S+)').Matches[0].Groups[1].Value
+    - $env:GO_CURRENT = ((Invoke-WebRequest -UseBasicParsing 'https://go.dev/VERSION?m=text').Content -split "`n")[0] -replace '^go',''
+    - if ($env:GO_VERSION_SPEC -eq "declared") { $env:GO_VERSION = $env:GO_DECLARED } else { $env:GO_VERSION = $env:GO_CURRENT }
+    - Invoke-WebRequest -UseBasicParsing -Uri "https://go.dev/dl/go$($env:GO_VERSION).windows-amd64.zip" -OutFile go.zip
+    - Remove-Item -Recurse -Force .gotoolchain -ErrorAction SilentlyContinue
+    - Expand-Archive go.zip -DestinationPath .gotoolchain
+    - $env:PATH = "$($PWD)\.gotoolchain\go\bin;" + $env:PATH
+    - go version
+  script:
+    - go build ./...
+    - go test ./... -count=1
+    - go test ./... -race -count=1
+
+# ============================================================================
+# fuzz — short fuzz runs (Linux, current Go) over every Fuzz* target in the
+# module. Each target gets a bounded fuzztime so this stays fast in regular
+# CI; the release-gate stage below re-runs this with a longer budget.
+# ============================================================================
+fuzz:
+  stage: fuzz
+  image: golang:1.27
+  tags: [linux]
+  variables:
+    FUZZTIME: "15s"
+  script:
+    - |
+      set -e
+      fail=0
+      for target in $(grep -rhoE '^func (Fuzz[A-Za-z0-9_]+)' --include='*_test.go' . | awk '{print $2}'); do
+        pkg=$(grep -rl "func ${target}(" --include='*_test.go' . | head -1 | xargs dirname)
+        echo "=== fuzzing ${target} in ${pkg} for ${FUZZTIME} ==="
+        go test "$pkg" -run=^$ -fuzz="^${target}\$" -fuzztime="${FUZZTIME}" || fail=1
+      done
+      exit $fail
+
+# ============================================================================
+# release-gate — the P0 release gate: test + race + vet + staticcheck +
+# govulncheck + a longer fuzz budget, run on every OS this pipeline covers.
+# Only runs for tag pipelines (i.e. cutting a release) or manually.
+# ============================================================================
+release-gate:linux:
+  stage: release-gate
+  image: golang:1.27
+  tags: [linux]
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - when: manual
+  before_script:
+    - go install honnef.co/go/tools/cmd/staticcheck@latest
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+  script:
+    - go build ./...
+    - go vet ./...
+    - staticcheck ./...
+    - govulncheck ./...
+    - go test ./... -count=1
+    - go test ./... -race -count=1
+    - |
+      set -e
+      for target in $(grep -rhoE '^func (Fuzz[A-Za-z0-9_]+)' --include='*_test.go' . | awk '{print $2}'); do
+        pkg=$(grep -rl "func ${target}(" --include='*_test.go' . | head -1 | xargs dirname)
+        go test "$pkg" -run=^$ -fuzz="^${target}\$" -fuzztime=60s
+      done
+
+release-gate:macos:
+  stage: release-gate
+  tags: [macos]
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - when: manual
+  before_script:
+    - *resolve_versions_unix
+    - export GO_VERSION="$GO_CURRENT"
+    - *install_go_unix
+  script:
+    - go build ./...
+    - go test ./... -count=1
+    - go test ./... -race -count=1
+
+release-gate:windows:
+  stage: release-gate
+  tags: [windows]
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - when: manual
+  before_script:
+    - $env:GO_CURRENT = ((Invoke-WebRequest -UseBasicParsing 'https://go.dev/VERSION?m=text').Content -split "`n")[0] -replace '^go',''
+    - Invoke-WebRequest -UseBasicParsing -Uri "https://go.dev/dl/go$($env:GO_CURRENT).windows-amd64.zip" -OutFile go.zip
+    - Remove-Item -Recurse -Force .gotoolchain -ErrorAction SilentlyContinue
+    - Expand-Archive go.zip -DestinationPath .gotoolchain
+    - $env:PATH = "$($PWD)\.gotoolchain\go\bin;" + $env:PATH
+    - go version
+  script:
+    - go build ./...
+    - go test ./... -count=1
+    - go test ./... -race -count=1

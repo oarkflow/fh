@@ -89,19 +89,9 @@ type fileDevice struct {
 	RevokedAt time.Time     `json:"revoked_at"`
 }
 
-func toFileDevice(d Device) fileDevice {
-	return fileDevice{
-		ID: d.ID, PublicKey: d.PublicKey, Name: d.Name, Principal: d.Principal,
-		CreatedAt: d.CreatedAt, LastSeen: d.LastSeen, RevokedAt: d.RevokedAt,
-	}
-}
+func toFileDevice(d Device) fileDevice { return fileDevice(d) }
 
-func (f fileDevice) toDevice() Device {
-	return Device{
-		ID: f.ID, PublicKey: f.PublicKey, Name: f.Name, Principal: f.Principal,
-		CreatedAt: f.CreatedAt, LastSeen: f.LastSeen, RevokedAt: f.RevokedAt,
-	}
-}
+func (f fileDevice) toDevice() Device { return Device(f) }
 
 type fileSession struct {
 	ID        protocol.ID16        `json:"id"`
@@ -113,19 +103,9 @@ type fileSession struct {
 	KeyID     string               `json:"key_id"`
 }
 
-func toFileSession(s Session) fileSession {
-	return fileSession{
-		ID: s.ID, DeviceID: s.DeviceID, Principal: s.Principal, Keys: s.Keys,
-		CreatedAt: s.CreatedAt, ExpiresAt: s.ExpiresAt, KeyID: s.KeyID,
-	}
-}
+func toFileSession(s Session) fileSession { return fileSession(s) }
 
-func (f fileSession) toSession() Session {
-	return Session{
-		ID: f.ID, DeviceID: f.DeviceID, Principal: f.Principal, Keys: f.Keys,
-		CreatedAt: f.CreatedAt, ExpiresAt: f.ExpiresAt, KeyID: f.KeyID,
-	}
-}
+func (f fileSession) toSession() Session { return Session(f) }
 
 func deviceKey(id protocol.ID16) string { return "device:" + hex.EncodeToString(id[:]) }
 

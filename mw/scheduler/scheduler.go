@@ -74,7 +74,21 @@ func New(cfg ...Config) *Scheduler {
 		if merge.PerPriority != nil {
 			c.PerPriority = merge.PerPriority
 		}
-		if merge.DefaultPriority >= 0 {
+		// NOTE: merge.DefaultPriority > 0, not >= 0. Priority is a plain int
+		// with PriorityCritical == 0, so an unset field in a caller's Config
+		// literal is bit-for-bit identical to an explicit PriorityCritical.
+		// A ">= 0" check is therefore always true and unconditionally
+		// clobbers the PriorityNormal baseline above with 0 (Critical) for
+		// *any* call to New(Config{...}) that doesn't happen to set
+		// DefaultPriority — which, combined with admit() always letting
+		// Critical-priority requests bypass MaxConcurrent and PerPriority,
+		// silently disabled all admission limits for every request lacking
+		// an explicit per-request priority. Treating 0 as "not specified"
+		// (matching every other field in this merge, which all use ">0")
+		// keeps the documented Normal default intact; it does mean
+		// DefaultPriority cannot be explicitly forced to Critical via
+		// config, which is the safe direction for this trade-off.
+		if merge.DefaultPriority > 0 {
 			c.DefaultPriority = merge.DefaultPriority
 		}
 		if merge.PriorityFunc != nil {
@@ -128,34 +142,60 @@ func priorityFromHTTP(priority fh.HTTPPriority) Priority {
 	}
 }
 
+// admit atomically reserves capacity for one in-flight request, or reports
+// that the request must be shed. Critical-priority requests always bypass
+// both the global and per-priority limits.
+//
+// Each check-and-increment below uses a compare-and-swap retry loop rather
+// than a plain Load() followed by Add(1). A Load-then-Add sequence is a
+// classic time-of-check-to-time-of-use race: under concurrent callers,
+// multiple goroutines can all observe totalInFl below MaxConcurrent before
+// any of them increments it, and all be admitted — silently letting the
+// in-flight count exceed MaxConcurrent (and PerPriority limits) under
+// exactly the burst-of-concurrent-requests load this scheduler exists to
+// bound. The CAS loop makes the observe-and-reserve step atomic so the
+// configured limits are actually enforced under a race, not just when
+// requests happen to arrive serially.
 func (s *Scheduler) admit(priority Priority) bool {
-	// Check global limit.
-	if s.cfg.MaxConcurrent > 0 {
-		if s.totalInFl.Load() >= int64(s.cfg.MaxConcurrent) {
-			// Allow critical priority to always admit.
-			if priority > PriorityCritical {
-				return false
-			}
+	critical := priority <= PriorityCritical
+
+	if s.cfg.MaxConcurrent > 0 && !critical {
+		if !tryReserve(&s.totalInFl, int64(s.cfg.MaxConcurrent)) {
+			return false
 		}
+	} else {
+		s.totalInFl.Add(1)
 	}
 
-	// Check per-priority limit.
 	pri := int(priority)
 	if pri >= 0 && pri < 5 {
-		if limit, ok := s.cfg.PerPriority[priority]; ok {
-			if s.inFlight[pri].Load() >= int64(limit) {
-				if priority > PriorityCritical {
-					return false
-				}
+		if limit, ok := s.cfg.PerPriority[priority]; ok && !critical {
+			if !tryReserve(&s.inFlight[pri], int64(limit)) {
+				// Roll back the global reservation made above so a
+				// per-priority rejection never leaks a global slot.
+				s.totalInFl.Add(-1)
+				return false
 			}
+		} else {
+			s.inFlight[pri].Add(1)
 		}
 	}
-
-	s.totalInFl.Add(1)
-	if pri >= 0 && pri < 5 {
-		s.inFlight[pri].Add(1)
-	}
 	return true
+}
+
+// tryReserve atomically increments counter and reports true, unless
+// counter is already at or above limit, in which case it reports false
+// without modifying counter.
+func tryReserve(counter *atomic.Int64, limit int64) bool {
+	for {
+		cur := counter.Load()
+		if cur >= limit {
+			return false
+		}
+		if counter.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
 }
 
 func (s *Scheduler) release(priority Priority) {

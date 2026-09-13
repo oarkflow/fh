@@ -6,8 +6,16 @@ import (
 )
 
 type Config struct {
-	Header            string
-	LocalKey          string
+	Header   string
+	LocalKey string
+
+	// TrustIncoming controls whether a client-supplied correlation ID header
+	// is accepted (subject to MaxIncomingLength and Validator) instead of
+	// always generating a fresh one. It defaults to true when New is called
+	// with no Config at all; once a Config value is passed, TrustIncoming is
+	// honored exactly as set (Go's normal zero-value semantics), so pass
+	// TrustIncoming: true explicitly if a partial Config should keep trusting
+	// incoming IDs.
 	TrustIncoming     bool
 	Generator         requestid.Generator
 	Validator         requestid.Validator
@@ -24,9 +32,7 @@ func New(config ...Config) fh.HandlerFunc {
 		if o.LocalKey != "" {
 			cfg.LocalKey = o.LocalKey
 		}
-		if o.TrustIncoming {
-			cfg.TrustIncoming = true
-		}
+		cfg.TrustIncoming = o.TrustIncoming
 		if o.Generator != nil {
 			cfg.Generator = o.Generator
 		}

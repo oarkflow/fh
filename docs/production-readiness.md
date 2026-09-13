@@ -73,14 +73,33 @@ Use versions of staticcheck and govulncheck that support the selected Go
 toolchain. CI should run at least on Linux, macOS and Windows. Native runtime
 testing is required; successful cross-compilation is not runtime validation.
 
+[`.gitlab-ci.yml`](../.gitlab-ci.yml) automates this: a `lint` stage
+(`gofmt`, `go vet`, `staticcheck`, `govulncheck`), a `test` stage matrixed
+across the declared Go version and current Go on Linux/macOS/Windows, a
+`fuzz` stage running every `Fuzz*` target with a short bounded fuzztime, and
+a tag-triggered `release-gate` stage that reruns the full set (including a
+longer fuzz budget) before a release. It assumes self-hosted runners tagged
+`linux`, `macos` and `windows`; adjust the `tags:` on each job if your
+runner fleet differs — it has not been validated against a specific fleet.
+
 Also require:
 
-1. compile checks for every documentation example;
+1. compile checks for every documentation example — see
+   [`doc_examples_test.go`](../doc_examples_test.go), run as part of
+   `go test ./...` and therefore covered by the `test` stage above;
 2. short continuous fuzz runs for HTTP/1 framing, chunked encoding, HPACK,
-   HTTP/2 frames, WebSocket frames and security-envelope parsers;
-3. dependency and reachable-vulnerability review;
-4. API compatibility checks against the previous release;
-5. signed, reproducible release artifacts and an SBOM where policy requires it.
+   HTTP/2 frames, WebSocket frames and security-envelope parsers — covered by
+   the `fuzz`/`release-gate` stages, which discover and run every `Fuzz*`
+   target in the module;
+3. dependency and reachable-vulnerability review — `govulncheck`, in both the
+   `lint` and `release-gate` stages;
+4. API compatibility checks against the previous release — **not yet
+   automated**; there is no compatibility policy or stable release line yet
+   (tracked as a pre-v1 roadmap item), so review diffs manually until one
+   exists;
+5. signed, reproducible release artifacts and an SBOM where policy
+   requires it — **not yet automated**; no release pipeline produces
+   artifacts yet, so treat this as a gap to close before cutting a v1.
 
 ## Load and failure testing
 

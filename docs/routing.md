@@ -223,7 +223,7 @@ Use the `mw/skip` package for conditional skipping:
 ```go
 import "github.com/oarkflow/fh/mw/skip"
 
-app.Use(skip.When(recover.New(), skip.Path("/health")))
+app.Use(skip.New(recover.New(), skip.Paths("/health")))
 ```
 
 ---

@@ -28,8 +28,8 @@ func TestNewMiddlewareDefaultConfig(t *testing.T) {
 
 func TestNewMiddlewareWithCustomConfig(t *testing.T) {
 	m := NewMiddleware(Config{
-		FormatName: "json",
-		QueueSize:  1024,
+		FormatName:   "json",
+		QueueSize:    1024,
 		DisableAsync: true,
 	})
 	if !m.json {
@@ -269,7 +269,7 @@ func TestSlogOutput(t *testing.T) {
 	var buf strings.Builder
 	sl := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	m := NewMiddleware(Config{
-		Slog:        sl,
+		Slog:         sl,
 		DisableAsync: true,
 	})
 	if !m.slogOn {

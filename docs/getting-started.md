@@ -195,7 +195,7 @@ c.BodyParser(&myStruct)   // auto-detect content-type and decode
 
 ```go
 c.SendString("hello")     // plain text
-c.SendBytes([]byte{...})  // binary
+c.SendBytes([]byte("binary payload"))  // binary
 c.JSON(map[string]any{})  // JSON
 c.XML(doc)                // XML
 c.HTML("<h1>Title</h1>") // HTML

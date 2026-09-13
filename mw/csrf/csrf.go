@@ -999,7 +999,7 @@ func canonicalRequestOrigin(raw string, allowPath bool) (string, error) {
 		return "", errors.New("origin contains userinfo")
 	}
 	if !allowPath && (u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "") {
-		return "", errors.New("Origin header contains path/query/fragment")
+		return "", errors.New("origin header contains path/query/fragment")
 	}
 	return canonicalURLOrigin(u)
 }

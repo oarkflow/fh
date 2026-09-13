@@ -354,8 +354,10 @@ func TestHTTP2PriorKnowledgeRequest(t *testing.T) {
 	}
 }
 
+type testContextKey string
+
 func TestHTTP2CleartextUpgradeRequestBecomesStreamOne(t *testing.T) {
-	const contextKey = "h2-base"
+	const contextKey testContextKey = "h2-base"
 	app := New(WithBaseContext(func(net.Listener) context.Context {
 		return context.WithValue(context.Background(), contextKey, "present")
 	}))

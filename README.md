@@ -330,20 +330,22 @@ See [Configuration](docs/configuration.md) for the full field reference, and [St
 
 ```go
 import (
+    "time"
+
     "github.com/oarkflow/fh/mw/session"
     "github.com/oarkflow/fh/pkg/storage/kv"
 )
 
-smw := session.New(session.Config{
-    Store:  kv.NewMemoryStore(),
-    Secret: "your-256-bit-secret",
-})
-app.Use(smw.Middleware)
+manager := session.NewSessionManager(
+    kv.NewMemoryStore(kv.WithGCInterval(time.Hour), kv.WithMaxEntries(100000)),
+    session.SessionSecret([]byte("at-least-32-bytes-of-random-secret")),
+)
+app.Use(session.New(manager))
 
 app.Get("/login", func(c fh.Ctx) error {
     sess := session.Get(c)
-    sess.Set("user_id", 42)
-    return sess.Save()
+    sess.Set("user_id", 42) // the middleware saves the session automatically
+    return c.SendString("logged in")
 })
 ```
 
@@ -524,5 +526,13 @@ The following product limitations must also be planned around:
 
 - **No HTTP/3 / QUIC.** Only HTTP/1.1 and HTTP/2 are implemented. Terminate HTTP/3 at an edge proxy (e.g. a CDN) in front of fh if you need it.
 - **No OpenTelemetry (OTLP) export.** `mw/tracing` propagates/parses `traceparent` headers and `mw/metrics` exposes a hand-rolled Prometheus text endpoint, but neither ships an OTLP exporter to a collector (Grafana Tempo/Datadog/etc.). Bridge these yourself, or scrape the Prometheus endpoint and configure trace propagation compatible with your existing collector.
-- **Process-local defaults.** Middleware and cluster state use the shared `pkg/storage/kv.Store` interface. Defaults are in-process, so rate limits, caches, sessions, replay markers, and cluster leases are per instance unless you provide a shared `kv.Store` backend (Redis, SQL, Consul, etc.).
+- **Process-local defaults.** Middleware and cluster state use the shared `pkg/storage/kv.Store` interface. Defaults are in-process, so rate limits, caches, sessions, replay markers, and cluster leases are per instance. `kv.Provider` and `fh.WithSharedState` now provide isolated application-wide namespaces and lifecycle management; the built-in providers are memory and single-host files. A distributed deployment still needs a compatible Redis/PostgreSQL adapter. See [Shared State](docs/shared-state.md).
 - **No gRPC or GraphQL protocol handlers.** Only MIME-type constants exist for GraphQL; there's no built-in gRPC server. Both are addressable via a reverse-proxy route (`mw/proxy`) to a dedicated service if needed.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the supported-version policy and how to report a vulnerability privately. Do not open a public issue for security reports.
+
+## License
+
+fh is distributed under the [MIT License](LICENSE).

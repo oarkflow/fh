@@ -35,8 +35,8 @@ func New(cfg Config) fh.HandlerFunc {
 		cfg.Reject = DefaultReject
 	}
 	type bucket struct {
-		sem chan struct{}
-		mu  sync.Mutex
+		sem    chan struct{}
+		mu     sync.Mutex
 		queued int
 	}
 	var buckets sync.Map

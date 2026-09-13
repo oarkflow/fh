@@ -62,9 +62,15 @@ func RouteSecurity(cfg RouteSecurityConfig) HandlerFunc {
 	}
 }
 
+// DataClass marks the current request as handling data of the given
+// sensitivity level (e.g. "confidential", "restricted") and, optionally, one
+// or more data categories (e.g. "pii", "financial", "health"). Both are
+// carried on the request's DataPolicy, which the audit log (AuditEvent.
+// DataClass / AuditEvent.Categories) and compliance report (RouteInfo.Data)
+// read back.
 func DataClass(sensitivity string, categories ...string) HandlerFunc {
 	return func(c Ctx) error {
-		p := DataPolicy{Sensitivity: sensitivity, RedactLogs: true}
+		p := DataPolicy{Sensitivity: sensitivity, Categories: categories, RedactLogs: true}
 		c.Locals("fh.data_policy", p)
 		return c.Next()
 	}

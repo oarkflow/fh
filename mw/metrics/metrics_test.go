@@ -87,14 +87,6 @@ func TestPrometheusEmptyMetrics(t *testing.T) {
 	}
 }
 
-func TestSnapshot(t *testing.T) {
-	type testCase struct {
-		name string
-	}
-	var m *Metrics
-	_ = m
-}
-
 func TestHandlerReturnsHandlerFunc(t *testing.T) {
 	m := New()
 	handler := m.Handler()

@@ -181,6 +181,11 @@ type Config struct {
 	BaseContext    func(net.Listener) context.Context
 	Logger         Logger
 	TemplateEngine TemplateEngine
+	// SharedState supplies isolated, interface-based state stores to sessions,
+	// rate limits, replay protection, caches, cluster coordination and other
+	// features. The App owns the provider and closes it during graceful
+	// shutdown after user shutdown hooks have completed.
+	SharedState SharedStateProvider
 	// Reliability enables request journal, idempotency, and durable async queue.
 	Reliability ReliabilityConfig
 	// Environment controls safe error exposure defaults. Use EnvDevelopment locally and EnvProduction in production.
@@ -352,6 +357,13 @@ func WithLogger(l Logger) Option {
 }
 func WithTemplateEngine(te TemplateEngine) Option {
 	return func(c *Config) { c.TemplateEngine = te }
+}
+
+// WithSharedState configures the application-level shared-state provider. The
+// App assumes lifecycle ownership and closes provider during graceful
+// shutdown. Resolve isolated stores with App.StateStore or App.MustStateStore.
+func WithSharedState(provider SharedStateProvider) Option {
+	return func(c *Config) { c.SharedState = provider }
 }
 func WithReliability(r ReliabilityConfig) Option {
 	return func(c *Config) { c.Reliability = r }
@@ -1410,6 +1422,11 @@ func (a *App) runShutdownHooks() {
 		for _, fn := range a.hooks.onShutdown {
 			if err := fn(); err != nil {
 				a.logger.Error("shutdown hook error", "error", err)
+			}
+		}
+		if a.cfg.SharedState != nil {
+			if err := a.cfg.SharedState.Close(); err != nil {
+				a.logger.Error("shared state shutdown error", "error", err)
 			}
 		}
 	})

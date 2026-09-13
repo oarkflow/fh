@@ -172,6 +172,7 @@ func (c *DefaultCtx) RunCompensations() error {
 // Data sensitivity and secure envelope.
 type DataPolicy struct {
 	Sensitivity   string
+	Categories    []string
 	RedactLogs    bool
 	EncryptAtRest bool
 	JournalMode   string

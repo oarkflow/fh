@@ -46,6 +46,7 @@ options rather than a `Config` value.
 | [Native Features](native-features.md) | Typed endpoints, OpenAPI 3.1, SSE, security helpers, gateway/proxy, API versioning |
 | [Error Framework](ERROR_FRAMEWORK.md) | RFC 9457 problem details, typed errors, panic recovery, redaction |
 | [Reliability Layer](reliability.md) | Request journaling, idempotency, durable queue, outbox/inbox, DLQ, custom storage |
+| [Shared State](shared-state.md) | Namespaced provider/store interfaces, lifecycle, built-in providers and distributed adapter contract |
 | [Security](security.md) | TLS/mTLS, read budgets, trusted-proxy identity, message integrity, HTTP QUERY |
 | [Secure WASM Transport](secure-wasm-transport.md) | Device-bound encrypted Fetch transport for browser/WASM clients |
 | [RFC 9421 Response Signatures](rfc9421-response-signatures.md) | Nonce-bound Ed25519 response integrity for Go and browser clients |

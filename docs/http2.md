@@ -98,7 +98,7 @@ app.Get("/ws", func(c fh.Ctx) error {
         // conn works identically whether the client spoke HTTP/1.1
         // (Connection: Upgrade) or HTTP/2 (extended CONNECT) — no branching
         // needed in handler code.
-        ...
+        return nil
     })
 })
 ```

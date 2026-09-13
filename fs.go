@@ -96,15 +96,6 @@ func (c *StaticConfig) indexFiles() []string {
 	return []string{indexFileName}
 }
 
-// indexFile returns the single index filename (legacy helper, kept for compat).
-func (c *StaticConfig) indexFile() string {
-	files := c.indexFiles()
-	if len(files) > 0 {
-		return files[0]
-	}
-	return indexFileName
-}
-
 // ── App methods ─────────────────────────────────────────────────────────────
 
 // Static registers a GET route that serves files from root on disk.
@@ -513,54 +504,6 @@ func streamGzipStaticFile(c Ctx, filesystem fs.FS, path string) error {
 		}
 		return closeErr
 	})
-}
-
-// parseRange parses a single Range header value in the form "bytes=start-end".
-// Returns (start, end, ok) where end is exclusive. If end is omitted, the
-// range extends to the end of the file. If start is omitted (e.g. "bytes=-500"),
-// it represents the last N bytes.
-func parseRange(header string, fileSize int) (start, end int, ok bool) {
-	if !strings.HasPrefix(header, "bytes=") {
-		return 0, 0, false
-	}
-	rangeVal := header[6:]
-	if rangeVal == "" {
-		return 0, 0, false
-	}
-	dash := strings.IndexByte(rangeVal, '-')
-	if dash < 0 {
-		return 0, 0, false
-	}
-	startStr := rangeVal[:dash]
-	endStr := rangeVal[dash+1:]
-	if startStr == "" && endStr == "" {
-		return 0, 0, false
-	}
-	if startStr == "" {
-		n, err := strconv.Atoi(endStr)
-		if err != nil || n <= 0 {
-			return 0, 0, false
-		}
-		if n > fileSize {
-			n = fileSize
-		}
-		return fileSize - n, fileSize, true
-	}
-	start, err := strconv.Atoi(startStr)
-	if err != nil || start < 0 || start >= fileSize {
-		return 0, 0, false
-	}
-	if endStr == "" {
-		return start, fileSize, true
-	}
-	end, err = strconv.Atoi(endStr)
-	if err != nil || end < start {
-		return 0, 0, false
-	}
-	if end >= fileSize {
-		end = fileSize
-	}
-	return start, end + 1, true
 }
 
 func isCompressible(mimeType string) bool {

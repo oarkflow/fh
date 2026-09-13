@@ -14,9 +14,9 @@ func TestNewDefaultFilter(t *testing.T) {
 func TestFilterHeadersAllowlisted(t *testing.T) {
 	f := New()
 	headers := map[string][]string{
-		"Content-Type": {"application/json"},
+		"Content-Type":  {"application/json"},
 		"Authorization": {"Bearer secret"},
-		"User-Agent":   {"test"},
+		"User-Agent":    {"test"},
 	}
 	filtered := f.FilterHeaders(headers)
 	if _, ok := filtered["Content-Type"]; !ok {

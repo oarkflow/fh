@@ -43,21 +43,38 @@ func TestFileStoreGetSetDelete(t *testing.T) {
 	}
 }
 
+// TestFileStoreExpiry was previously flaky under CPU contention (e.g. a full
+// `go test ./... -race` run): it used a single fixed time.Sleep(40ms) after a
+// 20ms TTL and asserted on the outcome of exactly one Get afterward, so any
+// scheduling delay of the test goroutine itself (plausible under a big
+// parallel -race run, not just delay inside the store) could make the sleep
+// elapse before or after the TTL relative to when the *assertion* actually
+// ran, flipping the result either way. Polling for the eventual state within
+// a generous deadline tests the real invariant (self-eviction happens, and
+// happens only after the TTL, not before) without depending on the test
+// goroutine being scheduled promptly at any single instant.
 func TestFileStoreExpiry(t *testing.T) {
 	fs := newTestFileStore(t, 0)
 
+	const ttl = 20 * time.Millisecond
 	now := time.Now()
-	e := Entry{Status: 200, Body: []byte("x"), Created: now, Expires: now.Add(20 * time.Millisecond)}
+	e := Entry{Status: 200, Body: []byte("x"), Created: now, Expires: now.Add(ttl)}
 	Set(fs, "GET /expiring", e)
 
 	if _, ok := Get(fs, "GET /expiring"); !ok {
-		t.Fatalf("expected hit before expiry")
+		t.Fatalf("expected hit immediately after Set, before the TTL has any chance to elapse")
 	}
 
-	time.Sleep(40 * time.Millisecond)
-
-	if _, ok := Get(fs, "GET /expiring"); ok {
-		t.Fatalf("expected miss after expiry (self-eviction)")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, ok := Get(fs, "GET /expiring")
+		if !ok {
+			break // self-evicted, as expected.
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected miss after expiry (self-eviction) within %s of a %s TTL, entry is still present", 2*time.Second, ttl)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

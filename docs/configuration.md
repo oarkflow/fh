@@ -53,6 +53,7 @@ type Config struct {
     OptionsHandler       OptionsHandler           // Default: 204 No Content
     Logger               Logger                   // Default: slog-backed logger
     TemplateEngine       TemplateEngine           // Default: nil
+    SharedState          SharedStateProvider       // Default: nil; app-owned namespaced state
     Reliability          ReliabilityConfig        // Default: disabled
     Environment          Environment              // Default: production
     ErrorOptions         ErrorOptions
@@ -147,6 +148,23 @@ type TemplateEngine interface {
     Render(w io.Writer, name string, data any, layout ...string) error
 }
 ```
+
+### Shared state
+
+Configure one interface-based provider when several middleware or cluster
+features must use a common state system:
+
+```go
+state := kv.NewMemoryProvider(kv.WithMaxEntries(100_000))
+app := fh.New(fh.WithSharedState(state))
+
+sessionStore := app.MustStateStore("sessions/default")
+replayStore := app.MustStateStore("replay/webhooks")
+```
+
+Namespaces are isolated, and the application closes the provider after its
+shutdown hooks. See [Shared State](shared-state.md) for durable file storage,
+distributed adapter requirements and reliability-specific interfaces.
 
 ---
 

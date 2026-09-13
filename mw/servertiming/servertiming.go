@@ -154,21 +154,30 @@ func New(config ...Config) fh.HandlerFunc {
 		}
 		ctx.Locals("_servertiming", t)
 
-		err := ctx.Next()
+		// The header must be computed and set from an OnBeforeResponse hook,
+		// not after ctx.Next() returns: this Ctx implementation writes the
+		// response synchronously the moment a handler calls SendString/
+		// SendBytes/JSON, so any ctx.Set() performed after Next() has
+		// already returned is too late to reach the wire. OnBeforeResponse
+		// runs immediately before response headers are encoded (and forces
+		// the slow header-writing path), which is the correct extension
+		// point for this.
+		ctx.OnBeforeResponse(func(c fh.Ctx) error {
+			t.mu.Lock()
+			if cfg.AddTotal && (len(t.metrics) == 0 || t.metrics[0].Name != "total") {
+				totalDur := time.Since(t.started)
+				t.metrics = append([]Metric{{Name: "total", Dur: totalDur}}, t.metrics...)
+			}
+			t.mu.Unlock()
 
-		t.mu.Lock()
-		if cfg.AddTotal && len(t.metrics) == 0 || (len(t.metrics) > 0 && t.metrics[0].Name != "total") {
-			totalDur := time.Since(t.started)
-			t.metrics = append([]Metric{{Name: "total", Dur: totalDur}}, t.metrics...)
-		}
-		t.mu.Unlock()
+			header := buildHeader(t, cfg)
+			if header != "" {
+				c.Set("Server-Timing", header)
+			}
+			return nil
+		})
 
-		header := buildHeader(t, cfg)
-		if header != "" {
-			ctx.Set("Server-Timing", header)
-		}
-
-		return err
+		return ctx.Next()
 	}
 }
 
@@ -205,15 +214,23 @@ func buildHeader(t *Timings, cfg Config) string {
 		}
 
 		b = append(b, m.Name...)
-		b = append(b, ';')
 
+		// Each of dur/desc/extra is a separate ";"-prefixed parameter; the
+		// separator must not be emitted unconditionally after the name, or
+		// a metric with no duration (e.g. AddMetric/AddBytes) ends up with
+		// a malformed "name;;desc=..." (double semicolon) in the header.
 		if m.Dur > 0 {
-			durMs := float64(m.Dur.Microseconds()) / 1000.0
-			durMs = math.Round(durMs*100) / 100 // round to 2 decimal places
-			b = append(b, "dur="...)
-			b = strconv.AppendFloat(b, durMs, 'f', 2, 64)
+			b = append(b, ';')
 			if cfg.Opaque {
-				b = append(b, ";err"...)
+				// Duration disclosure is explicitly opted out of: do not
+				// send the real value (it can reveal backend/DB latency or
+				// internal topology), only mark the metric as opaque.
+				b = append(b, "err"...)
+			} else {
+				durMs := float64(m.Dur.Microseconds()) / 1000.0
+				durMs = math.Round(durMs*100) / 100 // round to 2 decimal places
+				b = append(b, "dur="...)
+				b = strconv.AppendFloat(b, durMs, 'f', 2, 64)
 			}
 		}
 

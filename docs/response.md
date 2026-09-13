@@ -79,7 +79,7 @@ err := c.SaveFile(file, "/uploads/avatar.jpg") // save to disk
 c.Method()                      // HTTP method
 c.Path()                        // request path
 c.OriginalURL()                 // original URL with query string
-c.Method() == fh.MethodGet      // method check
+c.Method() == fh.MethodGET      // method check
 ```
 
 ### Locals (Request-Scoped Storage)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"runtime"
+	"syscall"
 	"time"
 )
 
@@ -114,4 +115,13 @@ func listenRuntime(addr string, tlsCfg *tls.Config, cfg KernelConfig, host Host,
 	host.FinishServing()
 	return host.normalize(acceptErr)
 }
-func isTemporaryAcceptError(e error) bool { var n net.Error; return errors.As(e, &n) && n.Temporary() }
+
+// isTemporaryAcceptError reports whether e is a transient per-process/system
+// file-descriptor exhaustion condition (EMFILE/ENFILE) that a brief backoff
+// can ride out. net.Error.Temporary is deprecated (Go 1.18+) and, per its own
+// documentation, no longer well-defined for anything but timeouts, so this
+// checks the specific syscall errors that historically justified the retry
+// instead of relying on it.
+func isTemporaryAcceptError(e error) bool {
+	return errors.Is(e, syscall.EMFILE) || errors.Is(e, syscall.ENFILE)
+}

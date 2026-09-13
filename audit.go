@@ -21,23 +21,24 @@ type AuditConfig struct {
 }
 
 type AuditEvent struct {
-	ID            string         `json:"id"`
-	Time          time.Time      `json:"time"`
-	RequestID     string         `json:"request_id,omitempty"`
-	CorrelationID string         `json:"correlation_id,omitempty"`
-	TenantID      string         `json:"tenant_id,omitempty"`
-	ActorID       string         `json:"actor_id,omitempty"`
-	ActorType     string         `json:"actor_type,omitempty"`
-	Action        string         `json:"action"`
-	Resource      string         `json:"resource,omitempty"`
-	ResourceID    string         `json:"resource_id,omitempty"`
-	Result        string         `json:"result,omitempty"`
-	Reason        string         `json:"reason,omitempty"`
-	Method        string         `json:"method,omitempty"`
-	Path          string         `json:"path,omitempty"`
-	IP            string         `json:"ip,omitempty"`
-	DataClass     string         `json:"data_class,omitempty"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
+	ID             string         `json:"id"`
+	Time           time.Time      `json:"time"`
+	RequestID      string         `json:"request_id,omitempty"`
+	CorrelationID  string         `json:"correlation_id,omitempty"`
+	TenantID       string         `json:"tenant_id,omitempty"`
+	ActorID        string         `json:"actor_id,omitempty"`
+	ActorType      string         `json:"actor_type,omitempty"`
+	Action         string         `json:"action"`
+	Resource       string         `json:"resource,omitempty"`
+	ResourceID     string         `json:"resource_id,omitempty"`
+	Result         string         `json:"result,omitempty"`
+	Reason         string         `json:"reason,omitempty"`
+	Method         string         `json:"method,omitempty"`
+	Path           string         `json:"path,omitempty"`
+	IP             string         `json:"ip,omitempty"`
+	DataClass      string         `json:"data_class,omitempty"`
+	DataCategories []string       `json:"data_categories,omitempty"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
 }
 
 type AuditSink interface {
@@ -123,6 +124,14 @@ func (r AuditRecorder) Record(action, resource, resourceID string, meta ...map[s
 	e := AuditEvent{Action: action, Resource: resource, ResourceID: resourceID, Result: "success"}
 	if len(meta) > 0 {
 		e.Metadata = meta[0]
+		// Callers (e.g. mw/audit) compute and pass the actual outcome via a
+		// "result" metadata key. Without this, e.Result stayed hardcoded to
+		// "success" even when the caller explicitly recorded an error/denial,
+		// making failed/denied actions indistinguishable from successful
+		// ones in the audit trail's primary Result field.
+		if res, ok := e.Metadata["result"].(string); ok && res != "" {
+			e.Result = res
+		}
 	}
 	return r.c.server.WriteAudit(r.c.Context(), enrichAuditFromCtx(r.c, e))
 }
@@ -176,6 +185,7 @@ func enrichAuditFromCtx(c *DefaultCtx, e AuditEvent) AuditEvent {
 	}
 	if dp, ok := c.Locals("fh.data_policy").(DataPolicy); ok {
 		e.DataClass = dp.Sensitivity
+		e.DataCategories = dp.Categories
 	}
 	return e
 }

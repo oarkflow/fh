@@ -44,12 +44,14 @@ func TestServeContextRejectsNilContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
+	//lint:ignore SA1012 intentionally passing nil to assert it is rejected
 	if err := app.ServeContext(nil, ln); err == nil {
 		t.Fatal("ServeContext(nil, listener) returned nil")
 	}
 }
 
 func TestShutdownWithContextRejectsNilContext(t *testing.T) {
+	//lint:ignore SA1012 intentionally passing nil to assert it is rejected
 	if err := fh.New().ShutdownWithContext(nil); err == nil {
 		t.Fatal("ShutdownWithContext(nil) returned nil")
 	}

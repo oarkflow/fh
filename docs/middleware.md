@@ -28,8 +28,8 @@ Use the `mw/skip` package for conditional middleware execution:
 ```go
 import "github.com/oarkflow/fh/mw/skip"
 
-app.Use(skip.When(authMiddleware, skip.Path("/health", "/metrics")))
-app.Use(skip.Unless(loggerMiddleware, skip.Method("GET", "POST")))
+app.Use(skip.New(authMiddleware, skip.Paths("/health", "/metrics")))
+app.Use(skip.New(loggerMiddleware, skip.Not(skip.Methods("GET", "POST"))))
 ```
 
 ---
@@ -297,13 +297,13 @@ app.Use(earlydata.New(earlydata.Config{}))
 
 ### idempotency
 
-Extracts `Idempotency-Key` from headers and stores a deterministic hash in request locals.
+Extracts an idempotency key from the request (via a caller-supplied function) and forwards it as the `Idempotency-Key` request header for downstream handlers/middleware (e.g. a dedup store) to act on.
 
 ```go
 import "github.com/oarkflow/fh/mw/idempotency"
 
-app.Use(idempotency.New(idempotency.Config{
-    Header: "Idempotency-Key",
+app.Use(idempotency.New(func(c fh.Ctx) string {
+    return c.Get("Idempotency-Key")
 }))
 ```
 
@@ -438,13 +438,13 @@ Request counters by method/path/status with JSON and Prometheus endpoints.
 ```go
 import "github.com/oarkflow/fh/mw/metrics"
 
-app.Use(metrics.New(metrics.Config{
-    Path: "/_metrics", // default
-}))
+m := metrics.New()
+app.Use(m.Middleware())
+app.Get("/_fh/metrics", m.Handler())
 
 // Access metrics:
-// GET /_metrics (JSON)
-// GET /_metrics?format=prometheus (Prometheus text format)
+// GET /_fh/metrics                    (JSON)
+// GET /_fh/metrics?format=prometheus  (Prometheus text format)
 ```
 
 ### policy
@@ -672,25 +672,28 @@ Predicate toolkit for conditional middleware execution.
 import "github.com/oarkflow/fh/mw/skip"
 
 // Skip middleware when path matches
-app.Use(skip.When(rateLimiter, skip.Path("/health", "/metrics")))
+app.Use(skip.New(rateLimiter, skip.Paths("/health", "/metrics")))
 
 // Skip middleware unless method matches
-app.Use(skip.Unless(authMiddleware, skip.Method("POST", "PUT", "DELETE")))
+app.Use(skip.New(authMiddleware, skip.Not(skip.Methods("POST", "PUT", "DELETE"))))
 
 // Combine predicates
-app.Use(skip.When(loggerMiddleware,
-    skip.Any(skip.Path("/health"), skip.Method("OPTIONS")),
+app.Use(skip.New(loggerMiddleware,
+    skip.Any(skip.Paths("/health"), skip.Methods("OPTIONS")),
 ))
 
-// Available predicates:
-skip.Path("/health")            // matches path
-skip.Method("GET")              // matches method
-skip.Host("admin.example.com") // matches host
-skip.Header("X-Internal")      // has header
-skip.Query("skip_log")         // has query param
-skip.Any(pred1, pred2)         // OR
-skip.All(pred1, pred2)         // AND
-skip.Not(pred)                 // NOT
+// Available predicates (non-exhaustive - see mw/skip for the full list):
+skip.Paths("/health")             // matches path (exact)
+skip.PathCI("/Health")            // matches path, case-insensitive
+skip.Prefixes("/admin")           // matches path prefix
+skip.Methods("GET")               // matches method
+skip.HeaderExists("X-Internal")   // has header
+skip.HeaderEquals("X-Env", "dev") // header equals value
+skip.QueryExists("skip_log")      // has query param
+skip.Health()                     // matches common health-check paths
+skip.Any(pred1, pred2)            // OR
+skip.All(pred1, pred2)            // AND
+skip.Not(pred)                    // NOT
 ```
 
 ### slowloris
