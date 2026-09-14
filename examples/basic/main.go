@@ -2,18 +2,15 @@ package main
 
 import (
 	"github.com/oarkflow/fh"
-	"github.com/oarkflow/fh/mw/static"
 )
 
 func main() {
-	app := fh.New()
+	// NewFast disables production admission limits and per-request safeguards
+	// that would otherwise skew a loopback throughput benchmark.
+	app := fh.NewFast()
 
-	app.Use(static.New("/", static.Config{
-		Root:     "./public",
-		Prefix:   "/",
-		Browse:   true,
-		MaxAge:   3600,
-		Download: false, // Content-Disposition: attachment
-	}))
+	app.Get("/", func(c fh.Ctx) error {
+		return c.SendString("Hello, World!")
+	})
 	app.Listen(":8082")
 }

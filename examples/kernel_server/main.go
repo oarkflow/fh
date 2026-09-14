@@ -38,5 +38,5 @@ func main() {
 		return c.JSON(app.KernelRuntimeInfo())
 	})
 
-	log.Fatal(app.ListenWithGracefulShutdown(":8080"))
+	log.Fatal(app.ListenWithGracefulShutdown(":8070"))
 }
