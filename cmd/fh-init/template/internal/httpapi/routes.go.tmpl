@@ -56,7 +56,8 @@ func Register(app *fh.App, cfg appconfig.Config, sessions *session.SessionManage
 		if err := appauth.Login(c, sessions, user, password, cfg.LoginUser, cfg.LoginPassword); err != nil {
 			return err
 		}
-		return c.JSON(fh.Map{"authenticated": true})
+		c.Flash("message", "Signed in successfully.")
+		return c.JSON(fh.Map{"authenticated": true, "message": "Signed in successfully."})
 	}).Name("login").Tag("authentication")
 	app.Post("/auth/logout", func(c fh.Ctx) error {
 		if !sameOrigin(c, cfg.AllowedOrigins) {
@@ -116,7 +117,7 @@ func renderIndex(c fh.Ctx, production bool) error {
 		boot := []byte(`<script src="/assets/app.js" type="module"></script></body>`)
 		return bytes.Replace(body, closing, boot, 1), nil
 	})
-	return c.Render("index.html", map[string]any{"Production": production})
+	return c.Render("index.html", map[string]any{"Production": production, "message": ""})
 }
 
 func loadManifest(path string) (assetManifest, error) {

@@ -131,6 +131,9 @@ func TestRunGeneratesCompleteApplication(t *testing.T) {
 	if !strings.Contains(string(routesData), "renderIndex(c, cfg.Production)") {
 		t.Fatal("generated server is missing the secure SPL page renderer")
 	}
+	if !strings.Contains(string(routesData), `"message": ""`) {
+		t.Fatal("generated server does not provide a default flash message")
+	}
 	templateData, err := os.ReadFile(filepath.Join(root, "web/templates/index.html"))
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +143,12 @@ func TestRunGeneratesCompleteApplication(t *testing.T) {
 	}
 	if !strings.Contains(string(templateData), `id="app"`) {
 		t.Fatal("generated page is missing the #app mount point")
+	}
+	if !strings.Contains(string(templateData), `id="flash-message"`) {
+		t.Fatal("generated page does not render flash messages")
+	}
+	if !strings.Contains(string(templateData), `${message}`) {
+		t.Fatal("generated page does not bind the flash message")
 	}
 	// web/public/app.js (the compiled bundle) doesn't exist on a bare
 	// scaffold - see the web/public non-existence check below - so assert
