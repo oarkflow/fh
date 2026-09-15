@@ -4,11 +4,83 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestMain points frontendRepo at a local git fixture repo instead of the
+// real git@oarkflow:oarkflow/lithe-boilerplate.git remote, so the test suite
+// never needs network/SSH access and stays deterministic. cloneFrontend
+// itself is exercised for real (a real `git clone`, just against a local
+// path) - only the remote is swapped.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "fh-init-frontend-fixture-*")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fh-init test setup:", err)
+		os.Exit(1)
+	}
+	if err := buildFrontendFixtureRepo(dir); err != nil {
+		fmt.Fprintln(os.Stderr, "fh-init test setup:", err)
+		os.RemoveAll(dir)
+		os.Exit(1)
+	}
+	frontendRepo = dir
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// buildFrontendFixtureRepo writes a minimal stand-in for the real frontend
+// boilerplate - just enough for TestRunGeneratesCompleteApplication's
+// assertions - and commits it as a local git repo cloneFrontend can clone
+// from by plain filesystem path.
+func buildFrontendFixtureRepo(dir string) error {
+	files := map[string]string{
+		"package.json":              `{"name":"fh-control-center-fixture"}`,
+		"src/index.tsx":             `// fixture entry point`,
+		"src/app.tsx":               `// fixture composition root`,
+		"src/state/session.ts":      `// fixture session state`,
+		"src/styles/app.css":        `:root { --fixture: 1; }`,
+		".gitignore":                "node_modules/\ndist/\n",
+		"src/lib/secure-client.ts": "" +
+			"export const authApi = {\n" +
+			"  session: () => fetch('/auth/session'),\n" +
+			"  login: () => fetch('/auth/login'),\n" +
+			"  logout: () => fetch('/auth/logout'),\n" +
+			"};\n" +
+			"export const secureApi = {\n" +
+			"  bootstrap: () => fetch('/secure-config.json'),\n" +
+			"  me: () => fetch('/api/me'),\n" +
+			"  echo: () => fetch('/api/echo'),\n" +
+			"};\n",
+		"src/lib/wasm-bridge.ts": "export const bridge = () => import(`/wasm/index.js`);\n",
+	}
+	for rel, content := range files {
+		full := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			return err
+		}
+	}
+	for _, args := range [][]string{
+		{"init", "--quiet", "--initial-branch=main"},
+		{"add", "-A"},
+		{"-c", "user.name=fh-init tests", "-c", "user.email=fh-init-tests@example.com", "commit", "--quiet", "-m", "fixture"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	return nil
+}
 
 func TestRunGeneratesCompleteApplication(t *testing.T) {
 	root := t.TempDir()
@@ -18,10 +90,21 @@ func TestRunGeneratesCompleteApplication(t *testing.T) {
 	for _, name := range []string{
 		"go.mod", "cmd/server/main.go", "internal/config/config.go", "internal/auth/auth.go",
 		"internal/database/database.go", "internal/httpapi/routes.go", "policy.authz",
-		"web/templates/index.html", "web/public/app.js", "web/wasm/securefetch.wasm", "web/wasm/asset-manifest.json", ".env", ".env.example", "Makefile",
+		"web/templates/index.html",
+		"web/frontend/package.json", "web/frontend/src/index.tsx",
+		"web/wasm/securefetch.wasm", "web/wasm/asset-manifest.json", ".env", ".env.example", ".gitignore", "Makefile",
 	} {
 		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
 			t.Fatalf("missing generated file %s: %v", name, err)
+		}
+	}
+	// web/public/{app.js,app.css} are Node build output (see
+	// .gitignore.tmpl/web/frontend/README.md) - a bare scaffold never runs
+	// npm, so nothing should exist there yet. `make frontend` or
+	// `fh-init -verify` builds them.
+	for _, name := range []string{"web/public/app.js", "web/public/app.css", "web/public"} {
+		if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
+			t.Fatalf("expected %s to not exist on a bare (non-verify) scaffold, got err=%v", name, err)
 		}
 	}
 	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
@@ -55,16 +138,43 @@ func TestRunGeneratesCompleteApplication(t *testing.T) {
 	if strings.Contains(strings.ToLower(string(templateData)), "<script") {
 		t.Fatal("secure SPL template contains a forbidden script tag")
 	}
-	if !strings.Contains(string(templateData), `id="logout"`) || !strings.Contains(string(templateData), `id="account-controls" hidden`) {
-		t.Fatal("generated page is missing authenticated logout controls")
+	if !strings.Contains(string(templateData), `id="app"`) {
+		t.Fatal("generated page is missing the #app mount point")
 	}
-	appJS, err := os.ReadFile(filepath.Join(root, "web/public/app.js"))
+	// web/public/app.js (the compiled bundle) doesn't exist on a bare
+	// scaffold - see the web/public non-existence check below - so assert
+	// the same endpoint paths survive in the frontend source that `make
+	// frontend`/`-verify` compiles them from.
+	secureClientData, err := os.ReadFile(filepath.Join(root, "web/frontend/src/lib/secure-client.ts"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"/auth/session", "showAuthenticated(true)", "secure.revokeSession()", "/auth/logout"} {
-		if !strings.Contains(string(appJS), required) {
-			t.Fatalf("generated browser client is missing %q", required)
+	for _, required := range []string{"/auth/login", "/auth/logout", "/auth/session", "/secure-config.json", "/api/me", "/api/echo"} {
+		if !strings.Contains(string(secureClientData), required) {
+			t.Fatalf("generated secure-client.ts is missing %q", required)
+		}
+	}
+	wasmBridgeData, err := os.ReadFile(filepath.Join(root, "web/frontend/src/lib/wasm-bridge.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wasmBridgeData), "/wasm/index.js") {
+		t.Fatal("generated wasm-bridge.ts is missing \"/wasm/index.js\"")
+	}
+	stylesData, err := os.ReadFile(filepath.Join(root, "web/frontend/src/styles/app.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stylesData) == 0 {
+		t.Fatal("generated app.css source is empty")
+	}
+	for _, name := range []string{
+		"web/frontend/package.json", "web/frontend/src/index.tsx", "web/frontend/src/app.tsx",
+		"web/frontend/src/lib/secure-client.ts", "web/frontend/src/lib/wasm-bridge.ts",
+		"web/frontend/src/state/session.ts", "web/frontend/.gitignore",
+	} {
+		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
+			t.Fatalf("missing generated frontend source file %s: %v", name, err)
 		}
 	}
 	if strings.Contains(mainSource, "__FH_MODULE__") {

@@ -63,8 +63,9 @@ func main() {
 
 Generate a structured server with secure sessions, strict Host/origin policy,
 RBAC, bounded requests, rate limiting, audit logs, protected health/metrics,
-SQLite persistence, graceful shutdown, and encrypted WASM Fetch with signed
-ciphertext responses:
+SQLite persistence, graceful shutdown, encrypted WASM Fetch with signed
+ciphertext responses, and a structured, componentized browser frontend
+("FH Control Center", built with [`@oarkflow/lithe`](https://www.npmjs.com/package/@oarkflow/lithe)):
 
 ```bash
 go run ./cmd/fh-init -module example.com/acme/service -dir ./service
@@ -73,7 +74,12 @@ cd service
 ```
 
 The generator initializes `.env` from `.env.example` and preserves it on
-subsequent `-force` regeneration.
+subsequent `-force` regeneration. Add `-verify` to have it build the server,
+boot it on a spare loopback port, walk through the app's full HTTP surface
+(assets, the WASM transport bundle, and the login/secure-bootstrap/logout
+lifecycle), and open it in your browser - see the generated README's
+`fh-init -verify` section. [`examples/production-app`](examples/production-app)
+is a checked-in, buildable-in-CI copy of this template's current output.
 
 Loopback development uses short-lived process-local cryptographic keys. The
 generated server fails closed outside the explicit `development` environment
@@ -524,6 +530,7 @@ Full working examples in [`examples/`](examples/):
 | `prefork` | Multi-process prefork serving |
 | `secure_wasm` | Session + secure WASM client demo for encrypted API calls |
 | `rfc9421` | RFC 9421 signed-response server plus fail-closed Go and WebCrypto clients |
+| `production-app` | Checked-in `fh-init` output: sessions, RBAC, SQLite, secure WASM transport, and the `@oarkflow/lithe` frontend |
 
 ## Testing & Benchmarks
 

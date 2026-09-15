@@ -1,9 +1,12 @@
 # __FH_MODULE__
 
 A production-oriented FH server starter with authenticated sessions, RBAC,
-bounded request handling, operational endpoints, SQLite persistence, and the FH
-secure WASM transport. The application is runnable on loopback for development
-and fails closed when configured for production without its required secrets.
+bounded request handling, operational endpoints, SQLite persistence, the FH
+secure WASM transport, and a structured, componentized browser frontend
+("FH Control Center", built with [`@oarkflow/lithe`](https://www.npmjs.com/package/@oarkflow/lithe) -
+see `web/frontend/README.md`). The application is runnable on loopback for
+development and fails closed when configured for production without its
+required secrets.
 
 ## Quick start
 
@@ -12,11 +15,22 @@ and fails closed when configured for production without its required secrets.
 
 ```sh
 go mod tidy
+make frontend   # builds web/public/app.js + app.css from web/frontend/src (needs Node 22.6+)
 ./run.sh
 ```
 
+`web/public/` is build output, not checked in - the server has nothing to
+serve at `/assets/*` until `make frontend` has run at least once.
+
 Open `http://localhost:8080`. The development credentials are in `.env`; change
 them before using the example beyond local testing.
+
+Prefer not to do that by hand the first time? Regenerate with `fh-init
+-module __FH_MODULE__ -dir . -force -verify`: it re-scaffolds, builds the
+server, boots it on a spare loopback port, walks through the exact HTTP
+surface the browser depends on (assets, the WASM transport bundle, and the
+full login/secure-bootstrap/logout lifecycle), and opens it in your browser
+for a live look - see [`-verify`](#fh-init--verify) below.
 
 The server loads `.env` itself on startup (via `github.com/oarkflow/config`),
 so `go run ./cmd/server` works directly — `./run.sh` is a thin convenience
@@ -47,19 +61,24 @@ Change them in `.env` before sharing the server or binding it beyond loopback.
 ### Start and sign in
 
 1. Run `go mod tidy` once.
-2. Review `.env`, especially `APP_ORIGIN`, the login credentials, and the
+2. Run `make frontend` once (needs Node 22.6+) to build `web/public/app.js`
+   and `app.css` - they are build output, not checked in, so the server has
+   nothing to serve at `/assets/*` until this has run at least once.
+3. Review `.env`, especially `APP_ORIGIN`, the login credentials, and the
    operations token.
-3. Start the server with `./run.sh`, `make run`, or `go run ./cmd/server`.
-4. Open `http://localhost:8080`.
-5. Enter `admin` and `change-me-in-development`, then select **Sign in**.
-6. After secure registration completes, select **Load protected profile** to
-   call `GET /api/me` through encrypted Fetch.
+4. Start the server with `./run.sh`, `make run`, or `go run ./cmd/server`.
+5. Open `http://localhost:8080`.
+6. Enter `admin` and `change-me-in-development`, then select **Sign in**.
+7. After secure registration completes, select **Load profile** on the
+   **Overview** panel to call `GET /api/me` through encrypted Fetch, use
+   **Secure API** to send an encrypted `POST /api/echo`, or check
+   **Activity** for a log of what the client has done.
 
-The login form is hidden after authentication and replaced with profile and
-**Log out** controls. Reloading the page checks `GET /auth/session`, restores an
-existing web login, and creates a fresh secure transport session. Logging out
-revokes the active secure session first, destroys the web session cookie, and
-returns the page to the login form.
+The sign-in form is replaced by the dashboard once authenticated, and
+**Sign out** moves to the top bar. Reloading the page checks
+`GET /auth/session`, restores an existing web login, and creates a fresh
+secure transport session. Signing out revokes the active secure session
+first, destroys the web session cookie, and returns to the sign-in form.
 
 The warning about ephemeral cryptographic keys is expected in development.
 Restarting the server changes those keys and invalidates existing secure
@@ -67,8 +86,10 @@ transport sessions.
 
 ### Device registration
 
-There is no separate manual registration command for the browser. The included
-`web/public/app.js` performs the complete sequence after login:
+There is no separate manual registration command for the browser. The
+frontend's secure API client (`web/frontend/src/lib/secure-client.ts`,
+compiled into `web/public/app.js` - see `web/frontend/README.md`) performs
+the complete sequence after login:
 
 1. `POST /auth/login` validates the development credentials, regenerates the
    web session ID, and sets the signed HttpOnly cookie.
@@ -92,6 +113,26 @@ device keys and protocol signatures.
 To reset a development browser completely, stop the server, clear site data for
 `localhost:8080` (including IndexedDB and cookies), restart it, and sign in
 again.
+
+### `fh-init -verify`
+
+`fh-init` can do the checks in this section for you, against a real,
+temporarily-running instance of the generated app:
+
+```sh
+fh-init -module __FH_MODULE__ -dir . -force -verify
+```
+
+It builds the frontend (`npm install && npm run build`, producing
+`web/public/app.js` + `app.css`) and the server, boots the server on a free
+loopback port using the credentials in `.env`, works through the same
+checklist below (plus the static assets and WASM transport bundle every page
+load needs), and - unless `-no-browser` is also given - opens it in your
+default browser for a live look before shutting the instance back down. A
+missing network connection, Node.js, or Go toolchain only prints a warning
+and leaves the exit code at `0` (the scaffold itself is still complete);
+pass `-require-verify` to make that fatal instead. See `fh-init -h` for every
+flag.
 
 ### Basic verification
 
@@ -129,6 +170,7 @@ make test      # run application tests
 make check     # run all application checks
 make keys      # generate transport/signing private keys and matching public pins
 make wasm      # create a production-pinned WASM artifact (requires trust variables)
+make frontend  # build web/public/app.js + app.css from web/frontend/src (required before first run; needs Node 22.6+)
 ```
 
 ## Project structure
@@ -137,16 +179,18 @@ make wasm      # create a production-pinned WASM artifact (requires trust variab
 .
 ├── cmd/server/main.go             server assembly, middleware, keys, lifecycle
 ├── internal/auth/                 login, principal extraction, RBAC bridge, grants
-├── internal/config/               validated environment and secret-file loading
-├── internal/database/             squealx/SQLite store, migration, health check
-├── internal/httpapi/              web, auth, bootstrap, health, and API routes
-├── web/templates/                 secure SPL server-rendered templates
-├── web/public/                    browser JavaScript and CSS
-├── web/wasm/                      secure Fetch runtime and integrity manifest
-├── policy.authz                   file-backed authorization policy
-├── .env.example                   documented development configuration
-├── Makefile                       test, key, run, and WASM build targets
-└── run.sh                         optional convenience wrapper for `go run ./cmd/server`
+├── internal/config/                validated environment and secret-file loading
+├── internal/database/              squealx/SQLite store, migration, health check
+├── internal/httpapi/               web, auth, bootstrap, health, and API routes
+├── web/templates/                  secure SPL server-rendered templates
+├── web/public/                     compiled browser JS/CSS (build output - run `make frontend`; not checked in)
+├── web/frontend/                   FH Control Center: the @oarkflow/lithe frontend source
+│   └── src/{lib,state,components,features}   secure client, state, reusable UI, panels
+├── web/wasm/                       secure Fetch runtime and integrity manifest
+├── policy.authz                    file-backed authorization policy
+├── .env.example                    documented development configuration
+├── Makefile                        test, key, run, frontend, and WASM build targets
+└── run.sh                          optional convenience wrapper for `go run ./cmd/server`
 ```
 
 ## Security stack and ordering

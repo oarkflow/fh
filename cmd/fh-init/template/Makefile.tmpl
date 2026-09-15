@@ -1,9 +1,19 @@
 GO ?= go
+NPM ?= npm
 
-.PHONY: check test run keys wasm
+.PHONY: check test run keys wasm frontend check-secure-fetch
 
 check:
 	$(GO) test ./...
+
+# Fails if any frontend source file outside lib/secure-client.ts calls
+# fetch() directly or imports the plain-fetch helper (lib/http.ts) - every
+# protected /api/* request must go through the WASM secure-fetch client.
+# Run on its own (not part of `check`, which stays Node-free) and as part
+# of `frontend`, since anyone rebuilding frontend assets already has npm.
+check-secure-fetch:
+	@command -v $(NPM) >/dev/null 2>&1 || (echo "npm was not found on PATH. Install Node.js 22.6+." >&2; exit 1)
+	cd web/frontend && $(NPM) run check:secure-fetch
 
 test:
 	$(GO) test ./...
@@ -14,6 +24,14 @@ run:
 keys:
 	@$(GO) run ./cmd/server -generate-transport-key
 	@$(GO) run ./cmd/server -generate-signing-key
+
+# web/public/app.js and app.css are build output, not checked in (see
+# web/frontend/README.md) - the server has nothing to serve at /assets/*
+# until this has run at least once. Also re-run after changing
+# web/frontend/src. Requires Node.js 22.6+.
+frontend: check-secure-fetch
+	@command -v $(NPM) >/dev/null 2>&1 || (echo "npm was not found on PATH. Install Node.js 22.6+." >&2; exit 1)
+	cd web/frontend && $(NPM) install && $(NPM) run build
 
 # TinyGo pins a maximum supported Go version below what this project's
 # go.mod requires (0.41.x supports Go 1.19-1.26), so `go` on PATH usually
