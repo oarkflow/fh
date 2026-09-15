@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -110,6 +111,8 @@ func main() {
 		}
 	}
 
+	warmCPU(2 * time.Second)
+
 	results := make([]result, 0, len(servers)*len(scenarios))
 	for i := range servers {
 		baseURL := "http://127.0.0.1:" + servers[i].port
@@ -171,6 +174,32 @@ func startServers(servers []server) (func(), error) {
 		}
 	}
 	return cleanup, nil
+}
+
+// warmCPU busy-spins every GOMAXPROCS core for d before any server is
+// measured. On CPU-governor policies like "powersave"/"schedutil", clock
+// speed ramps from idle up to max over a few seconds of sustained load; the
+// server measured first would otherwise absorb that ramp-up and appear far
+// slower than servers measured later against an already-boosted CPU. This
+// primes the CPU once, up front, so scenario order does not bias results.
+func warmCPU(d time.Duration) {
+	n := runtime.GOMAXPROCS(0)
+	var wg sync.WaitGroup
+	deadline := time.Now().Add(d)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			x := 1.0001
+			for time.Now().Before(deadline) {
+				for i := 0; i < 1<<16; i++ {
+					x = x*1.0000001 + 1
+				}
+			}
+			runtime.KeepAlive(x)
+		}()
+	}
+	wg.Wait()
 }
 
 func waitReady(port string, timeout time.Duration) bool {
