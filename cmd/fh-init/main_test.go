@@ -12,26 +12,66 @@ import (
 	"testing"
 )
 
-// TestMain points frontendRepo at a local git fixture repo instead of the
-// real git@oarkflow:oarkflow/lithe-boilerplate.git remote, so the test suite
-// never needs network/SSH access and stays deterministic. cloneFrontend
-// itself is exercised for real (a real `git clone`, just against a local
-// path) - only the remote is swapped.
+// TestMain points both source repositories at local git fixture repos instead
+// of their public remotes, so the test suite never needs network access and
+// stays deterministic. The clone paths are still exercised for real.
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "fh-init-frontend-fixture-*")
+	dir, err := os.MkdirTemp("", "fh-init-source-fixtures-*")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fh-init test setup:", err)
 		os.Exit(1)
 	}
-	if err := buildFrontendFixtureRepo(dir); err != nil {
+	frontendDir := filepath.Join(dir, "frontend")
+	templateDir := filepath.Join(dir, "template")
+	if err := buildFrontendFixtureRepo(frontendDir); err != nil {
 		fmt.Fprintln(os.Stderr, "fh-init test setup:", err)
 		os.RemoveAll(dir)
 		os.Exit(1)
 	}
-	frontendRepo = dir
+	if err := buildTemplateFixtureRepo(templateDir); err != nil {
+		fmt.Fprintln(os.Stderr, "fh-init test setup:", err)
+		os.RemoveAll(dir)
+		os.Exit(1)
+	}
+	frontendRepo = frontendDir
+	templateRepo = templateDir
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+func buildTemplateFixtureRepo(dir string) error {
+	wasm := []byte("fixture wasm")
+	sum := sha256.Sum256(wasm)
+	manifest := fmt.Sprintf(`{"assets":{"securefetch.wasm":{"integrity":"sha256-%s"}}}`,
+		base64.StdEncoding.EncodeToString(sum[:]))
+	files := map[string][]byte{
+		".env.example.tmpl":                   []byte("APP_ORIGIN=:8080\n"),
+		".gitignore.tmpl":                     []byte("/data/\n"),
+		"Makefile.tmpl":                       []byte("check:\n\tgo test ./...\n"),
+		"README.md.tmpl":                      []byte("# __FH_MODULE__\n"),
+		"go.mod.tmpl":                         []byte("module __FH_MODULE__\n\ngo 1.26\n"),
+		"policy.authz.tmpl":                   []byte("policy\n"),
+		"run.sh.tmpl":                         []byte("#!/bin/sh\ngo run ./cmd/server\n"),
+		"cmd/server/main.go.tmpl":             []byte("package main\n// WithSecureByDefault(cfg.Production) securetransport.Install responsemiddleware.New operationAuth\n"),
+		"internal/auth/auth.go.tmpl":          []byte("package auth\n"),
+		"internal/auth/grants.go.tmpl":        []byte("package auth\n"),
+		"internal/auth/grants_test.go.tmpl":   []byte("package auth\n"),
+		"internal/config/config.go.tmpl":      []byte("package config\n"),
+		"internal/config/dotenv.go.tmpl":      []byte("package config\n"),
+		"internal/config/origin_test.go.tmpl": []byte("package config\n"),
+		"internal/database/database.go.tmpl":  []byte("package database\n"),
+		"internal/httpapi/routes.go.tmpl":     []byte("package httpapi\nfunc register() { renderIndex(c, cfg.Production) }\nfunc renderIndex(c fh.Ctx, production bool) error { return c.Render(\"index.html\", map[string]any{\"message\": \"\"}) }\n"),
+		"web/templates/index.html.tmpl":       []byte("<!doctype html><body>@if(message) {<div id=\"flash-message\">${message}</div>}<div id=\"app\"></div></body>\n"),
+		"web/wasm/securefetch.wasm":           wasm,
+		"web/wasm/asset-manifest.json":        []byte(manifest),
+		"web/wasm/index.js":                   []byte(""),
+		"web/wasm/secure-fetch.js":            []byte(""),
+		"web/wasm/storage.js":                 []byte(""),
+		"web/wasm/wasm_exec.js":               []byte(""),
+		"web/wasm/README.md.tmpl":             []byte("# wasm\n"),
+	}
+	return writeFixtureRepo(dir, files)
 }
 
 // buildFrontendFixtureRepo writes a minimal stand-in for the real frontend
@@ -39,14 +79,14 @@ func TestMain(m *testing.M) {
 // assertions - and commits it as a local git repo cloneFrontend can clone
 // from by plain filesystem path.
 func buildFrontendFixtureRepo(dir string) error {
-	files := map[string]string{
-		"package.json":              `{"name":"fh-control-center-fixture"}`,
-		"src/index.tsx":             `// fixture entry point`,
-		"src/app.tsx":               `// fixture composition root`,
-		"src/state/session.ts":      `// fixture session state`,
-		"src/styles/app.css":        `:root { --fixture: 1; }`,
-		".gitignore":                "node_modules/\ndist/\n",
-		"src/lib/secure-client.ts": "" +
+	files := map[string][]byte{
+		"package.json":         []byte(`{"name":"fh-control-center-fixture"}`),
+		"src/index.tsx":        []byte(`// fixture entry point`),
+		"src/app.tsx":          []byte(`// fixture composition root`),
+		"src/state/session.ts": []byte(`// fixture session state`),
+		"src/styles/app.css":   []byte(`:root { --fixture: 1; }`),
+		".gitignore":           []byte("node_modules/\ndist/\n"),
+		"src/lib/secure-client.ts": []byte("" +
 			"export const authApi = {\n" +
 			"  session: () => fetch('/auth/session'),\n" +
 			"  login: () => fetch('/auth/login'),\n" +
@@ -56,15 +96,19 @@ func buildFrontendFixtureRepo(dir string) error {
 			"  bootstrap: () => fetch('/secure-config.json'),\n" +
 			"  me: () => fetch('/api/me'),\n" +
 			"  echo: () => fetch('/api/echo'),\n" +
-			"};\n",
-		"src/lib/wasm-bridge.ts": "export const bridge = () => import(`/wasm/index.js`);\n",
+			"};\n"),
+		"src/lib/wasm-bridge.ts": []byte("export const bridge = () => import(`/wasm/index.js`);\n"),
 	}
+	return writeFixtureRepo(dir, files)
+}
+
+func writeFixtureRepo(dir string, files map[string][]byte) error {
 	for rel, content := range files {
 		full := filepath.Join(dir, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(full, content, 0o644); err != nil {
 			return err
 		}
 	}

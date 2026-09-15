@@ -3,11 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
-	"embed"
 	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,15 +14,11 @@ import (
 	"time"
 )
 
-// "all:" is required, not cosmetic: a bare "template/**" only reaches
-// dotfiles/underscore-files that are direct children of template/ (like
-// .env.example.tmpl); embed's directory-recursion rule silently drops any
-// dotfile nested deeper (such as web/frontend/.gitignore) without it.
-//
-//go:embed all:template
-var templateFS embed.FS
-
 var modulePattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// templateRepo is the application scaffold, cloned into a temporary directory
+// and rendered into the requested output during scaffolding.
+var templateRepo = "https://github.com/oarkflow/fh-template.git"
 
 // frontendRepo is the FH Control Center frontend boilerplate, cloned into
 // web/frontend during scaffolding (see cloneFrontend). It is a package
@@ -73,30 +67,7 @@ func run(args []string) error {
 		return fmt.Errorf("directory %s is not empty; use -force to continue", root)
 	}
 
-	if err := fs.WalkDir(templateFS, "template", func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		rel := strings.TrimPrefix(path, "template/")
-		rel = strings.TrimSuffix(rel, ".tmpl")
-		destination := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-			return err
-		}
-		data, err := fs.ReadFile(templateFS, path)
-		if err != nil {
-			return err
-		}
-		data = []byte(strings.ReplaceAll(string(data), "__FH_MODULE__", *module))
-		mode := os.FileMode(0o644)
-		if filepath.Base(destination) == "run.sh" {
-			mode = 0o755
-		}
-		return os.WriteFile(destination, data, mode)
-	}); err != nil {
+	if err := renderTemplate(root, *module); err != nil {
 		return err
 	}
 	if err := cloneFrontend(root); err != nil {
@@ -116,6 +87,46 @@ func run(args []string) error {
 	})
 }
 
+func renderTemplate(root, module string) error {
+	workDir, err := os.MkdirTemp("", "fh-init-template-*")
+	if err != nil {
+		return fmt.Errorf("create template working directory: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
+	source := filepath.Join(workDir, "template")
+	if err := cloneRepository(templateRepo, source, "template"); err != nil {
+		return err
+	}
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		rel = strings.TrimSuffix(rel, ".tmpl")
+		destination := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		data = []byte(strings.ReplaceAll(string(data), "__FH_MODULE__", module))
+		mode := os.FileMode(0o644)
+		if filepath.Base(destination) == "run.sh" {
+			mode = 0o755
+		}
+		return os.WriteFile(destination, data, mode)
+	})
+}
+
 // cloneFrontend vendors the FH Control Center frontend boilerplate
 // (web/frontend/src, package.json, tsconfig.json, ...) into the generated
 // project with a shallow git clone, then strips the clone's own .git
@@ -131,25 +142,29 @@ func run(args []string) error {
 // fails the whole command instead of degrading to a warning.
 func cloneFrontend(root string) error {
 	dest := filepath.Join(root, "web", "frontend")
+	fmt.Printf("Cloning frontend boilerplate from %s...\n", frontendRepo)
+	return cloneRepository(frontendRepo, dest, "frontend")
+}
+
+func cloneRepository(repo, dest, label string) error {
 	// -force can re-scaffold into a directory left over from a previous run.
 	if err := os.RemoveAll(dest); err != nil {
-		return fmt.Errorf("clear %s for a fresh frontend clone: %w", dest, err)
+		return fmt.Errorf("clear %s for a fresh %s clone: %w", dest, label, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	fmt.Printf("Cloning frontend boilerplate from %s...\n", frontendRepo)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--quiet", frontendRepo, dest)
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--quiet", repo, dest)
 	var combined bytes.Buffer
 	cmd.Stdout = &combined
 	cmd.Stderr = &combined
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("clone frontend boilerplate from %s: %w\n%s", frontendRepo, err, strings.TrimSpace(combined.String()))
+		return fmt.Errorf("clone %s from %s: %w\n%s", label, repo, err, strings.TrimSpace(combined.String()))
 	}
 	if err := os.RemoveAll(filepath.Join(dest, ".git")); err != nil {
-		return fmt.Errorf("remove cloned frontend's .git directory: %w", err)
+		return fmt.Errorf("remove cloned %s git directory: %w", label, err)
 	}
 	return nil
 }
