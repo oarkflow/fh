@@ -1,6 +1,10 @@
 package tenant
 
-import "github.com/oarkflow/fh"
+import (
+	"log/slog"
+
+	"github.com/oarkflow/fh"
+)
 
 type Config struct {
 	Header   string
@@ -23,6 +27,9 @@ func New(cfg Config) fh.HandlerFunc {
 	header := cfg.Header
 	if header == "" {
 		header = "X-Tenant-ID"
+	}
+	if cfg.Validate == nil {
+		slog.Warn("fh/mw/tenant: no Validate configured — when a request has no authenticated Principal, the tenant ID falls back to the raw " + header + " header, which any caller can set to any value; set Validate to check it against a known-tenant registry unless a trusted upstream strips this header before it reaches fh")
 	}
 	extract := fh.TenantExtractor(fh.PrincipalTenantExtractor(), fh.HeaderString(header))
 	return func(c fh.Ctx) error {

@@ -17,7 +17,7 @@ func TestProxyProtocolV1(t *testing.T) {
 
 	client, server := net.Pipe()
 	ln := newPipeListener(server)
-	proxyLn := NewProxyProtocolListener(ln)
+	proxyLn := NewProxyProtocolListener(ln, ProxyProtocolConfig{TrustAll: true})
 
 	go func() {
 		_ = app.Serve(proxyLn)
@@ -49,7 +49,7 @@ func TestProxyProtocolV2(t *testing.T) {
 
 	client, server := net.Pipe()
 	ln := newPipeListener(server)
-	proxyLn := NewProxyProtocolListener(ln)
+	proxyLn := NewProxyProtocolListener(ln, ProxyProtocolConfig{TrustAll: true})
 
 	go func() {
 		_ = app.Serve(proxyLn)
@@ -88,4 +88,40 @@ func TestProxyProtocolV2(t *testing.T) {
 
 func stringsContains(s, substr string) bool {
 	return bytes.Contains([]byte(s), []byte(substr))
+}
+
+// TestProxyProtocolUntrustedPeerCannotSpoofIP verifies that a PROXY header is
+// ignored (not just accepted at face value) when the direct TCP peer is not
+// configured as trusted, preventing a client from spoofing its source IP.
+func TestProxyProtocolUntrustedPeerCannotSpoofIP(t *testing.T) {
+	app := New()
+	app.Get("/ip", func(c Ctx) error {
+		return c.SendString(c.IP())
+	})
+
+	client, server := net.Pipe()
+	ln := newPipeListener(server)
+	// No TrustedPeers/TrustAll configured and FallbackPassthrough disabled:
+	// the PROXY header must be rejected outright.
+	proxyLn := NewProxyProtocolListener(ln)
+
+	go func() {
+		_ = app.Serve(proxyLn)
+	}()
+	defer app.ShutdownWithTimeout(time.Second)
+
+	go func() {
+		_, _ = client.Write([]byte("PROXY TCP4 203.0.113.195 198.51.100.1 56324 443\r\n"))
+		req := "GET /ip HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+		_, _ = client.Write([]byte(req))
+	}()
+
+	respBytes, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+
+	if stringsContains(string(respBytes), "203.0.113.195") {
+		t.Fatalf("untrusted peer's spoofed PROXY header was honored: %q", string(respBytes))
+	}
 }

@@ -53,7 +53,7 @@ func pipeReq(t *testing.T, app *fh.App, request string) string {
 
 func TestMethodOverride(t *testing.T) {
 	app := fh.New()
-	app.Use(override.New())
+	app.Use(override.New(override.Config{AllowedMethods: []string{"PUT"}}))
 	app.Put("/users/42", func(c fh.Ctx) error {
 		return c.SendString("updated user 42")
 	})
@@ -62,5 +62,19 @@ func TestMethodOverride(t *testing.T) {
 	resp := pipeReq(t, app, req)
 	if !strings.Contains(resp, "200 OK") || !strings.Contains(resp, "updated user 42") {
 		t.Fatalf("unexpected method override response: %s", resp)
+	}
+}
+
+func TestMethodOverrideDisabledByDefault(t *testing.T) {
+	app := fh.New()
+	app.Use(override.New())
+	app.Put("/users/42", func(c fh.Ctx) error {
+		return c.SendString("updated user 42")
+	})
+
+	req := "POST /users/42 HTTP/1.1\r\nHost: local\r\nX-HTTP-Method-Override: PUT\r\nConnection: close\r\n\r\n"
+	resp := pipeReq(t, app, req)
+	if !strings.Contains(resp, "405") {
+		t.Fatalf("expected override to be a no-op without explicit AllowedMethods, got: %s", resp)
 	}
 }

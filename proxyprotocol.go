@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ var (
 
 	ErrInvalidProxyHeader = errors.New("proxyprotocol: invalid or unsupported proxy header")
 	ErrProxyReadTimeout   = errors.New("proxyprotocol: read timeout on header")
+	ErrUntrustedPeer      = errors.New("proxyprotocol: PROXY header sent by untrusted peer")
 )
 
 // ProxyProtocolConfig configures PROXY protocol negotiation.
@@ -31,6 +33,40 @@ type ProxyProtocolConfig struct {
 	// FallbackPassthrough allows connections without a PROXY header to be served as normal.
 	// Defaults to false (strict mode).
 	FallbackPassthrough bool
+
+	// TrustedPeers restricts which direct TCP peers are allowed to send a PROXY
+	// header. A connection whose raw TCP source address does not fall within one
+	// of these networks has its PROXY header rejected, preventing arbitrary
+	// clients from spoofing their source IP (which downstream code trusts for
+	// audit logs, rate limiting, and IP-based blocking).
+	//
+	// If empty and TrustAll is false, no peer is trusted and every PROXY header
+	// is rejected (connections are only accepted if FallbackPassthrough is set).
+	TrustedPeers []*net.IPNet
+
+	// TrustAll accepts a PROXY header from any direct peer, including the
+	// public internet. Only use this when the listener is genuinely
+	// unreachable except through a trusted load balancer/proxy.
+	TrustAll bool
+}
+
+func peerTrusted(addr net.Addr, peers []*net.IPNet, trustAll bool) bool {
+	if trustAll {
+		return true
+	}
+	if len(peers) == 0 {
+		return false
+	}
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok || tcpAddr.IP == nil {
+		return false
+	}
+	for _, n := range peers {
+		if n.Contains(tcpAddr.IP) {
+			return true
+		}
+	}
+	return false
 }
 
 // ProxyConn wraps a net.Conn whose RemoteAddr has been replaced by the PROXY header.
@@ -70,6 +106,13 @@ func NewProxyProtocolListener(ln net.Listener, cfg ...ProxyProtocolConfig) *Prox
 			c.Timeout = cfg[0].Timeout
 		}
 		c.FallbackPassthrough = cfg[0].FallbackPassthrough
+		c.TrustedPeers = cfg[0].TrustedPeers
+		c.TrustAll = cfg[0].TrustAll
+	}
+	if c.TrustAll {
+		slog.Warn("fh/proxyprotocol: TrustAll is enabled — any direct TCP peer can spoof its source IP via a forged PROXY header; only use this when the listener is unreachable except through a trusted load balancer")
+	} else if len(c.TrustedPeers) == 0 {
+		slog.Warn("fh/proxyprotocol: no TrustedPeers configured — all PROXY headers will be rejected as untrusted; set TrustedPeers to your load balancer's CIDR(s) or enable TrustAll")
 	}
 	return &ProxyProtocolListener{
 		Listener: ln,
@@ -82,6 +125,17 @@ func (l *ProxyProtocolListener) Accept() (net.Conn, error) {
 	rawConn, err := l.Listener.Accept()
 	if err != nil {
 		return nil, err
+	}
+
+	if !peerTrusted(rawConn.RemoteAddr(), l.cfg.TrustedPeers, l.cfg.TrustAll) {
+		// The direct TCP peer is not a trusted load balancer/proxy: never let it
+		// assert an arbitrary source IP via a PROXY header. Either pass the
+		// connection through untouched (if explicitly allowed) or reject it.
+		if l.cfg.FallbackPassthrough {
+			return rawConn, nil
+		}
+		_ = rawConn.Close()
+		return nil, ErrUntrustedPeer
 	}
 
 	if l.cfg.Timeout > 0 {
