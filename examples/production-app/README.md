@@ -1,0 +1,400 @@
+# github.com/oarkflow/fh/examples/production-app
+
+A production-oriented FH server starter with authenticated sessions, RBAC,
+bounded request handling, operational endpoints, SQLite persistence, the FH
+secure WASM transport, and a structured, componentized browser frontend
+("FH Control Center", built with [`@oarkflow/lithe`](https://www.npmjs.com/package/@oarkflow/lithe) -
+see `web/frontend/README.md`). The application is runnable on loopback for
+development and fails closed when configured for production without its
+required secrets.
+
+## Quick start
+
+`fh-init` creates `.env` from `.env.example` with mode `0600`. A later
+`fh-init -force` refreshes generated files but never overwrites `.env`.
+
+```sh
+go mod tidy
+make frontend   # builds web/public/app.js + app.css from web/frontend/src (needs Node 22.6+)
+./run.sh
+```
+
+`web/public/` is build output, not checked in - the server has nothing to
+serve at `/assets/*` until `make frontend` has run at least once.
+
+Open `http://localhost:8080`. The development credentials are in `.env`; change
+them before using the example beyond local testing.
+
+Prefer not to do that by hand the first time? Regenerate with `fh-init
+-module github.com/oarkflow/fh/examples/production-app -dir . -force -verify`: it re-scaffolds, builds the
+server, boots it on a spare loopback port, walks through the exact HTTP
+surface the browser depends on (assets, the WASM transport bundle, and the
+full login/secure-bootstrap/logout lifecycle), and opens it in your browser
+for a live look - see [`-verify`](#fh-init--verify) below.
+
+The server loads `.env` itself on startup (via `github.com/oarkflow/config`),
+so `go run ./cmd/server` works directly — `./run.sh` is a thin convenience
+wrapper, not a requirement. Real environment variables always take priority
+over `.env`, so orchestrated deployments that inject secrets directly (Docker,
+systemd, Kubernetes) behave the same whether or not a `.env` file is present.
+
+## First-run setup
+
+### Development defaults
+
+A newly generated project is immediately runnable with these loopback-only
+values:
+
+| Setting | Default |
+|---|---|
+| Application URL | `http://localhost:8080` |
+| Username | `admin` |
+| Password | `change-me-in-development` |
+| Operations bearer token | `change-me-ops-token` |
+| Database | `data/app.db` |
+| Transport key | Ephemeral; regenerated whenever the server starts |
+| Response-signing key | Ephemeral; regenerated whenever the server starts |
+
+These values are public development conveniences, not production secrets.
+Change them in `.env` before sharing the server or binding it beyond loopback.
+
+### Start and sign in
+
+1. Run `go mod tidy` once.
+2. Run `make frontend` once (needs Node 22.6+) to build `web/public/app.js`
+   and `app.css` - they are build output, not checked in, so the server has
+   nothing to serve at `/assets/*` until this has run at least once.
+3. Review `.env`, especially `APP_ORIGIN`, the login credentials, and the
+   operations token.
+4. Start the server with `./run.sh`, `make run`, or `go run ./cmd/server`.
+5. Open `http://localhost:8080`.
+6. Enter `admin` and `change-me-in-development`, then select **Sign in**.
+7. After secure registration completes, select **Load profile** on the
+   **Overview** panel to call `GET /api/me` through encrypted Fetch, use
+   **Secure API** to send an encrypted `POST /api/echo`, or check
+   **Activity** for a log of what the client has done.
+
+The sign-in form is replaced by the dashboard once authenticated, and
+**Sign out** moves to the top bar. Reloading the page checks
+`GET /auth/session`, restores an existing web login, and creates a fresh
+secure transport session. Signing out revokes the active secure session
+first, destroys the web session cookie, and returns to the sign-in form.
+
+The warning about ephemeral cryptographic keys is expected in development.
+Restarting the server changes those keys and invalidates existing secure
+transport sessions.
+
+### Device registration
+
+There is no separate manual registration command for the browser. The
+frontend's secure API client (`web/frontend/src/lib/secure-client.ts`,
+compiled into `web/public/app.js` - see `web/frontend/README.md`) performs
+the complete sequence after login:
+
+1. `POST /auth/login` validates the development credentials, regenerates the
+   web session ID, and sets the signed HttpOnly cookie.
+2. `POST /secure-config.json` issues a random 90-second, one-use registration
+   grant bound to that authenticated principal and exact web session.
+3. `createSecureFetch(...)` verifies asset integrity, loads the WASM runtime,
+   and asks WebCrypto to create a non-extractable Ed25519 device key in
+   IndexedDB.
+4. The secure client submits its signed registration to
+   `POST /__fh/secure/v1/device/register` with the one-use grant.
+5. It establishes an ephemeral encrypted session through
+   `POST /__fh/secure/v1/session`.
+6. Subsequent `secure.fetch('/api/...')` requests are encrypted, replay
+   protected, bound to the login principal, and require signed responses.
+
+A failed grant binding consumes the grant, and a grant cannot be replayed.
+Reload the page and sign in again to obtain a fresh one. Do not call the device
+registration endpoint with plain curl: a valid request includes browser-held
+device keys and protocol signatures.
+
+To reset a development browser completely, stop the server, clear site data for
+`localhost:8080` (including IndexedDB and cookies), restart it, and sign in
+again.
+
+### `fh-init -verify`
+
+`fh-init` can do the checks in this section for you, against a real,
+temporarily-running instance of the generated app:
+
+```sh
+fh-init -module github.com/oarkflow/fh/examples/production-app -dir . -force -verify
+```
+
+It builds the frontend (`npm install && npm run build`, producing
+`web/public/app.js` + `app.css`) and the server, boots the server on a free
+loopback port using the credentials in `.env`, works through the same
+checklist below (plus the static assets and WASM transport bundle every page
+load needs), and - unless `-no-browser` is also given - opens it in your
+default browser for a live look before shutting the instance back down. A
+missing network connection, Node.js, or Go toolchain only prints a warning
+and leaves the exit code at `0` (the scaffold itself is still complete);
+pass `-require-verify` to make that fatal instead. See `fh-init -h` for every
+flag.
+
+### Basic verification
+
+Public liveness:
+
+```sh
+curl -i http://localhost:8080/healthz
+```
+
+Protected readiness and metrics:
+
+```sh
+set -a
+. ./.env
+set +a
+curl -H "Authorization: Bearer $APP_OPERATIONS_TOKEN" http://localhost:8080/_ops/ready
+curl -H "Authorization: Bearer $APP_OPERATIONS_TOKEN" 'http://localhost:8080/_ops/metrics?format=prometheus'
+```
+
+Expected security checks:
+
+- `GET /healthz` returns `200`.
+- `GET /_ops/metrics` without the bearer token returns `401`.
+- A normal request to `/api/me` returns `426 FH_SECURE_REQUIRED`.
+- The browser's encrypted request to `/api/me` succeeds only after login,
+  device registration, and secure-session establishment.
+- Login, logout, and secure bootstrap reject cross-site requests.
+
+
+Useful commands:
+
+```sh
+make run       # start the server (equivalent to `go run ./cmd/server`)
+make test      # run application tests
+make check     # run all application checks
+make keys      # generate transport/signing private keys and matching public pins
+make wasm      # create a production-pinned WASM artifact (requires trust variables)
+make frontend  # build web/public/app.js + app.css from web/frontend/src (required before first run; needs Node 22.6+)
+```
+
+## Project structure
+
+```text
+.
+├── cmd/server/main.go             server assembly, middleware, keys, lifecycle
+├── internal/auth/                 login, principal extraction, RBAC bridge, grants
+├── internal/config/                validated environment and secret-file loading
+├── internal/database/              squealx/SQLite store, migration, health check
+├── internal/httpapi/               web, auth, bootstrap, health, and API routes
+├── web/templates/                  secure SPL server-rendered templates
+├── web/public/                     compiled browser JS/CSS (build output - run `make frontend`; not checked in)
+├── web/frontend/                   FH Control Center: the @oarkflow/lithe frontend source
+│   └── src/{lib,state,components,features}   secure client, state, reusable UI, panels
+├── web/wasm/                       secure Fetch runtime and integrity manifest
+├── policy.authz                    file-backed authorization policy
+├── .env.example                    documented development configuration
+├── Makefile                        test, key, run, frontend, and WASM build targets
+└── run.sh                          optional convenience wrapper for `go run ./cmd/server`
+```
+
+## Security stack and ordering
+
+The server enables the following layers in deliberate order:
+
+1. FH production protocol settings, Host allow-list, body/header/connection
+   limits, handler deadlines, resource admission, panic recovery, and graceful
+   shutdown.
+2. Server-generated request IDs, structured request logs, RED metrics, and
+   warning-or-higher security audit events.
+3. TLS early-data rejection and Fetch Metadata isolation.
+4. CSP, clickjacking, MIME-sniffing, referrer, permissions, COOP/CORP/COEP, and
+   production-only HSTS headers.
+5. Exact-origin credentialed CORS, global body limits, cooperative handler
+   timeouts, per-IP rate limiting, and signed sessions.
+6. FH encrypted WASM transport for `/api/*`, session/device binding, one-time
+   registration grants, replay defenses, and security-event logging.
+7. RFC 9421 Ed25519 signatures over the outer encrypted response.
+8. Authentication, file-backed RBAC, endpoint contracts, validation, and the
+   business handler.
+
+Public HTML, assets, health, and operations endpoints do not create sessions.
+Authentication state is held in an HttpOnly, SameSite=Strict cookie; production
+uses the `Secure` `__Host-` cookie form. Login regenerates the session ID.
+
+SPL stays in secure mode, which rejects script elements in rendered templates.
+After SPL validates the page, the route appends one constant same-origin module
+loader for `/assets/app.js`; neither template data nor request input can alter
+that tag, and CSP restricts scripts to the application origin.
+
+## Routes
+
+| Method | Path | Access | Purpose |
+|---|---|---|---|
+| `GET` | `/` | Public | Render the SPL application page |
+| `GET` | `/assets/*` | Public | Static browser assets |
+| `GET` | `/wasm/*` | Public | WASM transport bundle and loader |
+| `GET` | `/healthz` | Public | Minimal liveness response |
+| `GET` | `/auth/session` | Current browser session | Report whether the browser is authenticated |
+| `POST` | `/auth/login` | Same origin | Authenticate and regenerate session |
+| `POST` | `/auth/logout` | Same origin | Destroy the web session |
+| `POST` | `/secure-config.json` | Authenticated, same origin | Issue a one-use device grant and public pins |
+| `POST` | `/__fh/secure/v1/device/register` | Authorized grant | Register the browser device |
+| `POST` | `/__fh/secure/v1/session` | Registered device | Establish encrypted transport session |
+| `GET` | `/api/me` | Encrypted + authenticated + RBAC | Return bound principal information |
+| `POST` | `/api/echo` | Encrypted + authenticated + RBAC | Validated JSON example |
+| `GET` | `/_ops/metrics` | Operations bearer token | JSON/Prometheus request metrics |
+| `GET` | `/_ops/health`, `/_ops/live`, `/_ops/ready` | Operations bearer token | Detailed health/readiness |
+| `GET` | `/_ops/runtime`, `/_ops/routes` | Operations bearer token | Runtime and route diagnostics |
+
+All `/api/*` requests must use the secure WASM client. A normal Fetch/curl
+request is rejected with `426 FH_SECURE_REQUIRED`.
+
+## Configuration
+
+The server loads `.env` from the working directory on startup (a missing file
+is not an error). Real environment variables always take priority over `.env`,
+so orchestrated environments can inject the same variables directly — with no
+`.env` file present at all — and start `go run ./cmd/server` or the compiled
+binary unchanged.
+
+| Variable | Development default | Description |
+|---|---|---|
+| `APP_ENV` | `development` | Only this exact value enables development concessions; every other value is production |
+| `APP_ADDR` | `:8080` | Listen address; the development default accepts local and LAN connections |
+| `APP_ORIGIN` | `:8080` | Browser-origin policy; production requires one explicit absolute HTTPS origin |
+| `APP_DATABASE_URL` | `file:data/app.db?...` | SQLite DSN |
+| `APP_SESSION_SECRET` / `_FILE` | development value | Base64url value decoding to at least 32 random bytes |
+| `APP_LOGIN_USER` | `admin` | Starter login identity |
+| `APP_LOGIN_PASSWORD` / `_FILE` | development value | Starter password; replace with a real identity provider for production |
+| `APP_OPERATIONS_TOKEN` / `_FILE` | development value | Bearer token protecting `/_ops/*` |
+| `APP_SECURE_TRANSPORT_KEY` / `_FILE` | empty | Base64url X25519 server private key |
+| `APP_SECURE_TRANSPORT_KEY_ID` | `app-transport-v1` | Transport key/version identifier |
+| `APP_RESPONSE_SIGNING_PRIVATE_KEY` / `_FILE` | empty | Base64url Ed25519 response-signing seed |
+| `APP_RESPONSE_SIGNING_KEY_ID` | `app-response-v1` | Response key/version identifier |
+| `APP_REQUEST_TIMEOUT` | `15s` | Handler execution budget |
+| `APP_MAX_BODY_BYTES` | `1048576` | Global request body limit |
+| `APP_RATE_LIMIT` | `120` | Requests per client IP per minute |
+
+Development origin shorthand is intentionally constrained by port:
+
+- `APP_ORIGIN=:8080` accepts `localhost`, `127.0.0.1`, IPv6 loopback, the
+  machine hostname, and assigned LAN IP addresses on port 8080.
+- `APP_ORIGIN=localhost:8080` and `APP_ORIGIN=127.0.0.1:8080` accept both
+  loopback spellings (and IPv6 loopback), but do not enable LAN hosts.
+- An explicit non-loopback HTTP hostname is rejected. Production accepts only
+  an explicit absolute HTTPS origin.
+
+The same resolved policy is used for host validation, credentialed CORS,
+login/logout origin checks, secure transport, response signatures, and the
+WASM bootstrap base URL.
+
+Secret loading prefers the `_FILE` variant, suitable for mounted Kubernetes,
+Docker, or systemd credentials. Never commit `.env`; it is ignored by Git.
+
+## Key generation
+
+Generate the X25519 transport key, Ed25519 signing seed, and corresponding
+public WASM pins:
+
+```sh
+make keys
+```
+
+The output contains private material. Put the `APP_*` private values in your
+secret manager and retain the `WASM_TRUSTED_*` public values for the WASM build.
+Generate independent session and operations secrets, for example:
+
+```sh
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+```
+
+Use distinct values for each purpose and environment. Rotate keys using new
+explicit key IDs and a controlled deployment overlap.
+
+## Secure WASM production build
+
+WASM encryption is additional application-layer protection; it does not replace
+TLS, authentication, authorization, validation, or endpoint policy. For a
+production build, provide the complete immutable public trust bundle:
+
+```sh
+export WASM_TRUSTED_ORIGIN='https://app.example.com'
+export WASM_TRUSTED_TRANSPORT_KEY='<X25519 public value from make keys>'
+export WASM_TRUSTED_TRANSPORT_KEY_ID='app-transport-v1'
+export WASM_TRUSTED_RESPONSE_KEY='<Ed25519 public value from make keys>'
+export WASM_TRUSTED_RESPONSE_KEY_ID='app-response-v1'
+make wasm
+```
+
+This embeds the origin and both public keys/key IDs in `securefetch.wasm` and
+regenerates `asset-manifest.json`. The server validates the manifest at startup;
+the browser verifies WASM and runtime SRI before use. Publish the artifact hash
+through an independently authenticated release channel. Never embed private
+keys, session secrets, passwords, database credentials, or bearer tokens in
+JavaScript or WASM.
+
+The checked-in WASM bundle is for loopback development. Production refuses a
+runtime-only trust configuration: the trust anchors must be compiled into the
+artifact.
+
+## Database
+
+Startup creates the SQLite directory and an initial `users` table, then exposes
+it through a typed `squealx` repository. Readiness includes a bounded database
+ping. Replace the starter migration with a versioned migration system before
+evolving a real schema, and use a production database appropriate to the
+deployment topology.
+
+## Operations
+
+Supply the bearer token to inspect protected endpoints:
+
+```sh
+curl -H "Authorization: Bearer $APP_OPERATIONS_TOKEN" http://localhost:8080/_ops/ready
+curl -H "Authorization: Bearer $APP_OPERATIONS_TOKEN" 'http://localhost:8080/_ops/metrics?format=prometheus'
+```
+
+Keep `/_ops/*` private at the network layer as defense in depth. The route list,
+runtime data, readiness errors, and metrics reveal operational details.
+
+## Production deployment checklist
+
+- Set `APP_ENV=production` and an HTTPS `APP_ORIGIN`.
+- Store all private values in a secret manager and expose them with `_FILE`.
+- Use persistent transport/signing keys; ephemeral keys are development-only.
+- Build the WASM artifact with all five matching `WASM_TRUSTED_*` values.
+- Terminate TLS 1.3 at FH or a correctly configured trusted reverse proxy.
+- Replace the demonstration password login with OIDC/WebAuthn or your identity
+  system, and implement application-specific roles and authorization rules.
+- Restrict `/_ops/*` at both the bearer-token and network layers.
+- Back up the database, run versioned migrations, and configure monitoring.
+- Review CSP/CORS/Host policies when adding origins or third-party assets.
+- Run unit, integration, race, vulnerability, and browser tests in CI.
+- Arrange an independent review before protecting high-value or regulated data.
+
+## Multi-instance deployments
+
+The starter’s session, rate-limit, secure-transport session, replay, nonce, and
+device stores are process-local. Before horizontal scaling, provide shared
+atomic TTL-capable stores (for example Redis/Valkey) and a durable device
+registry. Encrypt secure-session key material with KMS/HSM-backed keys at rest.
+Use a shared database and define key rotation, revocation, and failover policy.
+
+## Testing
+
+```sh
+make check
+go test -race ./...
+go vet ./...
+```
+
+The included grant test verifies that registration grants are one-shot and
+session-bound. Add tests for every business authorization rule, request schema,
+database transaction, and failure path. Browser integration tests should verify
+SRI loading, embedded trust, device registration, encrypted requests, signed
+responses, logout/revocation, replay rejection, and key rotation.
+
+## Security boundaries
+
+Secure WASM protects the application protocol from passive/intercepting network
+observers even beyond TLS, but plaintext still exists at application boundaries.
+A compromised page, extension, browser, endpoint, build pipeline, server, or
+operating system can access it. Keep dependencies patched, minimize same-origin
+scripts, maintain CSP, audit sensitive actions, and never trust client-reported
+authorization or transaction success.

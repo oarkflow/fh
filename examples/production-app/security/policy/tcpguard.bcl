@@ -1,0 +1,154 @@
+pack "github.com/oarkflow/fh/examples/production-app-anomaly-protection" {
+  version "1.0.0"
+  mode enforce
+}
+
+guard "github.com/oarkflow/fh/examples/production-app-guard" {
+  mode enforce
+  version "1.0.0"
+}
+
+policy_safety {
+  max_detector_timeout 25ms
+  max_action_timeout 1s
+  max_actions_per_rule 6
+}
+
+# The built-in abuse detector turns raw request/event volume into named
+# facts (abuse.auth.ip_failures, abuse.fn.invocations, ...). Thresholds here
+# are intentionally low so the behavior is visible in development; raise
+# them for production once real traffic volume is known (see
+# https://github.com/oarkflow/tcpguard#abuse-parameters).
+detector "abuse" {
+  type abuse
+  window 10m
+  auth_ip_failure_threshold 5
+  auth_user_failure_threshold 5
+  password_spray_user_threshold 5
+  scan_path_threshold 8
+  account_enumeration_threshold 5
+  function_invoke_threshold 20
+  large_body_threshold 1048576
+}
+
+threat_model "abuse-default" {
+  category account_takeover {
+    findings ["account_takeover_risk", "session_country_changed"]
+  }
+  category bot_abuse {
+    findings ["credential_stuffing", "password_spray", "account_enumeration", "endpoint_scanning"]
+  }
+  category function_abuse {
+    findings ["function_invocation_velocity", "function_error_abuse"]
+  }
+  category application_abuse {
+    findings ["path_traversal_probe", "injection_probe", "xss_probe", "ssrf_probe"]
+  }
+}
+
+# Credential-stuffing / brute-force protection on /auth/login. The handler
+# emits auth.login_failed/auth.login_success events explicitly (see
+# internal/httpapi/routes.go) since a failed login never reaches the request
+# body far enough to be distinguishable from a successful one by status code
+# alone once responses are uniform.
+rule "auth-brute-force" {
+  name "Block brute-force login attempts"
+  status active
+  priority 900
+
+  trigger {
+    on auth.login_failed
+  }
+
+  when {
+    any {
+      abuse.auth.ip_failures greater_or_equal 5
+      abuse.auth.user_failures greater_or_equal 5
+      abuse.enumeration.distinct_users greater_or_equal 5
+    }
+  }
+
+  risk {
+    base 85
+    max 100
+  }
+
+  severity {
+    critical when risk.score greater_or_equal 80
+  }
+
+  actions {
+    critical {
+      run block
+      run create_incident
+    }
+  }
+}
+
+# Endpoint scanning / probing across the whole app.
+rule "endpoint-scanning" {
+  name "Throttle endpoint scanning"
+  status active
+  priority 800
+
+  trigger {
+    on request.received
+  }
+
+  when {
+    any {
+      abuse.scan.distinct_paths greater_or_equal 8
+      abuse.application.path_traversal equals true
+      abuse.application.injection_probe equals true
+      abuse.application.ssrf_probe equals true
+    }
+  }
+
+  risk {
+    base 70
+    max 95
+  }
+
+  severity {
+    high when risk.score greater_or_equal 60
+  }
+
+  actions {
+    high {
+      run throttle
+    }
+  }
+}
+
+# Business-logic anomaly example: runaway note creation (a scripted client
+# hammering /api/notes) is a "function invocation" from tcpguard's point of
+# view - see security.Guard.EmitBusinessEvent, called from the notes-create
+# handler.
+rule "note-creation-velocity" {
+  name "Throttle runaway note creation"
+  status active
+  priority 700
+
+  trigger {
+    on function.invoked
+  }
+
+  when {
+    abuse.fn.invocations greater_or_equal 20
+  }
+
+  risk {
+    base 60
+    max 90
+  }
+
+  severity {
+    medium when risk.score greater_or_equal 50
+  }
+
+  actions {
+    medium {
+      run throttle
+    }
+  }
+}

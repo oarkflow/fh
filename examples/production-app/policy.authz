@@ -1,0 +1,18 @@
+# RBAC: route-shaped permissions per role. "api" matches every /api/* route
+# via the PolicyMiddleware's ResourceFromRoute("api", "") extractor.
+policy api-read public allow GET api subject.type=user
+policy api-write public allow POST,PUT,DELETE api subject.type=user
+
+# ABAC: any authenticated user may read/write a "note" resource whose
+# owner_id matches their own subject id. This check runs inside the handler
+# (see internal/auth.AuthorizeOwned) once the row - and therefore its real
+# owner - has been fetched from the database; the route-level policies above
+# only ever see the route pattern, not the row.
+policy notes-owner-rw public allow GET,POST,PUT,DELETE note resource.owner_id=subject.id priority:60
+
+# RBAC override: admin bypasses the ownership check entirely.
+policy notes-admin-all public allow GET,POST,PUT,DELETE note subject.roles@admin priority:90
+
+role admin public Admin GET:api,POST:api,PUT:api,DELETE:api,GET:note,POST:note,PUT:note,DELETE:note
+role editor public Editor GET:api,POST:api
+role viewer public Viewer GET:api

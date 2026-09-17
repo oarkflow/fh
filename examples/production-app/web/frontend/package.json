@@ -1,0 +1,16 @@
+{
+  "name": "fh-control-center",
+  "private": true,
+  "type": "module",
+  "description": "FH Control Center - the browser frontend for an fh-init application, built with @oarkflow/lithe.",
+  "scripts": {
+    "dev": "lithe dev .",
+    "build": "lithe build . --bundle=single --out=../public",
+    "check": "lithe check . && npm run check:secure-fetch",
+    "check:secure-fetch": "node --experimental-strip-types scripts/check-secure-fetch.ts",
+    "typecheck": "lithe typecheck ."
+  },
+  "dependencies": {
+    "@oarkflow/lithe": "^1.1.6"
+  }
+}

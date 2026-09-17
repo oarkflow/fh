@@ -39,19 +39,36 @@ endif
 WASM_TRUST_LDFLAGS := -X main.embeddedTrustedOrigin=$(WASM_TRUSTED_ORIGIN) -X main.embeddedTransportPublicKey=$(WASM_TRUSTED_TRANSPORT_KEY) -X main.embeddedTransportKeyID=$(WASM_TRUSTED_TRANSPORT_KEY_ID) -X main.embeddedResponseSigningPublicKey=$(WASM_TRUSTED_RESPONSE_KEY) -X main.embeddedResponseSigningKeyID=$(WASM_TRUSTED_RESPONSE_KEY_ID)
 endif
 
-.PHONY: all test check template-check secure-test kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-clean clean
+.PHONY: all test check template-check production-app-check production-app-update secure-test kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-clean clean
 
 all: test wasm
 
 test:
 	$(GO) test ./...
 
-check: test template-check
+check: test template-check production-app-check
 
 template-check:
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 		$(GO) run ./cmd/fh-init -module example.com/fh/generated -dir "$$tmp"; \
 		(cd "$$tmp" && $(GO) mod tidy && $(GO) test ./...)
+
+# examples/production-app is a checked-in copy of fh-init's current template
+# output (see README.md's "Production application template" section), kept
+# building against this working tree via its go.mod replace directive. This
+# only validates the Go side; the frontend (web/frontend) needs a separate
+# `npm install && npm run build` (see examples/production-app/README.md).
+production-app-check:
+	cd examples/production-app && $(GO) build ./... && $(GO) vet ./... && $(GO) test ./...
+
+# Regenerates examples/production-app from the current fh-template/lithe
+# boilerplate. Run this after a template change to keep the checked-in copy
+# honest, review the diff, then commit it.
+production-app-update:
+	rm -rf examples/production-app
+	$(GO) run ./cmd/fh-init -module github.com/oarkflow/fh/examples/production-app -dir ./examples/production-app
+	@printf '\n// This example is a checked-in copy of fh-init'"'"'s template output, kept\n// buildable against the fh source in this repository (not the last\n// published release) so it stays honest about what the framework'"'"'s own\n// working tree currently produces - see the root Makefile'"'"'s\n// production-app-check target.\nreplace github.com/oarkflow/fh => ../..\n' >> examples/production-app/go.mod
+	cd examples/production-app && $(GO) mod tidy
 
 secure-test:
 	$(GO) test ./pkg/securetransport ./mw/securetransport
