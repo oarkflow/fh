@@ -15,9 +15,16 @@ policy_safety {
 }
 
 # The built-in abuse detector turns raw request/event volume into named
-# facts (abuse.auth.ip_failures, abuse.fn.invocations, ...). Thresholds here
-# are intentionally low so the behavior is visible in development; raise
-# them for production once real traffic volume is known (see
+# facts (abuse.auth.ip_failures, abuse.fn.invocations, ...). Auth-related
+# thresholds are deliberately tight (a real login form is used a handful of
+# times per session, so 5 failures in 10 minutes is already suspicious).
+# scan_path_threshold is deliberately NOT tight: distinct_paths counts the
+# exact request path, so a REST resource like /api/notes/:id adds one new
+# "distinct path" per note ID a legitimate user touches. A normal session
+# through this app's own ~10 routes plus a handful of note operations can
+# reach 20-30 distinct paths on its own; keep this threshold well above your
+# app's real per-session path count, or it will flag ordinary use as
+# scanning (see the endpoint-scanning-probe rule below, and
 # https://github.com/oarkflow/tcpguard#abuse-parameters).
 detector "abuse" {
   type abuse
@@ -25,7 +32,7 @@ detector "abuse" {
   auth_ip_failure_threshold 5
   auth_user_failure_threshold 5
   password_spray_user_threshold 5
-  scan_path_threshold 8
+  scan_path_threshold 60
   account_enumeration_threshold 5
   function_invoke_threshold 20
   large_body_threshold 1048576
@@ -85,9 +92,18 @@ rule "auth-brute-force" {
   }
 }
 
-# Endpoint scanning / probing across the whole app.
-rule "endpoint-scanning" {
-  name "Throttle endpoint scanning"
+# NOTE ON SEVERITY: tcpguard maps each rule's *severity* bucket straight to
+# an enforcement effect in enforce mode - critical=block, high=challenge
+# (401), medium=throttle (429), everything else=monitor (see tcpguard's
+# guard.go decide()) - regardless of which action verbs are listed below.
+# Reserve "high"/"critical" for signals a legitimate user's traffic cannot
+# produce; a volume-based signal like "visited many paths" belongs at
+# "medium" (throttle), because real usage can approach it.
+
+# High path-volume from one IP: could be a legitimate power user or a
+# scanner: throttle, don't block/challenge.
+rule "endpoint-scanning-volume" {
+  name "Throttle unusually high endpoint volume"
   status active
   priority 800
 
@@ -96,8 +112,39 @@ rule "endpoint-scanning" {
   }
 
   when {
+    abuse.scan.distinct_paths greater_or_equal 60
+  }
+
+  risk {
+    base 45
+    max 65
+  }
+
+  severity {
+    medium when risk.score greater_or_equal 40
+  }
+
+  actions {
+    medium {
+      run throttle
+    }
+  }
+}
+
+# Actual attack probes (path traversal, injection, SSRF) are a much
+# stronger signal than raw path volume - ordinary navigation through this
+# app's own routes never produces one, so these stay high-severity.
+rule "endpoint-scanning-probe" {
+  name "Block application attack probes"
+  status active
+  priority 810
+
+  trigger {
+    on request.received
+  }
+
+  when {
     any {
-      abuse.scan.distinct_paths greater_or_equal 8
       abuse.application.path_traversal equals true
       abuse.application.injection_probe equals true
       abuse.application.ssrf_probe equals true
@@ -105,17 +152,18 @@ rule "endpoint-scanning" {
   }
 
   risk {
-    base 70
-    max 95
+    base 85
+    max 100
   }
 
   severity {
-    high when risk.score greater_or_equal 60
+    critical when risk.score greater_or_equal 80
   }
 
   actions {
-    high {
-      run throttle
+    critical {
+      run block
+      run create_incident
     }
   }
 }
