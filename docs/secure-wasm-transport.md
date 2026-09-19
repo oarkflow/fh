@@ -252,7 +252,7 @@ Put cookie/session middleware before FH secure transport when device registratio
 
 ## Current limitations
 
-- Request and response bodies are buffered; streaming encryption is not yet implemented.
+- Request and response bodies are buffered; streaming encryption is not yet implemented. The axios-style client (`createClient`/`createSecureClient` in `wasm/README.md`) therefore only emits synthetic 0%/100% `onUploadProgress`/`onDownloadProgress` events, not true incremental progress.
 - GET/HEAD encrypted request metadata must fit within the server/browser header limit.
 - Native Fetch redirect behavior is deliberately set to `error`; redirects would otherwise break exact target binding or risk credential/envelope forwarding.
 - Browser certificate pinning is unavailable through normal Fetch. The application-level server key pin protects this protocol but does not replace PKI/TLS validation.

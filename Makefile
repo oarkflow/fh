@@ -121,16 +121,16 @@ wasm-check: wasm-manifest
 	@test -s "$(WASM_DIST)/asset-manifest.json"
 	@cd $(WASM_DIST) && { \
 		if command -v sha256sum >/dev/null 2>&1; then \
-			sha256sum securefetch.wasm wasm_exec.js secure-fetch.js storage.js index.js; \
+			sha256sum securefetch.wasm wasm_exec.js secure-fetch.js storage.js client.js errors.js body.js index.js; \
 		else \
-			shasum -a 256 securefetch.wasm wasm_exec.js secure-fetch.js storage.js index.js; \
+			shasum -a 256 securefetch.wasm wasm_exec.js secure-fetch.js storage.js client.js errors.js body.js index.js; \
 		fi; \
 	} > SHA256SUMS
 	@echo "Built $(WASM_BINARY) and copied TinyGo runtime to $(WASM_DIST)/wasm_exec.js"
 
 wasm-example: wasm-check
 	@mkdir -p $(WASM_EXAMPLE_DIR)
-	cp $(WASM_DIST)/securefetch.wasm $(WASM_DIST)/wasm_exec.js $(WASM_DIST)/secure-fetch.js $(WASM_DIST)/storage.js $(WASM_DIST)/index.js $(WASM_DIST)/secure-fetch.d.ts $(WASM_DIST)/storage.d.ts $(WASM_DIST)/index.d.ts $(WASM_DIST)/asset-manifest.json $(WASM_DIST)/SHA256SUMS $(WASM_EXAMPLE_DIR)/
+	cp $(WASM_DIST)/securefetch.wasm $(WASM_DIST)/wasm_exec.js $(WASM_DIST)/secure-fetch.js $(WASM_DIST)/storage.js $(WASM_DIST)/client.js $(WASM_DIST)/errors.js $(WASM_DIST)/body.js $(WASM_DIST)/index.js $(WASM_DIST)/secure-fetch.d.ts $(WASM_DIST)/storage.d.ts $(WASM_DIST)/client.d.ts $(WASM_DIST)/errors.d.ts $(WASM_DIST)/body.d.ts $(WASM_DIST)/index.d.ts $(WASM_DIST)/asset-manifest.json $(WASM_DIST)/SHA256SUMS $(WASM_EXAMPLE_DIR)/
 	@echo "Synchronized complete WASM bundle to $(WASM_EXAMPLE_DIR)"
 
 # `make wasm`/`make all` build an UNTRUSTED artifact by default (no embedded

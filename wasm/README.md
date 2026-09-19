@@ -60,3 +60,49 @@ The package requires WebAssembly, WebCrypto, IndexedDB, a browser Window, and a 
 `make wasm` emits `dist/asset-manifest.json` with SHA-256 SRI values for the WASM binary and runtime.
 
 See `docs/secure-wasm-transport.md` for the protocol, server setup, threat model, and production checklist.
+
+## Axios-style client
+
+`createSecureFetch`/`secure.fetch` above is the low-level, Fetch-compatible
+primitive. `createClient`/`createSecureClient` (also exported from
+`/wasm/index.js`) wrap any Fetch-compatible function -- native `fetch`, or
+the secure transport above -- with axios-style ergonomics: instances with
+shared defaults, request/response interceptors, automatic JSON
+transforms, query-param serialization, `timeout`, retries, and a unified
+`FHError` (with `.response.status`/`.response.data`) instead of manually
+checking `response.ok`.
+
+```js
+import { createSecureClient, isFHError } from "/wasm/index.js";
+
+// Wraps createSecureFetch(config) internally; or pass an existing
+// SecureFetchHandle if you already called createSecureFetch yourself.
+const api = await createSecureClient({
+  baseURL: location.origin,
+  // ...same config as createSecureFetch above...
+});
+
+api.interceptors.request.use((config) => {
+  console.log(`-> ${config.method} ${config.url}`);
+  return config;
+});
+
+try {
+  const { data } = await api.get("/api/profile");
+  console.log(data);
+  await api.post("/api/echo", { hello: "world" }, { retries: 2, timeout: 5000 });
+} catch (error) {
+  if (isFHError(error)) console.error(error.code, error.response?.status, error.response?.data);
+}
+
+// Plain fetch works the same way, without any secure transport:
+import { createClient } from "/wasm/index.js";
+const plain = createClient(fetch, { baseURL: "https://api.example.com" });
+```
+
+`onUploadProgress`/`onDownloadProgress` callbacks are supported for shape
+parity with axios, but every event they emit is a synthetic 0%/100%
+start/end pair (`event.synthetic === true`) -- the underlying transport
+buffers whole request/response bodies rather than streaming them (see
+`docs/secure-wasm-transport.md`), so true incremental progress isn't
+available yet.

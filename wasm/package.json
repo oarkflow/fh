@@ -16,15 +16,23 @@
     "dist/secure-fetch.d.ts",
     "dist/storage.js",
     "dist/storage.d.ts",
+    "dist/client.js",
+    "dist/client.d.ts",
+    "dist/errors.js",
+    "dist/errors.d.ts",
+    "dist/body.js",
+    "dist/body.d.ts",
     "dist/securefetch.wasm",
     "dist/wasm_exec.js",
     "dist/asset-manifest.json",
     "dist/SHA256SUMS"
   ],
   "scripts": {
-    "build:ts": "tsc -p tsconfig.json"
+    "build:ts": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && tsc -p test/tsconfig.json && node --test test-dist/client.test.js"
   },
   "devDependencies": {
-    "typescript": "^5.8.3"
+    "@types/node": "^26.6.2",
+    "typescript": "5.2.2"
   }
 }

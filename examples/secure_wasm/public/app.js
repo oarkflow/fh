@@ -1,7 +1,8 @@
-import { createSecureFetch } from "/wasm/index.js";
+import { createSecureFetch, createSecureClient, isFHError } from "/wasm/index.js";
 
 const login = document.querySelector("#login");
 const transfer = document.querySelector("#transfer");
+const clientSmoke = document.querySelector("#client-smoke");
 const output = document.querySelector("#output");
 let secure;
 
@@ -37,7 +38,46 @@ login.addEventListener("submit", async (event) => {
     });
     const me = await responseJSON(await secure.fetch("/api/me"));
     transfer.hidden = false;
+    clientSmoke.hidden = false;
     show({ session: secure.sessionInfo(), response: me });
+  } catch (error) {
+    show(error instanceof Error ? error.message : String(error));
+  }
+});
+
+// Manual smoke check for the axios-style client layer (wasm/src/client.ts)
+// against the real WASM binary: one interceptor, one retried request, and
+// one deliberately-failing request to confirm the FHError shape end-to-end.
+// Not part of any automated test -- run this example and click the button.
+clientSmoke.addEventListener("click", async () => {
+  try {
+    const api = await createSecureClient(secure);
+    const seen = [];
+    api.interceptors.request.use((config) => {
+      seen.push(`${config.method} ${config.url}`);
+      return config;
+    });
+
+    const me = await api.get("/api/me");
+    let retryAttempts = 0;
+    let retryError;
+    try {
+      await api.get("/api/does-not-exist", {
+        retries: { retries: 2, retryCondition: () => (retryAttempts += 1) < 3 },
+      });
+    } catch (error) {
+      retryError = error;
+    }
+
+    show({
+      interceptorLog: seen,
+      getMeStatus: me.status,
+      getMeData: me.data,
+      retryAttempts,
+      retryFailureIsFHError: isFHError(retryError),
+      retryFailureStatus: retryError?.response?.status,
+      retryFailureCode: retryError?.code,
+    });
   } catch (error) {
     show(error instanceof Error ? error.message : String(error));
   }

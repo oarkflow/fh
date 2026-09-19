@@ -28,7 +28,7 @@ func main() {
 	output := flag.String("output", "asset-manifest.json", "manifest filename inside dir")
 	flag.Parse()
 
-	names := []string{"securefetch.wasm", "wasm_exec.js", "secure-fetch.js", "storage.js", "index.js"}
+	names := []string{"securefetch.wasm", "wasm_exec.js", "secure-fetch.js", "storage.js", "client.js", "errors.js", "body.js", "index.js"}
 	sort.Strings(names)
 	out := manifest{Protocol: "fh-secure-transport-v1", Assets: make(map[string]asset, len(names))}
 	for _, name := range names {
