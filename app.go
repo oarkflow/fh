@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh/kernel"
+	"github.com/oarkflow/fh/ref"
 )
 
 type Map map[string]any
@@ -478,6 +479,7 @@ var ErrRewrite = errors.New("fh: reroute rewritten request")
 type App struct {
 	cfg             Config
 	router          *Router
+	refEngine       *ref.Engine // Runtime Execution Fabric engine (nil if not enabled)
 	hooks           Hooks
 	logger          Logger
 	middleware      []HandlerFunc
@@ -948,6 +950,23 @@ func (a *App) Group(prefix string, handlers ...HandlerFunc) *Group {
 	g := &Group{app: a, prefix: prefix, middleware: handlers}
 	a.groups = append(a.groups, g)
 	return g
+}
+
+// EnableREF enables the Runtime Execution Fabric (REF) on the App.
+// If already enabled, returns the existing Engine.
+func (a *App) EnableREF(opts ...ref.Option) *ref.Engine {
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
+	a.assertMutable()
+	if a.refEngine == nil {
+		a.refEngine = ref.NewEngine(opts...)
+	}
+	return a.refEngine
+}
+
+// REF returns the REF Engine, or nil if REF is not enabled.
+func (a *App) REF() *ref.Engine {
+	return a.refEngine
 }
 
 // ── Lifecycle hooks ────────────────────────────────────────────────────────
