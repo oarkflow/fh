@@ -85,6 +85,31 @@ func Register[I, O any](r *Registry, it Intent[I, O], customDecoder ...DecoderFu
 	return nil
 }
 
+// RegisterDefinition registers a type-erased intent definition. It is intended
+// for trusted compilers (for example a declarative application compiler) that
+// build REF programs at runtime rather than from Go generic types.
+func (r *Registry) RegisterDefinition(def *Definition) error {
+	if def == nil {
+		return fmt.Errorf("ref: nil intent definition")
+	}
+	if def.Name == "" {
+		return fmt.Errorf("ref: intent name is required")
+	}
+	if def.Run == nil {
+		return fmt.Errorf("ref: intent %q has no operation", def.Name)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.intents[def.Name]; exists {
+		return fmt.Errorf("ref: duplicate intent %q", def.Name)
+	}
+	copyDef := *def
+	copyDef.Spec.Requires = append([]fact.AnyKey(nil), def.Spec.Requires...)
+	r.intents[def.Name] = &copyDef
+	return nil
+}
+
 // Lookup retrieves an intent definition by name.
 func (r *Registry) Lookup(name Name) (*Definition, bool) {
 	r.mu.RLock()

@@ -1,0 +1,315 @@
+name "todo-no-code"
+environment env("APP_ENV", "development")
+
+resource "database" {
+  kind "database.sql"
+  config {
+    driver "pgx"
+    dsn env.required("DATABASE_URL")
+    max_open_connections 20
+    max_idle_connections 5
+    connection_max_lifetime 30m
+    connection_max_idle_time 5m
+    ping true
+    migrations [
+      "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+      "CREATE TABLE IF NOT EXISTS password_resets (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+      "CREATE INDEX IF NOT EXISTS password_resets_user_idx ON password_resets(user_id)",
+      "CREATE TABLE IF NOT EXISTS todos (id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL CHECK (char_length(title) BETWEEN 1 AND 200), description TEXT NOT NULL DEFAULT '', completed BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+      "CREATE INDEX IF NOT EXISTS todos_user_created_idx ON todos(user_id, created_at DESC)"
+    ]
+  }
+}
+
+resource "cache" {
+  kind "cache.file"
+  config { dir env("TODO_CACHE_DIR", ".data/todo/cache") gc_interval 1m }
+}
+
+resource "sessions" {
+  kind "session.file"
+  config {
+    dir env("TODO_SESSION_DIR", ".data/todo/sessions")
+    secret env.required("SESSION_SECRET")
+    cookie "todo_sid"
+    max_age 24h
+    secure false
+  }
+}
+
+resource "jobs" {
+  kind "queue.file"
+  config { dir env("TODO_QUEUE_DIR", ".data/todo/queue") workers 2 max_attempts 5 poll_interval 100ms backoff 1s }
+}
+
+resource "notifications" {
+  kind "service.http"
+  config {
+    timeout 10s
+    max_response_bytes 1048576
+    allowed_hosts env("TODO_NOTIFICATION_HOST", "127.0.0.1")
+    # The SSRF guard refuses loopback and RFC1918 destinations unless this says
+    # otherwise. Set it true only while the receiver is a local mock; in a real
+    # deployment the notification service is not on this machine.
+    allow_private_networks env("TODO_NOTIFICATION_ALLOW_PRIVATE", "false")
+    headers { Authorization env("TODO_NOTIFICATION_AUTH", "") }
+  }
+}
+
+# Authentication -------------------------------------------------------
+
+intent "auth.register" {
+  description "Register a user and start a signed session"
+  response "response"
+  timeout 5s
+  max_db_queries 2
+  node "validate" { uses "validate.required" requires [input] provides [validated] config { fields [input.email, input.name, input.password] } }
+  node "hash-password" { uses "auth.password_hash" requires [input, validated] provides [password_hash] config { value_fact "input.password" cost 12 } }
+  node "insert-user" {
+    family database
+    uses "database.query"
+    resource "database"
+    kind effect
+    requires [input, password_hash]
+    provides [users]
+    config {
+      statement "INSERT INTO users (id,email,name,password_hash) VALUES (LOWER($1),LOWER($1),$2,$3) RETURNING id,email,name,password_hash,created_at"
+      args [input.email, input.name, password_hash]
+    }
+  }
+  node "login" {
+    family auth
+    uses "auth.login"
+    resource "sessions"
+    kind pure
+    requires [input, users]
+    provides [principal]
+    config { user_fact "users" password_fact "input.password" }
+  }
+  node "response" {
+    family response
+    uses "collect"
+    requires [principal]
+    provides [response]
+  }
+}
+
+intent "auth.login" {
+  description "Verify credentials and rotate the signed session ID"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+  node "validate" { uses "validate.required" requires [input] provides [validated] config { fields [input.email, input.password] } }
+  node "find-user" {
+    uses "database.query" resource "database" kind read speculation pre_auth_safe requires [input, validated] provides [users]
+    config { statement "SELECT id,email,name,password_hash,created_at FROM users WHERE email=LOWER($1) LIMIT 1" args [input.email] }
+  }
+  node "login" {
+    uses "auth.login" resource "sessions" kind pure requires [input, users] provides [principal]
+    config { user_fact "users" password_fact "input.password" }
+  }
+  node "response" { uses "collect" requires [principal] provides [response] }
+}
+
+intent "auth.logout" {
+  description "Destroy the current server-side session"
+  response "response"
+  node "require-user" { uses "auth.require_session" resource "sessions" kind decision provides [user_id] }
+  node "logout" { uses "auth.logout" resource "sessions" kind effect requires [user_id] provides [logged_out] }
+  node "response" { uses "collect" requires [logged_out] provides [response] }
+}
+
+intent "auth.change_password" {
+  description "Verify the current password and replace it"
+  response "response"
+  timeout 5s
+  max_db_queries 2
+  node "require-user" { uses "auth.require_session" resource "sessions" kind decision provides [user_id] }
+  node "validate" { uses "validate.required" requires [input] provides [validated] config { fields [input.current_password, input.new_password] } }
+  node "load-user" {
+    uses "database.query" resource "database" kind read speculation pre_auth_safe requires [user_id, validated] provides [users]
+    config { statement "SELECT password_hash FROM users WHERE id=$1" args [user_id] }
+  }
+  node "verify-current" {
+    uses "auth.password_verify" kind pure requires [input, users] provides [verified]
+    config { password_fact "input.current_password" hash_fact "users.0.password_hash" }
+  }
+  node "hash-new" {
+    uses "auth.password_hash" requires [input, verified] provides [new_password_hash]
+    config { value_fact "input.new_password" cost 12 }
+  }
+  node "update-password" {
+    uses "database.exec" resource "database" kind effect requires [user_id, new_password_hash] provides [password_changed]
+    config { statement "UPDATE users SET password_hash=$1,updated_at=NOW() WHERE id=$2" args [new_password_hash, user_id] }
+  }
+  node "response" { uses "collect" requires [password_changed] provides [response] }
+}
+
+intent "auth.forgot_password" {
+  description "Create a one-time reset token and queue its delivery"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+  max_external_io 1
+  node "validate" { uses "validate.required" requires [input] provides [validated] config { fields [input.email] } }
+  node "token" { uses "auth.reset_token" requires [validated] provides [reset_token] config { ttl 15m } }
+  node "store-token" {
+    uses "database.exec" resource "database" kind effect requires [input, reset_token] provides [token_stored]
+    config {
+      statement "INSERT INTO password_resets (token_hash,user_id,expires_at) SELECT $1,id,$2 FROM users WHERE email=LOWER($3) ON CONFLICT (token_hash) DO NOTHING"
+      args [reset_token.hash, reset_token.expires_at, input.email]
+    }
+  }
+  node "payload" { uses "collect" requires [input, reset_token, token_stored] provides [notification_payload] }
+  node "enqueue" {
+    uses "queue.publish" resource "jobs" kind async_effect requires [notification_payload] provides [notification_job]
+    config { job_type "password-reset.delivery" payload_fact "notification_payload" }
+  }
+  node "response" { uses "collect" requires [notification_job] provides [response] }
+}
+
+intent "auth.reset_password" {
+  description "Consume a valid reset token exactly once"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+  node "validate" { uses "validate.required" requires [input] provides [validated] config { fields [input.token, input.new_password] } }
+  node "token-hash" { uses "auth.token_hash" requires [input, validated] provides [token_hash] config { value_fact "input.token" } }
+  node "password-hash" { uses "auth.password_hash" requires [input, validated] provides [password_hash] config { value_fact "input.new_password" cost 12 } }
+  node "consume-token" {
+    uses "database.exec" resource "database" kind effect requires [token_hash, password_hash] provides [password_reset]
+    config {
+      statement "WITH consumed AS (DELETE FROM password_resets WHERE token_hash=$1 AND expires_at>NOW() RETURNING user_id) UPDATE users SET password_hash=$2,updated_at=NOW() WHERE id=(SELECT user_id FROM consumed)"
+      args [token_hash, password_hash]
+      require_affected true
+      not_found_message "reset token is invalid or expired"
+    }
+  }
+  node "response" { uses "collect" requires [password_reset] provides [response] }
+}
+
+# Password-reset notification worker ----------------------------------
+
+intent "notification.password_reset" {
+  response "response"
+  timeout 15s
+  max_external_io 1
+  node "deliver" {
+    family notification
+    uses "service.http"
+    resource "notifications"
+    kind effect
+    requires [input]
+    provides [delivery]
+    config { method POST url env("TODO_NOTIFICATION_URL", "http://127.0.0.1:8099/password-reset") body_fact "input" }
+  }
+  node "response" { uses "collect" requires [delivery] provides [response] }
+}
+
+worker "password-reset-delivery" { queue "jobs" job_type "password-reset.delivery" intent "notification.password_reset" }
+
+# TODO CRUD with cache-aside reads and write invalidation --------------
+
+intent "todos.list" {
+  response "response"
+  timeout 3s
+  max_db_queries 1
+  node "user" { uses "auth.require_session" resource "sessions" kind decision provides [user_id] }
+  node "todos" {
+    uses "database.cached_query" resource "database" kind read requires [user_id] provides [todos]
+    config {
+      cache "cache" key_fact "user_id" prefix "todos:list:" ttl 30s
+      statement "SELECT id,title,description,completed,created_at,updated_at FROM todos WHERE user_id=$1 ORDER BY created_at DESC"
+      args [user_id]
+    }
+  }
+  node "response" { uses "collect" requires [todos] provides [response] }
+}
+
+intent "todos.get" {
+  response "response"
+  timeout 3s
+  max_db_queries 1
+  node "user" { uses "auth.require_session" resource "sessions" kind decision provides [user_id] }
+  node "todo-id" { uses "request.param" provides [todo_id] config { name "id" } }
+  node "cache-key" { uses "expression" requires [user_id, todo_id] provides [todo_cache_key] config { expression "user_id + ':' + todo_id" } }
+  node "rows" {
+    uses "database.cached_query" resource "database" kind read requires [user_id, todo_id, todo_cache_key] provides [todo_rows]
+    config {
+      cache "cache" key_fact "todo_cache_key" prefix "todos:item:" ttl 30s
+      statement "SELECT id,title,description,completed,created_at,updated_at FROM todos WHERE id=$1 AND user_id=$2"
+      args [todo_id, user_id]
+    }
+  }
+  node "todo" { uses "data.first" requires [todo_rows] provides [todo] config { source_fact "todo_rows" message "todo not found" } }
+  node "response" { uses "collect" requires [todo] provides [response] }
+}
+
+intent "todos.create" {
+  response "response"
+  timeout 3s
+  max_db_queries 1
+  node "user" { uses "auth.require_session" resource "sessions" kind decision provides [user_id] }
+  node "validate" { uses "validate.required" requires [input] provides [validated] config { fields [input.title] } }
+  node "insert" {
+    uses "database.query" resource "database" kind effect requires [user_id, input, validated] provides [todo_rows]
+    config {
+      statement "INSERT INTO todos (user_id,title,description) VALUES ($1,$2,COALESCE($3,'')) RETURNING id,title,description,completed,created_at,updated_at"
+      args [user_id, input.title, input.description]
+    }
+  }
+  node "todo" { uses "data.first" requires [todo_rows] provides [todo] config { source_fact "todo_rows" } }
+  node "invalidate-list" { uses "cache.delete" resource "cache" kind effect requires [user_id, todo] provides [cache_invalidated] config { key_fact "user_id" prefix "todos:list:" } }
+  node "response" { uses "collect" requires [todo, cache_invalidated] provides [response] }
+}
+
+intent "todos.update" {
+  response "response"
+  timeout 3s
+  max_db_queries 1
+  node "user" { uses "auth.require_session" resource "sessions" kind decision provides [user_id] }
+  node "todo-id" { uses "request.param" provides [todo_id] config { name "id" } }
+  node "validate" { uses "validate.required" requires [input] provides [validated] config { fields [input.title] } }
+  node "cache-key" { uses "expression" requires [user_id, todo_id] provides [todo_cache_key] config { expression "user_id + ':' + todo_id" } }
+  node "update" {
+    uses "database.query" resource "database" kind effect requires [user_id, todo_id, input, validated] provides [todo_rows]
+    config {
+      statement "UPDATE todos SET title=$1,description=COALESCE($2,''),completed=COALESCE($3,completed),updated_at=NOW() WHERE id=$4 AND user_id=$5 RETURNING id,title,description,completed,created_at,updated_at"
+      args [input.title, input.description, input.completed, todo_id, user_id]
+    }
+  }
+  node "todo" { uses "data.first" requires [todo_rows] provides [todo] config { source_fact "todo_rows" message "todo not found" } }
+  node "invalidate-list" { uses "cache.delete" resource "cache" kind effect requires [user_id, todo] provides [list_invalidated] config { key_fact "user_id" prefix "todos:list:" } }
+  node "invalidate-item" { uses "cache.delete" resource "cache" kind effect requires [todo_cache_key, todo] provides [item_invalidated] config { key_fact "todo_cache_key" prefix "todos:item:" } }
+  node "response" { uses "collect" requires [todo, list_invalidated, item_invalidated] provides [response] }
+}
+
+intent "todos.delete" {
+  response "response"
+  timeout 3s
+  max_db_queries 1
+  node "user" { uses "auth.require_session" resource "sessions" kind decision provides [user_id] }
+  node "todo-id" { uses "request.param" provides [todo_id] config { name "id" } }
+  node "cache-key" { uses "expression" requires [user_id, todo_id] provides [todo_cache_key] config { expression "user_id + ':' + todo_id" } }
+  node "delete" {
+    uses "database.exec" resource "database" kind effect requires [user_id, todo_id] provides [deleted]
+    config { statement "DELETE FROM todos WHERE id=$1 AND user_id=$2" args [todo_id, user_id] require_affected true not_found_message "todo not found" }
+  }
+  node "invalidate-list" { uses "cache.delete" resource "cache" kind effect requires [user_id, deleted] provides [list_invalidated] config { key_fact "user_id" prefix "todos:list:" } }
+  node "invalidate-item" { uses "cache.delete" resource "cache" kind effect requires [todo_cache_key, deleted] provides [item_invalidated] config { key_fact "todo_cache_key" prefix "todos:item:" } }
+  node "response" { uses "collect" requires [deleted, list_invalidated, item_invalidated] provides [response] }
+}
+
+# HTTP API --------------------------------------------------------------
+
+route "auth.register" { method POST path "/auth/register" intent "auth.register" session "sessions" status 201 cache_control "no-store" }
+route "auth.login" { method POST path "/auth/login" intent "auth.login" session "sessions" cache_control "no-store" }
+route "auth.logout" { method POST path "/auth/logout" intent "auth.logout" session "sessions" cache_control "no-store" }
+route "auth.change-password" { method POST path "/auth/change-password" intent "auth.change_password" session "sessions" cache_control "no-store" }
+route "auth.forgot-password" { method POST path "/auth/forgot-password" intent "auth.forgot_password" cache_control "no-store" }
+route "auth.reset-password" { method POST path "/auth/reset-password" intent "auth.reset_password" cache_control "no-store" }
+route "todos.list" { method GET path "/todos" intent "todos.list" session "sessions" cache_control "private, no-store" }
+route "todos.get" { method GET path "/todos/:id" intent "todos.get" session "sessions" cache_control "private, no-store" }
+route "todos.create" { method POST path "/todos" intent "todos.create" session "sessions" status 201 cache_control "no-store" }
+route "todos.update" { method PUT path "/todos/:id" intent "todos.update" session "sessions" cache_control "no-store" }
+route "todos.delete" { method DELETE path "/todos/:id" intent "todos.delete" session "sessions" cache_control "no-store" }

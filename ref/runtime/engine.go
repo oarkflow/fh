@@ -68,6 +68,18 @@ func (e *Engine) RegisterIntent(it intent.Intent[any, any]) error {
 	return intent.Register(e.intents, it)
 }
 
+// RegisterDefinition registers a type-erased intent produced by a trusted
+// declarative compiler. Definitions cannot be added after Compile because a
+// compiled Engine is an immutable generation.
+func (e *Engine) RegisterDefinition(def *intent.Definition) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.compiled {
+		return fmt.Errorf("ref: cannot register intent after engine compilation")
+	}
+	return e.intents.RegisterDefinition(def)
+}
+
 // Compile builds execution plans for all registered intents.
 func (e *Engine) Compile() error {
 	e.mu.Lock()
@@ -102,6 +114,11 @@ func (e *Engine) compileIntent(def *intent.Definition) (*execution.Program, erro
 			continue
 		}
 		visitedFacts[reqFact.DefID] = true
+		// The intent decoder is the producer for its input fact. It is installed
+		// below as a graph node rather than in the capability registry.
+		if def.InputKey.DefID != 0 && reqFact.DefID == def.InputKey.DefID {
+			continue
+		}
 
 		producer, ok := e.capabilities.ProducerOf(reqFact.DefID)
 		if !ok {
