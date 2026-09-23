@@ -19,10 +19,20 @@ type Budget struct {
 	maxMemory     int64
 	maxEffects    int32
 
+	// Source-aware limits
+	maxConcurrentIO int32 // max simultaneous source operations
+	maxResultRows   int64 // max total rows/items from all sources
+	maxResultBytes  int64 // max total bytes transferred from sources
+
 	usedDBQueries  atomic.Int32
 	usedExternalIO atomic.Int32
 	usedMemory     atomic.Int64
 	usedEffects    atomic.Int32
+
+	// Source-aware counters
+	activeConcurrentIO atomic.Int32
+	usedResultRows     atomic.Int64
+	usedResultBytes    atomic.Int64
 }
 
 // NewBudget creates an enforceable budget.
@@ -136,6 +146,86 @@ func (b *Budget) AcquireEffect(n int32) error {
 	return nil
 }
 
+// AcquireConcurrentIO increments the concurrent I/O counter.
+// Returns error if the limit would be exceeded.
+func (b *Budget) AcquireConcurrentIO() error {
+	if b == nil {
+		return nil
+	}
+	if err := b.checkDeadline(); err != nil {
+		return err
+	}
+	if b.maxConcurrentIO > 0 {
+		for {
+			old := b.activeConcurrentIO.Load()
+			if old+1 > b.maxConcurrentIO {
+				return ErrBudgetExhausted
+			}
+			if b.activeConcurrentIO.CompareAndSwap(old, old+1) {
+				return nil
+			}
+		}
+	}
+	b.activeConcurrentIO.Add(1)
+	return nil
+}
+
+// ReleaseConcurrentIO decrements the concurrent I/O counter.
+func (b *Budget) ReleaseConcurrentIO() {
+	if b == nil {
+		return
+	}
+	b.activeConcurrentIO.Add(-1)
+}
+
+// AcquireResultRows consumes result row budget.
+func (b *Budget) AcquireResultRows(n int64) error {
+	if b == nil {
+		return nil
+	}
+	if err := b.checkDeadline(); err != nil {
+		return err
+	}
+	if b.maxResultRows > 0 {
+		for {
+			old := b.usedResultRows.Load()
+			if old+n > b.maxResultRows {
+				return ErrBudgetExhausted
+			}
+			if b.usedResultRows.CompareAndSwap(old, old+n) {
+				return nil
+			}
+		}
+	} else {
+		b.usedResultRows.Add(n)
+	}
+	return nil
+}
+
+// AcquireResultBytes consumes result byte budget.
+func (b *Budget) AcquireResultBytes(n int64) error {
+	if b == nil {
+		return nil
+	}
+	if err := b.checkDeadline(); err != nil {
+		return err
+	}
+	if b.maxResultBytes > 0 {
+		for {
+			old := b.usedResultBytes.Load()
+			if old+n > b.maxResultBytes {
+				return ErrBudgetExhausted
+			}
+			if b.usedResultBytes.CompareAndSwap(old, old+n) {
+				return nil
+			}
+		}
+	} else {
+		b.usedResultBytes.Add(n)
+	}
+	return nil
+}
+
 func (b *Budget) checkDeadline() error {
 	if b == nil || b.Deadline.IsZero() {
 		return nil
@@ -164,17 +254,23 @@ func (b *Budget) Snapshot() BudgetSnapshot {
 		return BudgetSnapshot{}
 	}
 	return BudgetSnapshot{
-		DBQueries:  b.usedDBQueries.Load(),
-		ExternalIO: b.usedExternalIO.Load(),
-		Memory:     b.usedMemory.Load(),
-		Effects:    b.usedEffects.Load(),
+		DBQueries:    b.usedDBQueries.Load(),
+		ExternalIO:   b.usedExternalIO.Load(),
+		Memory:       b.usedMemory.Load(),
+		Effects:      b.usedEffects.Load(),
+		ConcurrentIO: b.activeConcurrentIO.Load(),
+		ResultRows:   b.usedResultRows.Load(),
+		ResultBytes:  b.usedResultBytes.Load(),
 	}
 }
 
 // BudgetSnapshot captures point-in-time budget metrics.
 type BudgetSnapshot struct {
-	DBQueries  int32
-	ExternalIO int32
-	Memory     int64
-	Effects    int32
+	DBQueries    int32
+	ExternalIO   int32
+	Memory       int64
+	Effects      int32
+	ConcurrentIO int32
+	ResultRows   int64
+	ResultBytes  int64
 }

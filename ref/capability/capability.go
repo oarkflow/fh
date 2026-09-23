@@ -6,6 +6,7 @@ import (
 	"github.com/oarkflow/fh/ref/execution"
 	"github.com/oarkflow/fh/ref/fact"
 	"github.com/oarkflow/fh/ref/graph"
+	"github.com/oarkflow/fh/ref/source"
 )
 
 // Producer is a generic capability that produces a typed fact value.
@@ -29,6 +30,11 @@ type Registration struct {
 	Speculation graph.SpeculationClass
 	Resilience  Resilience
 	Run         func(nc *execution.NodeContext) error
+
+	// Source is optional datasource metadata. When non-nil, it enables
+	// source-level optimisations (batching, caching, coalescing, metrics).
+	// nil = this capability is not a data source node.
+	Source *source.Spec
 }
 
 // Resilience describes per-capability operational characteristics.
@@ -69,6 +75,11 @@ func WithSpeculation(class graph.SpeculationClass) Option {
 
 func WithKind(k graph.NodeKind) Option {
 	return func(r *Registration) { r.Kind = k }
+}
+
+// WithSource attaches datasource metadata to a registration.
+func WithSource(spec *source.Spec) Option {
+	return func(r *Registration) { r.Source = spec }
 }
 
 // NewRegistration creates a capability registration with options.

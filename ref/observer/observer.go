@@ -2,6 +2,7 @@ package observer
 
 import (
 	"sync/atomic"
+	"time"
 
 	"github.com/oarkflow/fh/ref/graph"
 )
@@ -13,6 +14,39 @@ type Observer interface {
 	DecisionMade(policy string, verdict uint8, message string)
 	EffectCommitted(name string, err error)
 	ExecutionFinished(intent string, durationMs float64, err error)
+
+	// SourceFetched is called after every external data source operation.
+	// Provides per-source timing breakdown and optimisation signals.
+	SourceFetched(metrics SourceMetrics)
+}
+
+// SourceMetrics provides timing breakdown for any external data fetch.
+// Defined in the observer package (rather than source) to avoid import cycles.
+type SourceMetrics struct {
+	// Source identification
+	SourceName string // "users-db", "payment-api", "s3-assets"
+	SourceKind string // "database", "api", "cache", "queue", "storage", "search"
+	Operation  string // "select", "get", "list", "mget", "query"
+	QueryHash  uint64 // stable fingerprint (no sensitive values)
+
+	// Timing breakdown
+	QueueWait  time.Duration // time waiting for concurrency budget
+	ConnWait   time.Duration // time acquiring connection/session
+	ExecTime   time.Duration // time executing at the source
+	DecodeTime time.Duration // time decoding response
+	TotalTime  time.Duration // wall clock from enter to exit
+
+	// Volume
+	ResultCount int64 // rows, items, objects returned
+	ResultBytes int64 // bytes transferred from source
+
+	// Optimisation signals
+	CacheHit   bool   // was this served from cache?
+	CacheLevel string // "L0", "L1", "L2", ""
+	Batched    bool   // was this part of a batched call?
+	BatchSize  int    // how many keys were in the batch?
+	Coalesced  bool   // was this coalesced with another caller?
+	Error      bool   // did the source call fail?
 }
 
 // Tier controls how the scheduler delivers events.
@@ -227,6 +261,22 @@ func (c *CompositeObserver) ExecutionFinished(intent string, durationMs float64,
 	}
 }
 
+func (c *CompositeObserver) SourceFetched(metrics SourceMetrics) {
+	if c == nil {
+		return
+	}
+	for _, o := range c.critical {
+		safeCall(func() { o.SourceFetched(metrics) })
+	}
+	if len(c.async) > 0 && c.disp != nil {
+		c.disp.Send(func() {
+			for _, o := range c.async {
+				safeCall(func() { o.SourceFetched(metrics) })
+			}
+		})
+	}
+}
+
 // Noop is a no-op observer for testing and defaults.
 type Noop struct{}
 
@@ -235,3 +285,4 @@ func (Noop) NodeFinished(graph.NodeInfo, error)                       {}
 func (Noop) DecisionMade(string, uint8, string)                       {}
 func (Noop) EffectCommitted(string, error)                            {}
 func (Noop) ExecutionFinished(string, float64, error)                 {}
+func (Noop) SourceFetched(SourceMetrics)                              {}
