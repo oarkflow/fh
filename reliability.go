@@ -903,7 +903,10 @@ func (q *DurableQueue) worker() {
 }
 func (q *DurableQueue) processOne() bool {
 	job, err := q.store.Claim(q.ctx, time.Now().UTC())
-	if err != nil {
+	// QueueStorage implementations should report an error when no job is
+	// available, but tolerate nil,nil as an empty result too. Never let an
+	// adapter's empty claim take down every worker by dereferencing a nil job.
+	if err != nil || job == nil {
 		return false
 	}
 	if q.cfg.ConcurrencyLimitByKey && job.ConcurrencyKey != "" {

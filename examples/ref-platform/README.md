@@ -49,7 +49,7 @@ they are backed up, replicated and correct across replicas by construction.
 
 ```sh
 createdb orders
-export DATABASE_URL="postgres://localhost/orders?sslmode=disable"
+export DATABASE_URL="postgres://postgres:postgres@localhost/orders?sslmode=disable"
 export SESSION_SECRET="$(openssl rand -hex 32)"
 export JWT_SECRET="$(openssl rand -hex 32)"
 export PAYMENT_API_KEY="test-payment-key"
