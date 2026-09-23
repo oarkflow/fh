@@ -92,6 +92,8 @@ func (tb *TestBuilder) BuildNodeContext(ctx context.Context, slotCount int) *exe
 		decisions,
 		0,
 		tb.defToSlot,
+		nil,
+		0,
 	)
 }
 

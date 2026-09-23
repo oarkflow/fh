@@ -103,6 +103,11 @@ func compileSchemas(specs []SchemaSpec) (map[string]*CompiledSchema, error) {
 				schema.Sensitive = append(schema.Sensitive, field.name)
 			}
 		}
+		for requiredName := range requiredByList {
+			if _, ok := schema.byName[requiredName]; !ok {
+				return nil, fmt.Errorf("ref/platform: schema %q requires undeclared field %q", name, requiredName)
+			}
+		}
 		compiled[name] = schema
 	}
 

@@ -16,20 +16,21 @@ import (
 func TestBudgetEnforcement(t *testing.T) {
 	b := execution.NewBudget(50*time.Millisecond, 2, 1, 1024, 1)
 
-	// Acquire DB queries
+	// Acquire DB queries — only successful acquisitions consume tokens
 	if err := b.AcquireDBQuery(1); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := b.AcquireDBQuery(1); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	// Third acquisition fails — tokens are NOT consumed (no leak)
 	if err := b.AcquireDBQuery(1); !errors.Is(err, execution.ErrBudgetExhausted) {
 		t.Fatalf("expected ErrBudgetExhausted, got %v", err)
 	}
 
 	snap := b.Snapshot()
-	if snap.DBQueries != 3 {
-		t.Errorf("expected 3 attempted DB queries, got %d", snap.DBQueries)
+	if snap.DBQueries != 2 {
+		t.Errorf("expected 2 successful DB queries, got %d", snap.DBQueries)
 	}
 
 	// Wait for deadline expiry

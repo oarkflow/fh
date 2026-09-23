@@ -40,18 +40,38 @@ type MemoryEffectStore struct {
 	mu      sync.RWMutex
 	counter atomic.Uint64
 	txs     map[string]*memTx
+	maxTxs  int
 }
 
 // NewMemoryEffectStore creates a new in-memory effect store.
 func NewMemoryEffectStore() *MemoryEffectStore {
 	return &MemoryEffectStore{
-		txs: make(map[string]*memTx),
+		txs:    make(map[string]*memTx),
+		maxTxs: 10000,
+	}
+}
+
+// cleanup removes old committed transactions to prevent unbounded growth.
+func (s *MemoryEffectStore) cleanup() {
+	if len(s.txs) <= s.maxTxs {
+		return
+	}
+	for id, tx := range s.txs {
+		if tx.committed {
+			delete(s.txs, id)
+			if len(s.txs) <= s.maxTxs {
+				return
+			}
+		}
 	}
 }
 
 func (s *MemoryEffectStore) Begin(ctx context.Context, executionID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Cleanup old transactions to prevent unbounded growth
+	s.cleanup()
 
 	id := fmt.Sprintf("tx-%d", s.counter.Add(1))
 	s.txs[id] = &memTx{

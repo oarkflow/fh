@@ -204,6 +204,9 @@ func (p *Platform) compileRoutes(doc Document) error {
 				return err
 			}
 		}
+		if err := validateHTTPParameters(what, spec); err != nil {
+			return err
+		}
 		p.routes = append(p.routes, route)
 	}
 	return nil

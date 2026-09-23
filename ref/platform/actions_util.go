@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -162,6 +163,8 @@ func normalizeSQLArg(value any) any {
 
 // resolvePath walks a dotted path through the node's facts, indexing slices with
 // numeric segments so "users.0.email" reads the first row's email.
+// It also handles struct fields via reflection, so "principal.id" works when
+// principal is a spi.Principal or any struct with an exported Id/ID field.
 func resolvePath(root map[string]any, path string) (any, bool) {
 	var current any = root
 	for _, segment := range strings.Split(path, ".") {
@@ -185,8 +188,29 @@ func resolvePath(root map[string]any, path string) (any, bool) {
 			}
 			current = value[index]
 		default:
+			// Try struct field access via reflection.
+			rv := reflect.ValueOf(current)
+			if rv.Kind() == reflect.Ptr {
+				rv = rv.Elem()
+			}
+			if rv.Kind() == reflect.Struct {
+				// Try exact match first, then case-insensitive.
+				rt := rv.Type()
+				for i := 0; i < rt.NumField(); i++ {
+					ft := rt.Field(i)
+					if !ft.IsExported() {
+						continue
+					}
+					if ft.Name == segment || strings.EqualFold(ft.Name, segment) {
+						current = rv.Field(i).Interface()
+						goto next
+					}
+				}
+				return nil, false
+			}
 			return nil, false
 		}
+	next:
 	}
 	return current, true
 }

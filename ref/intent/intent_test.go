@@ -69,7 +69,7 @@ func TestIntentRegistrationAndRun(t *testing.T) {
 		Intent: "user.create",
 		Input:  invocation.NewInput(raw, "application/json"),
 	}
-	nc := execution.NewNodeContext(context.Background(), inv, facts, nil, nil, 0, slotMap)
+	nc := execution.NewNodeContext(context.Background(), inv, facts, nil, nil, 0, slotMap, nil, 0)
 
 	// Step 1: DecodeNode (compiler generates pure decode node)
 	if err := def.DecodeNode(nc); err != nil {
@@ -93,7 +93,7 @@ func TestIntentRegistrationAndRun(t *testing.T) {
 		Intent: "user.create",
 		Input:  invocation.NewInput(invalidRaw, "application/json"),
 	}
-	ncBad := execution.NewNodeContext(context.Background(), invBad, facts, nil, nil, 0, slotMap)
+	ncBad := execution.NewNodeContext(context.Background(), invBad, facts, nil, nil, 0, slotMap, nil, 0)
 	err = def.DecodeNode(ncBad)
 	if err == nil {
 		t.Fatalf("expected decode failure, got nil")

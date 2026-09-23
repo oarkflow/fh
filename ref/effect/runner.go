@@ -8,14 +8,27 @@ import (
 // Runner manages the commit and compensation of execution effect plans.
 type Runner struct {
 	store EffectStore
+	onErr EffectErrorFunc
 }
 
 // NewRunner creates a new EffectRunner.
-func NewRunner(store EffectStore) *Runner {
+func NewRunner(store EffectStore, opts ...RunnerOption) *Runner {
 	if store == nil {
 		store = NewMemoryEffectStore()
 	}
-	return &Runner{store: store}
+	r := &Runner{store: store}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
+}
+
+// RunnerOption configures a Runner.
+type RunnerOption func(*Runner)
+
+// WithEffectErrorHandler sets a callback for non-fatal effect delivery errors.
+func WithEffectErrorHandler(fn EffectErrorFunc) RunnerOption {
+	return func(r *Runner) { r.onErr = fn }
 }
 
 // Store returns the underlying effect store.
@@ -29,7 +42,7 @@ func (r *Runner) Run(ctx context.Context, executionID string, plan EffectPlan) e
 	if len(effects) == 0 {
 		return nil
 	}
-	if err := CommitPlan(ctx, r.store, executionID, effects); err != nil {
+	if err := CommitPlan(ctx, r.store, executionID, effects, r.onErr); err != nil {
 		return fmt.Errorf("ref: effect runner failed: %w", err)
 	}
 	return nil

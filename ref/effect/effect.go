@@ -56,11 +56,20 @@ type EffectPlan struct {
 
 // All returns all effects in this plan in order of execution.
 func (ep EffectPlan) All() []Effect {
-	var res []Effect
+	total := len(ep.LocalTx) + len(ep.Durable) + len(ep.FireAndForget)
+	if total == 0 {
+		return nil
+	}
+	res := make([]Effect, 0, total)
 	res = append(res, ep.LocalTx...)
 	res = append(res, ep.Durable...)
 	res = append(res, ep.FireAndForget...)
 	return res
+}
+
+// IsEmpty reports whether the plan contains zero effects.
+func (ep EffectPlan) IsEmpty() bool {
+	return len(ep.LocalTx) == 0 && len(ep.Durable) == 0 && len(ep.FireAndForget) == 0
 }
 
 // EffectRecord is the durable representation of an effect in a store.
@@ -78,6 +87,29 @@ type PendingTransaction struct {
 	Effects     []EffectRecord
 }
 
+// EffectError captures a non-fatal error during effect delivery scheduling
+// or best-effort commit. These errors do not abort the transaction but should
+// be observable for operational health.
+type EffectError struct {
+	Phase   string
+	Name    string
+	Err     error
+}
+
+func (e EffectError) Error() string {
+	if e.Name != "" {
+		return fmt.Sprintf("ref: effect %s %q: %v", e.Phase, e.Name, e.Err)
+	}
+	return fmt.Sprintf("ref: effect %s: %v", e.Phase, e.Err)
+}
+
+func (e EffectError) Unwrap() error { return e.Err }
+
+// EffectErrorFunc is called when a non-fatal effect error occurs during
+// delivery scheduling or best-effort commit. The function must be safe for
+// concurrent use.
+type EffectErrorFunc func(err EffectError)
+
 // CommitPlan executes the crash-safe two-phase effect commit strategy:
 //  1. Begin effect transaction
 //  2. Record all DurableDelivery effects into the open transaction (outbox pattern)
@@ -87,7 +119,9 @@ type PendingTransaction struct {
 //  6. Execute FireAndForget effects best-effort
 //
 // If local transactional commit fails, compensating effects run and tx is aborted.
-func CommitPlan(ctx context.Context, store EffectStore, executionID string, effects []Effect) error {
+// Non-fatal errors (delivery scheduling, best-effort commit) are reported via onErr
+// when non-nil, instead of being silently discarded.
+func CommitPlan(ctx context.Context, store EffectStore, executionID string, effects []Effect, onErr ...EffectErrorFunc) error {
 	var txID string
 	var err error
 
@@ -96,6 +130,11 @@ func CommitPlan(ctx context.Context, store EffectStore, executionID string, effe
 		if err != nil {
 			return fmt.Errorf("ref: effect store begin error: %w", err)
 		}
+	}
+
+	var reportErr func(EffectError)
+	if len(onErr) > 0 && onErr[0] != nil {
+		reportErr = onErr[0]
 	}
 
 	// Phase 1: Record all DurableDelivery effects into the transaction BEFORE committing.
@@ -142,20 +181,26 @@ func CommitPlan(ctx context.Context, store EffectStore, executionID string, effe
 
 	// Phase 4: Schedule delivery of the committed outbox records
 	if store != nil && txID != "" {
-		_ = store.ScheduleDelivery(ctx, txID)
+		if err := store.ScheduleDelivery(ctx, txID); err != nil && reportErr != nil {
+			reportErr(EffectError{Phase: "schedule_delivery", Err: err})
+		}
 	}
 
 	for _, e := range effects {
 		if e.Kind() == DurableDelivery {
 			// Best-effort immediate dispatch; background worker retries if unfulfilled
-			_ = e.Commit(ctx)
+			if err := e.Commit(ctx); err != nil && reportErr != nil {
+				reportErr(EffectError{Phase: "durable_commit", Name: e.Name(), Err: err})
+			}
 		}
 	}
 
 	// Phase 5: Fire-and-forget
 	for _, e := range effects {
 		if e.Kind() == FireAndForget {
-			_ = e.Commit(ctx) // best effort
+			if err := e.Commit(ctx); err != nil && reportErr != nil {
+				reportErr(EffectError{Phase: "fire_and_forget", Name: e.Name(), Err: err})
+			}
 		}
 	}
 

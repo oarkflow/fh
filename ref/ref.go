@@ -31,6 +31,9 @@ type (
 	EffectPlan = effect.EffectPlan
 	EffectKind = effect.EffectKind
 
+	EffectError     = effect.EffectError
+	EffectErrorFunc = effect.EffectErrorFunc
+
 	Constraint = execution.Constraint
 	Obligation = execution.Obligation
 
@@ -43,6 +46,8 @@ type (
 	Verdict      = execution.Verdict
 
 	Observer = observer.Observer
+
+	CircuitState = capability.CircuitState
 )
 
 const (
@@ -54,12 +59,19 @@ const (
 	PreAuthSafe      = graph.PreAuthSafe
 	PostIdentitySafe = graph.PostIdentitySafe
 	PostPolicySafe   = graph.PostPolicySafe
+
+	CircuitClosed   = capability.CircuitClosed
+	CircuitOpen     = capability.CircuitOpen
+	CircuitHalfOpen = capability.CircuitHalfOpen
 )
 
 // Re-exported constructors and helpers
 var (
 	NewEngine = runtime.NewEngine
 	NewInput  = invocation.NewInput
+
+	AcquireDispatchResult = runtime.AcquireDispatchResult
+	ReleaseDispatchResult = runtime.ReleaseDispatchResult
 
 	WithEffectStore = runtime.WithEffectStore
 	WithObserver    = runtime.WithObserver
@@ -68,6 +80,11 @@ var (
 	Pure     = capability.Pure
 	Read     = capability.Read
 	Decision = capability.Decision
+
+	NewCircuitBreakerCapability         = capability.NewCircuitBreakerCapability
+	NewInMemoryCircuitBreaker           = capability.NewInMemoryCircuitBreaker
+	NewInMemoryCircuitBreakerCapability = capability.NewInMemoryCircuitBreakerCapability
+	DefaultInMemoryCircuitBreakerConfig = capability.DefaultInMemoryCircuitBreakerConfig
 )
 
 // NewKey creates a typed fact key with a stable definition ID.

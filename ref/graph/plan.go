@@ -18,6 +18,8 @@ type Plan struct {
 	InitialDeps   []int32    // initial dependency counts per node (template)
 	SlotCount     int        // fact slots needed
 	DefToSlot     map[fact.DefinitionID]fact.PlanSlot // mapping from stable DefinitionID to dense PlanSlot
+	DefSlots  []fact.PlanSlot // flat array indexed by DefinitionID for O(1) lookup
+	MaxDefID  uint32          // size of DefSlots array
 
 	DecisionCount int    // number of decision nodes
 	OperationNode NodeID // the intent's business logic node

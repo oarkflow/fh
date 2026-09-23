@@ -344,7 +344,7 @@ route "auth.login" {
   session "sessions"
   cache_control "no-store"
   rate_limit { limiter "limits" limit 10 window 15m }
-  audit { action "auth.login" }
+  route_audit { action "auth.login" }
 }
 ```
 

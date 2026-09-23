@@ -1155,7 +1155,7 @@ route "auth.register" {
   status 201
   cache_control "no-store"
   rate_limit { limiter "limits" limit 5 window 1h }
-  audit { action "auth.register" }
+  route_audit { action "auth.register" }
 }
 
 route "auth.login" {
@@ -1166,7 +1166,7 @@ route "auth.login" {
   cache_control "no-store"
   # Keyed on the remote address, because there is no principal yet.
   rate_limit { limiter "limits" limit 10 window 15m }
-  audit { action "auth.login" }
+  route_audit { action "auth.login" }
 }
 
 route "auth.logout" {
@@ -1201,7 +1201,7 @@ route "catalogue.upsert" {
   session "sessions"
   authz { permissions [catalogue:write] }
   cache_control "no-store"
-  audit { action "catalogue.upsert" include_request true }
+  route_audit { action "catalogue.upsert" include_request true }
 }
 
 route "order.place" {
@@ -1216,7 +1216,7 @@ route "order.place" {
   timeout 15s
   authz { permissions [order:create] }
   rate_limit { limiter "limits" limit 30 window 1m }
-  audit { action "order.place" include_request true redact [items] }
+  route_audit { action "order.place" include_request true redact [items] }
 }
 
 route "order.list" {
@@ -1254,7 +1254,7 @@ route "tasks.decide" {
   session "sessions"
   authz { permissions [order:approve] }
   cache_control "no-store"
-  audit { action "order.approval" include_request true }
+  route_audit { action "order.approval" include_request true }
 }
 
 route "ops.runs" {

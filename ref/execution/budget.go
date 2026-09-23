@@ -40,6 +40,7 @@ func NewBudget(timeout time.Duration, maxDB, maxIO int, maxMem int64, maxFx int)
 }
 
 // AcquireDBQuery consumes DB query tokens. Returns error if exhausted or timed out.
+// Tokens are only consumed on success — failed acquisitions do not leak.
 func (b *Budget) AcquireDBQuery(n int32) error {
 	if b == nil {
 		return nil
@@ -48,8 +49,14 @@ func (b *Budget) AcquireDBQuery(n int32) error {
 		return err
 	}
 	if b.maxDBQueries > 0 {
-		if b.usedDBQueries.Add(n) > b.maxDBQueries {
-			return ErrBudgetExhausted
+		for {
+			old := b.usedDBQueries.Load()
+			if old+n > b.maxDBQueries {
+				return ErrBudgetExhausted
+			}
+			if b.usedDBQueries.CompareAndSwap(old, old+n) {
+				return nil
+			}
 		}
 	} else {
 		b.usedDBQueries.Add(n)
@@ -66,8 +73,14 @@ func (b *Budget) AcquireExternalIO(n int32) error {
 		return err
 	}
 	if b.maxExternalIO > 0 {
-		if b.usedExternalIO.Add(n) > b.maxExternalIO {
-			return ErrBudgetExhausted
+		for {
+			old := b.usedExternalIO.Load()
+			if old+n > b.maxExternalIO {
+				return ErrBudgetExhausted
+			}
+			if b.usedExternalIO.CompareAndSwap(old, old+n) {
+				return nil
+			}
 		}
 	} else {
 		b.usedExternalIO.Add(n)
@@ -84,8 +97,14 @@ func (b *Budget) AcquireMemory(bytes int64) error {
 		return err
 	}
 	if b.maxMemory > 0 {
-		if b.usedMemory.Add(bytes) > b.maxMemory {
-			return ErrBudgetExhausted
+		for {
+			old := b.usedMemory.Load()
+			if old+bytes > b.maxMemory {
+				return ErrBudgetExhausted
+			}
+			if b.usedMemory.CompareAndSwap(old, old+bytes) {
+				return nil
+			}
 		}
 	} else {
 		b.usedMemory.Add(bytes)
@@ -102,8 +121,14 @@ func (b *Budget) AcquireEffect(n int32) error {
 		return err
 	}
 	if b.maxEffects > 0 {
-		if b.usedEffects.Add(n) > b.maxEffects {
-			return ErrBudgetExhausted
+		for {
+			old := b.usedEffects.Load()
+			if old+n > b.maxEffects {
+				return ErrBudgetExhausted
+			}
+			if b.usedEffects.CompareAndSwap(old, old+n) {
+				return nil
+			}
 		}
 	} else {
 		b.usedEffects.Add(n)

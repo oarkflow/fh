@@ -313,7 +313,7 @@ route "order.place" {
   authz { permissions [order:create] }
   rate_limit { limiter "limits" limit 30 window 1m }
   idempotency { header "Idempotency-Key" ttl 24h }
-  audit { action "order.place" include_request true redact [items] }
+  route_audit { action "order.place" include_request true redact [items] }
   response { omit [internal_ref] }
 }
 ```

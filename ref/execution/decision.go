@@ -3,6 +3,7 @@ package execution
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // Verdict is the composite authorization outcome.
@@ -64,13 +65,15 @@ type ConstraintSet struct {
 //   - Contradictory constraints (e.g. conflicting tenant IDs, disjoint regions) yield Deny
 //   - Obligations accumulate
 type DecisionSet struct {
-	mu          sync.Mutex
-	required    int32
-	completed   int32
-	denied      bool
-	constraints ConstraintSet
-	obligations []Obligation
-	reasons     []Reason
+	mu              sync.Mutex
+	required        int32
+	completed       int32
+	atomicCompleted atomic.Int32
+	denied          bool
+	atomicDenied    atomic.Bool
+	constraints     ConstraintSet
+	obligations     []Obligation
+	reasons         []Reason
 }
 
 var decisionSetPool = sync.Pool{
@@ -84,7 +87,9 @@ func AcquireDecisionSet(required int32) *DecisionSet {
 	ds := decisionSetPool.Get().(*DecisionSet)
 	ds.required = required
 	ds.completed = 0
+	ds.atomicCompleted.Store(0)
 	ds.denied = false
+	ds.atomicDenied.Store(false)
 	ds.constraints = ConstraintSet{}
 	ds.obligations = ds.obligations[:0]
 	ds.reasons = ds.reasons[:0]
@@ -117,6 +122,7 @@ func (ds *DecisionSet) RecordAllow(policy string, constraints []Constraint, obli
 	defer ds.mu.Unlock()
 
 	ds.completed++
+	ds.atomicCompleted.Add(1)
 	ds.reasons = append(ds.reasons, Reason{Policy: policy, Verdict: VerdictAllow})
 	ds.obligations = append(ds.obligations, obligations...)
 
@@ -135,6 +141,7 @@ func (ds *DecisionSet) RecordDeny(policy, message string) {
 	defer ds.mu.Unlock()
 
 	ds.denied = true
+	ds.atomicDenied.Store(true)
 	ds.reasons = append(ds.reasons, Reason{Policy: policy, Verdict: VerdictDeny, Message: message})
 }
 
@@ -144,13 +151,10 @@ func (ds *DecisionSet) Verdict() Verdict {
 	if ds == nil {
 		return VerdictPending
 	}
-	ds.mu.Lock()
-	defer ds.mu.Unlock()
-
-	if ds.denied {
+	if ds.atomicDenied.Load() {
 		return VerdictDeny
 	}
-	if ds.required == 0 || ds.completed >= ds.required {
+	if ds.required == 0 || ds.atomicCompleted.Load() >= ds.required {
 		return VerdictAllow
 	}
 	return VerdictPending
@@ -200,6 +204,7 @@ func (ds *DecisionSet) applyConstraint(c Constraint) {
 			} else if ds.constraints.TenantID != c.Values[0] {
 				// Contradiction detection: contradictory tenant_id constraints yield DENY
 				ds.denied = true
+				ds.atomicDenied.Store(true)
 				ds.reasons = append(ds.reasons, Reason{
 					Policy:  "constraint.algebra",
 					Verdict: VerdictDeny,
@@ -214,6 +219,7 @@ func (ds *DecisionSet) applyConstraint(c Constraint) {
 			intersected := intersectStrings(ds.constraints.Regions, c.Values)
 			if len(intersected) == 0 {
 				ds.denied = true
+				ds.atomicDenied.Store(true)
 				ds.reasons = append(ds.reasons, Reason{
 					Policy:  "constraint.algebra",
 					Verdict: VerdictDeny,
@@ -229,6 +235,7 @@ func (ds *DecisionSet) applyConstraint(c Constraint) {
 			intersected := intersectStrings(ds.constraints.Fields, c.Values)
 			if len(intersected) == 0 {
 				ds.denied = true
+				ds.atomicDenied.Store(true)
 				ds.reasons = append(ds.reasons, Reason{
 					Policy:  "constraint.algebra",
 					Verdict: VerdictDeny,

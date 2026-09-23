@@ -33,7 +33,6 @@ func AcquireStore(n int) *Store {
 	s := storePool.Get().(*Store)
 	s.count.Store(0)
 	for i := 0; i < n; i++ {
-		s.slots[i] = nil
 		s.flags[i].Store(0)
 	}
 	return s
@@ -58,12 +57,23 @@ func NewStore(n int) *Store {
 	}
 }
 
-// Put stores a typed fact value at its plan slot without pointer-to-interface heap escaping.
+// Put stores a typed fact value at its plan slot with zero-alloc box reuse.
 func Put[T any](s *Store, slot PlanSlot, value T) {
 	if s == nil || int(slot) >= len(s.slots) {
 		return
 	}
-	s.slots[slot] = value
+	// Fast path: reuse existing allocated *T box
+	if box, ok := s.slots[slot].(*T); ok && box != nil {
+		*box = value
+		if s.flags[slot].Swap(1) == 0 {
+			s.count.Add(1)
+		}
+		return
+	}
+	// First use: allocate box for future reuse
+	box := new(T)
+	*box = value
+	s.slots[slot] = box
 	if s.flags[slot].Swap(1) == 0 {
 		s.count.Add(1)
 	}
@@ -78,8 +88,18 @@ func Get[T any](s *Store, slot PlanSlot) (T, bool) {
 	if s.flags[slot].Load() == 0 {
 		return zero, false
 	}
-	value, ok := s.slots[slot].(T)
-	return value, ok
+	if box, ok := s.slots[slot].(*T); ok && box != nil {
+		return *box, true
+	}
+	if val, ok := s.slots[slot].(T); ok {
+		return val, true
+	}
+	if box, ok := s.slots[slot].(*any); ok && box != nil {
+		if val, ok := (*box).(T); ok {
+			return val, true
+		}
+	}
+	return zero, false
 }
 
 // Has reports whether a fact has been published at the given slot.

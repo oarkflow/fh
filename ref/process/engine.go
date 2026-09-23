@@ -496,6 +496,24 @@ func (e *Engine) executeWave(ctx context.Context, definition *Definition, run *R
 	return outcomes
 }
 
+// runStepSafely calls the step runner with panic recovery.
+// A panic in a step body must not crash the process engine.
+func (e *Engine) runStepSafely(ctx context.Context, run *Run, step *Step, frame Frame, input any, scope Scope) (any, error) {
+	var result any
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("ref: panic in step %q: %v", step.Name, r)
+			}
+		}()
+		result, err = e.runner.RunStep(ctx, StepCall{
+			Run: run, Step: step, Frame: frame, Intent: step.Intent, Input: input, Scope: scope,
+		})
+	}()
+	return result, err
+}
+
 // executeFrame runs one frame: a step, or a step's compensation.
 func (e *Engine) executeFrame(ctx context.Context, definition *Definition, run *Run, frame Frame) stepOutcome {
 	outcome := stepOutcome{frame: frame}
@@ -626,7 +644,6 @@ func (e *Engine) executeFrame(ctx context.Context, definition *Definition, run *
 		defer cancel()
 	}
 
-	intentName := step.Intent
 	if step.Process != "" {
 		// A child process is started rather than called: the parent parks on its
 		// completion event, so the child's own durability applies.
@@ -636,9 +653,7 @@ func (e *Engine) executeFrame(ctx context.Context, definition *Definition, run *
 		return outcome
 	}
 
-	result, err := e.runner.RunStep(runCtx, StepCall{
-		Run: run, Step: step, Frame: frame, Intent: intentName, Input: shaped, Scope: scope,
-	})
+	result, err := e.runStepSafely(runCtx, run, step, frame, shaped, scope)
 	finished := e.now()
 	state.FinishedAt = &finished
 
@@ -970,10 +985,30 @@ func (e *Engine) Snapshot(ctx context.Context, runID string) (*Snapshot, error) 
 		return nil, err
 	}
 	snapshot := &Snapshot{Run: run}
-	snapshot.Steps, _ = e.store.ListSteps(ctx, runID)
-	snapshot.Tasks, _ = e.store.ListTasks(ctx, TaskFilter{RunID: runID, Limit: 100})
-	snapshot.Timers, _ = e.store.ListTimers(ctx, runID)
-	snapshot.Subscriptions, _ = e.store.ListSubscriptions(ctx, runID)
+
+	// Collect errors from sub-queries — partial data is worse than no data
+	// for operators debugging production incidents.
+	var errs []error
+	snapshot.Steps, err = e.store.ListSteps(ctx, runID)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list steps: %w", err))
+	}
+	snapshot.Tasks, err = e.store.ListTasks(ctx, TaskFilter{RunID: runID, Limit: 100})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list tasks: %w", err))
+	}
+	snapshot.Timers, err = e.store.ListTimers(ctx, runID)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list timers: %w", err))
+	}
+	snapshot.Subscriptions, err = e.store.ListSubscriptions(ctx, runID)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list subscriptions: %w", err))
+	}
+
+	if len(errs) > 0 {
+		return snapshot, fmt.Errorf("ref: snapshot partial: %v", errs)
+	}
 	return snapshot, nil
 }
 

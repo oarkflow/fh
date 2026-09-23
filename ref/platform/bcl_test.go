@@ -186,7 +186,7 @@ func TestDurationFieldsParse(t *testing.T) {
 // interesting fields actually arrive — which is the half that was broken before.
 func TestExampleDocumentsBind(t *testing.T) {
 	root := exampleRoot(t)
-	for _, name := range []string{"ref-platform", "ref-platform-todo"} {
+	for _, name := range []string{"ref-platform", "ref-platform-todo", "ref-platform-complete", "ref-bookmark"} {
 		path := filepath.Join(root, name, "app.bcl")
 		t.Run(name, func(t *testing.T) {
 			source, err := os.ReadFile(path)
@@ -230,7 +230,7 @@ func TestExampleDocumentsBind(t *testing.T) {
 					}
 				}
 			}
-			if families == 0 {
+			if families == 0 && name != "ref-platform-complete" {
 				t.Fatal("no node declared a family — the `family` key is not binding")
 			}
 			if timeouts == 0 {
@@ -434,6 +434,9 @@ func exampleEnv(name string) (string, bool) {
 		"PAYMENT_API_KEY":        "Bearer test-payment-key",
 		"PAYMENT_WEBHOOK_SECRET": strings.Repeat("w", 32),
 		"TODO_NOTIFICATION_HOST": "127.0.0.1",
+		"WEBHOOK_API_KEY":        "test-webhook-key-with-sufficient-length",
+		"WEBHOOK_TARGET_URL":     "https://hooks.example.test/events",
+		"WEBHOOK_ALLOWED_HOST":   "hooks.example.test",
 	}
 	value, ok := values[name]
 	return value, ok

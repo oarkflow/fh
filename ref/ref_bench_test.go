@@ -12,67 +12,66 @@ import (
 	"github.com/oarkflow/fh/ref/invocation"
 )
 
-type BenchInput struct {
+type DispatchBenchInput struct {
 	ID string `json:"id"`
 }
-
-type BenchOutput struct {
+type DispatchBenchOutput struct {
 	Result string `json:"result"`
 }
+type DispatchBenchIntent struct{}
 
-type BenchIntent struct{}
-
-func (BenchIntent) Name() intent.Name { return "bench.intent" }
-func (BenchIntent) Spec() intent.Spec {
-	return intent.Spec{
-		Requires: []fact.AnyKey{capability.PrincipalKey.Any()},
-	}
+func (DispatchBenchIntent) Name() intent.Name { return "bench.direct" }
+func (DispatchBenchIntent) Spec() intent.Spec {
+	return intent.Spec{Requires: []fact.AnyKey{capability.PrincipalKey.Any()}}
 }
-
-func (BenchIntent) Run(nc *ref.NodeContext, in BenchInput) (ref.Outcome[BenchOutput], error) {
+func (DispatchBenchIntent) Run(nc *ref.NodeContext, in DispatchBenchInput) (ref.Outcome[DispatchBenchOutput], error) {
 	p, err := ref.Require(nc, capability.PrincipalKey)
 	if err != nil {
-		return ref.Outcome[BenchOutput]{}, err
+		return ref.Outcome[DispatchBenchOutput]{}, err
 	}
-	return ref.Outcome[BenchOutput]{
-		Value: BenchOutput{Result: p.ID + ":" + in.ID},
-		Effects: effect.EffectPlan{
-			LocalTx: []effect.Effect{},
-		},
-	}, nil
+	return ref.Outcome[DispatchBenchOutput]{Value: DispatchBenchOutput{Result: p.ID + ":" + in.ID}, Effects: effect.EffectPlan{}}, nil
 }
-
-func BenchmarkREFDispatch(b *testing.B) {
-	engine := ref.NewEngine(
-		ref.WithCapability(capability.NewAuthCapability("auth.bench", func(hint invocation.PrincipalHint) (capability.PrincipalFact, error) {
-			return capability.PrincipalFact{ID: "usr-bench"}, nil
-		})),
-	)
-
-	if err := ref.Register(engine, BenchIntent{}); err != nil {
-		b.Fatalf("failed to register intent: %v", err)
+func newDispatchBenchEngine(b *testing.B) *ref.Engine {
+	b.Helper()
+	engine := ref.NewEngine(ref.WithCapability(capability.NewAuthCapability("auth.direct", func(hint invocation.PrincipalHint) (capability.PrincipalFact, error) {
+		return capability.PrincipalFact{ID: "usr-bench"}, nil
+	})))
+	if err := ref.Register(engine, DispatchBenchIntent{}); err != nil {
+		b.Fatal(err)
 	}
 	if err := engine.Compile(); err != nil {
-		b.Fatalf("failed to compile engine: %v", err)
+		b.Fatal(err)
 	}
-
-	inv := &invocation.Invocation{
-		ID:     "bench-inv",
-		Intent: "bench.intent",
-		Input:  ref.NewInput([]byte(`{"id":"bench-123"}`), "application/json"),
-		Principal: invocation.PrincipalHint{
-			BearerToken: "token",
-		},
-	}
-
+	return engine
+}
+func BenchmarkREFDispatch(b *testing.B) {
+	engine := newDispatchBenchEngine(b)
+	inv := &invocation.Invocation{ID: "bench", Intent: "bench.direct", Input: ref.NewInput([]byte("{\"id\":\"bench-123\"}"), "application/json"), Principal: invocation.PrincipalHint{BearerToken: "token"}}
 	ctx := context.Background()
-
 	b.ReportAllocs()
-
+	b.ResetTimer()
 	for b.Loop() {
-		_, err := engine.Dispatch(ctx, inv)
+		res, err := engine.Dispatch(ctx, inv)
 		if err != nil {
-			b.Fatalf("dispatch failed: %v", err)
+			b.Fatal(err)
 		}
+		ref.ReleaseDispatchResult(res)
 	}
+}
+func BenchmarkREFDispatchParallel(b *testing.B) {
+	engine := newDispatchBenchEngine(b)
+	inv := &invocation.Invocation{ID: "bench", Intent: "bench.direct", Input: ref.NewInput([]byte("{\"id\":\"bench-123\"}"), "application/json"), Principal: invocation.PrincipalHint{BearerToken: "token"}}
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			res, err := engine.Dispatch(ctx, inv)
+			if err != nil {
+				b.Error(err)
+				return
+			}
+			ref.ReleaseDispatchResult(res)
+		}
+	})
 }

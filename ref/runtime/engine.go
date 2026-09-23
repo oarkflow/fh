@@ -2,8 +2,10 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/oarkflow/fh/ref/capability"
 	"github.com/oarkflow/fh/ref/effect"
@@ -15,11 +17,65 @@ import (
 	"github.com/oarkflow/fh/ref/observer"
 )
 
+var (
+	errNilInvocation = errors.New("ref: invocation is nil")
+)
+
+// effectErrorBridge adapts the observer interface to effect.EffectErrorFunc.
+type effectErrorBridge struct {
+	obs []observer.Observer
+}
+
+func (b *effectErrorBridge) report(err effect.EffectError) {
+	for _, obs := range b.obs {
+		obs.EffectCommitted(err.Name, err)
+	}
+}
+
 // DispatchResult is the transport-agnostic result of an executed intent.
 type DispatchResult struct {
 	Value   any
 	Effects effect.EffectPlan
 	Meta    intent.OutcomeMeta
+}
+
+var dispatchResultPool = sync.Pool{
+	New: func() any {
+		return &DispatchResult{}
+	},
+}
+
+// AcquireDispatchResult retrieves a pooled DispatchResult.
+func AcquireDispatchResult(val any, meta intent.OutcomeMeta) *DispatchResult {
+	res := dispatchResultPool.Get().(*DispatchResult)
+	res.Value = val
+	res.Meta = meta
+	res.Effects = effect.EffectPlan{}
+	return res
+}
+
+// ReleaseDispatchResult returns a DispatchResult to the pool.
+func ReleaseDispatchResult(res *DispatchResult) {
+	if res == nil {
+		return
+	}
+	res.Value = nil
+	res.Meta = intent.OutcomeMeta{}
+	res.Effects = effect.EffectPlan{}
+	dispatchResultPool.Put(res)
+}
+
+// compiledGeneration is the immutable state snapshot published after Compile().
+// Accessed via atomic.Pointer for lock-free reads.
+type compiledGeneration struct {
+	entries map[intent.Name]*intentEntry
+	plans   map[intent.Name]*graph.Plan
+}
+
+// intentEntry combines a compiled program and its definition to eliminate dual map lookups.
+type intentEntry struct {
+	prog *execution.Program
+	def  *intent.Definition
 }
 
 // Engine coordinates the compilation, scheduling, and effect lifecycle of intents.
@@ -34,6 +90,7 @@ type Engine struct {
 	scheduler    *execution.Scheduler
 	observers    []observer.Observer
 	compiled     bool
+	generation   atomic.Pointer[compiledGeneration]
 }
 
 // NewEngine creates a new REF engine.
@@ -97,6 +154,17 @@ func (e *Engine) Compile() error {
 	}
 
 	e.compiled = true
+
+	// Publish immutable generation for lock-free dispatch
+	gen := &compiledGeneration{
+		entries: make(map[intent.Name]*intentEntry, len(e.programs)),
+		plans:   e.plans,
+	}
+	for name, prog := range e.programs {
+		gen.entries[name] = &intentEntry{prog: prog, def: e.intentDefs[name]}
+	}
+	e.generation.Store(gen)
+
 	return nil
 }
 
@@ -231,8 +299,10 @@ func (e *Engine) compileIntent(def *intent.Definition) (*execution.Program, erro
 		if err != nil {
 			return err
 		}
-		for _, e := range fx.All() {
-			nc.RecordEffect(e)
+		if !fx.IsEmpty() {
+			for _, e := range fx.All() {
+				nc.RecordEffect(e)
+			}
 		}
 		nc.SetShortCircuitWithMeta(val, meta)
 		return nil
@@ -257,6 +327,22 @@ func (e *Engine) compileIntent(def *intent.Definition) (*execution.Program, erro
 		return nil, err
 	}
 	plan.DefToSlot = defToSlot
+
+	// Build flat O(1) lookup array from defToSlot map
+	var maxDefID fact.DefinitionID
+	for id := range defToSlot {
+		if id > maxDefID {
+			maxDefID = id
+		}
+	}
+	if maxDefID > 0 {
+		defSlots := make([]fact.PlanSlot, maxDefID+1)
+		for id, slot := range defToSlot {
+			defSlots[id] = slot
+		}
+		plan.DefSlots = defSlots
+		plan.MaxDefID = uint32(maxDefID)
+	}
 
 	return &execution.Program{
 		Plan:    plan,
@@ -346,19 +432,57 @@ func isTransitiveAncestor(g *graph.Graph, ancestor, target graph.NodeID) bool {
 }
 
 // Dispatch executes an intent by invocation input.
+// Dispatch executes an intent and commits its returned effects.
 func (e *Engine) Dispatch(ctx context.Context, inv *invocation.Invocation) (*DispatchResult, error) {
+	return e.dispatch(ctx, inv, true)
+}
+
+// DispatchPreview evaluates an intent without committing its returned effect plan.
+// It refuses plans with explicit effect nodes. Use only for trusted read-only
+// intents: Go capabilities are trusted code and cannot be made pure by inspection.
+func (e *Engine) DispatchPreview(ctx context.Context, inv *invocation.Invocation) (*DispatchResult, error) {
 	if inv == nil {
-		return nil, fmt.Errorf("ref: invocation is nil")
+		return nil, errNilInvocation
+	}
+	plan, ok := e.Plan(intent.Name(inv.Intent))
+	if !ok {
+		return nil, intent.Failure{Code: "INTENT_NOT_FOUND", Category: intent.CategoryNotFound, Message: fmt.Sprintf("ref: unknown intent %q", inv.Intent)}
+	}
+	for _, node := range plan.Nodes {
+		if node.Kind == graph.EffectNode || node.Kind == graph.AsyncEffect {
+			return nil, fmt.Errorf("ref: preview refused effect-capable intent %q", inv.Intent)
+		}
+	}
+	return e.dispatch(ctx, inv, false)
+}
+
+func (e *Engine) dispatch(ctx context.Context, inv *invocation.Invocation, commitEffects bool) (*DispatchResult, error) {
+	if inv == nil {
+		return nil, errNilInvocation
 	}
 
 	itName := intent.Name(inv.Intent)
 
-	e.mu.RLock()
-	prog, ok := e.programs[itName]
-	def := e.intentDefs[itName]
-	e.mu.RUnlock()
+	var prog *execution.Program
+	var def *intent.Definition
 
-	if !ok {
+	// Lock-free fast path: read from immutable generation
+	if gen := e.generation.Load(); gen != nil {
+		if entry, ok := gen.entries[itName]; ok {
+			prog = entry.prog
+			def = entry.def
+		}
+	}
+
+	if prog == nil {
+		// Fallback: try with read lock (pre-compilation or dynamic)
+		e.mu.RLock()
+		prog = e.programs[itName]
+		def = e.intentDefs[itName]
+		e.mu.RUnlock()
+	}
+
+	if prog == nil {
 		// Attempt dynamic compilation if not compiled yet
 		e.mu.Lock()
 		if !e.compiled {
@@ -369,13 +493,12 @@ func (e *Engine) Dispatch(ctx context.Context, inv *invocation.Invocation) (*Dis
 					e.intentDefs[itName] = defLooked
 					prog = p
 					def = defLooked
-					ok = true
 				}
 			}
 		}
 		e.mu.Unlock()
 
-		if !ok {
+		if prog == nil {
 			return nil, intent.Failure{
 				Code:     "INTENT_NOT_FOUND",
 				Category: intent.CategoryNotFound,
@@ -399,6 +522,7 @@ func (e *Engine) Dispatch(ctx context.Context, inv *invocation.Invocation) (*Dis
 	if err != nil {
 		return nil, err
 	}
+	defer execution.ReleaseOutcome(outcome)
 
 	switch outcome.State {
 	case execution.StateDenied:
@@ -408,17 +532,18 @@ func (e *Engine) Dispatch(ctx context.Context, inv *invocation.Invocation) (*Dis
 			Message:  "access denied",
 		}
 
-	case execution.StateShortCircuited:
+	case execution.StateShortCircuited, execution.StateCompleted:
 		// If effects were recorded during operation, commit them
-		if len(outcome.Effects) > 0 {
-			var fxList []effect.Effect
+		if commitEffects && len(outcome.Effects) > 0 {
+			fxList := make([]effect.Effect, 0, len(outcome.Effects))
 			for _, itm := range outcome.Effects {
 				if ef, ok := itm.(effect.Effect); ok {
 					fxList = append(fxList, ef)
 				}
 			}
 			if len(fxList) > 0 {
-				if err := effect.CommitPlan(ctx, e.effectRunner.Store(), string(inv.ID), fxList); err != nil {
+				bridge := &effectErrorBridge{obs: e.observers}
+				if err := effect.CommitPlan(ctx, e.effectRunner.Store(), string(inv.ID), fxList, bridge.report); err != nil {
 					return nil, err
 				}
 			}
@@ -429,39 +554,23 @@ func (e *Engine) Dispatch(ctx context.Context, inv *invocation.Invocation) (*Dis
 				meta = m
 			}
 		}
-		return &DispatchResult{Value: outcome.Value, Meta: meta}, nil
+		return AcquireDispatchResult(outcome.Value, meta), nil
 
 	case execution.StateFailed:
 		return nil, outcome.Err
-
-	case execution.StateCompleted:
-		if len(outcome.Effects) > 0 {
-			var fxList []effect.Effect
-			for _, itm := range outcome.Effects {
-				if ef, ok := itm.(effect.Effect); ok {
-					fxList = append(fxList, ef)
-				}
-			}
-			if len(fxList) > 0 {
-				if err := effect.CommitPlan(ctx, e.effectRunner.Store(), string(inv.ID), fxList); err != nil {
-					return nil, err
-				}
-			}
-		}
-		var meta intent.OutcomeMeta
-		if outcome.Meta != nil {
-			if m, ok := outcome.Meta.(intent.OutcomeMeta); ok {
-				meta = m
-			}
-		}
-		return &DispatchResult{Value: outcome.Value, Meta: meta}, nil
 	}
 
-	return &DispatchResult{Value: outcome.Value}, nil
+	return AcquireDispatchResult(outcome.Value, intent.OutcomeMeta{}), nil
 }
 
 // Plan returns the compiled execution plan for an intent.
 func (e *Engine) Plan(name intent.Name) (*graph.Plan, bool) {
+	if gen := e.generation.Load(); gen != nil {
+		p, ok := gen.plans[name]
+		if ok {
+			return p, true
+		}
+	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	p, ok := e.plans[name]

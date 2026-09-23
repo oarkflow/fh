@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,65 @@ import (
 	"github.com/oarkflow/fh/ref/invocation"
 	"github.com/oarkflow/fh/ref/observer"
 )
+
+var (
+	errNilPlan = errors.New("ref: cannot execute nil plan")
+)
+
+// nodePanicError is a pre-allocated error type for panics (avoids fmt.Errorf).
+type nodePanicError struct {
+	node   string
+	reason any
+}
+
+func (e *nodePanicError) Error() string {
+	return "ref: panic in node \"" + e.node + "\""
+}
+
+// execCancelCtx is a lightweight cancellable context that avoids heap allocation.
+// Uses an atomic flag instead of the full context.WithCancel machinery.
+type execCancelCtx struct {
+	context.Context
+	canceled atomic.Bool
+	done     chan struct{}
+	doneMu   sync.Mutex
+}
+
+func (c *execCancelCtx) reset(parent context.Context) {
+	c.Context = parent
+	c.canceled.Store(false)
+	c.doneMu.Lock()
+	c.done = nil
+	c.doneMu.Unlock()
+}
+
+func (c *execCancelCtx) Done() <-chan struct{} {
+	c.doneMu.Lock()
+	if c.done == nil {
+		c.done = make(chan struct{})
+		if c.canceled.Load() {
+			close(c.done)
+		}
+	}
+	done := c.done
+	c.doneMu.Unlock()
+	return done
+}
+
+func (c *execCancelCtx) cancel() {
+	c.doneMu.Lock()
+	if !c.canceled.Swap(true) && c.done != nil {
+		close(c.done)
+	}
+	c.doneMu.Unlock()
+}
+
+func (c *execCancelCtx) Err() error {
+	if c.canceled.Load() {
+		return context.Canceled
+	}
+	return c.Context.Err()
+}
 
 // ExecutionState describes how execution completed.
 type ExecutionState uint8
@@ -93,7 +153,289 @@ var (
 			return make(chan graph.NodeID, 32)
 		},
 	}
+
+	execStatePool = sync.Pool{
+		New: func() any {
+			return &execState{}
+		},
+	}
 )
+
+// execState holds shared mutable state for one execution.
+// All helper functions are methods on this struct to avoid closure heap escapes.
+type execState struct {
+	// Immutable for this execution (set once in init, read everywhere)
+	ctx       context.Context
+	inv       *invocation.Invocation
+	plan      *graph.Plan
+	runners   []NodeExecutor
+	budget    *Budget
+	scheduler *Scheduler
+	nodeCount int
+
+	// Per-execution state
+	states    []nodeState
+	facts     *fact.Store
+	decisions *DecisionSet
+	specCtx   execCancelCtx // embedded — no pointer allocation
+
+	// Completion tracking
+	completed chan graph.NodeID
+	wg        sync.WaitGroup
+	inFlight  atomic.Int32
+	start     time.Time
+
+	// Outcome state (protected by outcomeMu)
+	outcomeMu    sync.Mutex
+	hasSC        bool
+	scOut        ExecutionOutcome
+	allEffects   []any
+	errOnce      sync.Once
+	firstErr     error
+
+	// Gate tracking
+	queueMu        sync.Mutex
+	gatedMask       uint64
+	gatedOverflow   map[int]struct{}
+	readyStorage    [32]graph.NodeID
+
+	// Pooled state ownership
+	statesPtr *[]nodeState
+}
+
+var outcomePool = sync.Pool{
+	New: func() any {
+		return &ExecutionOutcome{}
+	},
+}
+
+// AcquireOutcome gets a pooled ExecutionOutcome.
+func AcquireOutcome() *ExecutionOutcome {
+	return outcomePool.Get().(*ExecutionOutcome)
+}
+
+// ReleaseOutcome returns an ExecutionOutcome to the pool.
+func ReleaseOutcome(out *ExecutionOutcome) {
+	if out == nil {
+		return
+	}
+	out.State = StateCompleted
+	out.Value = nil
+	out.Err = nil
+	out.Effects = nil
+	out.Meta = nil
+	outcomePool.Put(out)
+}
+
+// isGateEligible checks whether a dependency-ready node can run now.
+func (es *execState) isGateEligible(node *graph.Node) bool {
+	if es.decisions.Verdict() == VerdictDeny {
+		return false
+	}
+	if node.Kind == graph.DecisionNode {
+		return true
+	}
+	if node.Kind == graph.OperationNode || node.Kind == graph.EffectNode || node.Kind == graph.AsyncEffect {
+		if es.plan.HasDecisions && es.decisions.Verdict() != VerdictAllow {
+			return false
+		}
+		return true
+	}
+	switch node.Speculation {
+	case graph.NoSpeculation:
+		if es.plan.HasDecisions && es.decisions.Verdict() != VerdictAllow {
+			return false
+		}
+		return true
+	case graph.PreAuthSafe:
+		return true
+	case graph.PostIdentitySafe:
+		for _, slot := range node.Requires {
+			if !es.facts.Has(slot) {
+				return false
+			}
+		}
+		return true
+	case graph.PostPolicySafe:
+		if es.plan.HasDecisions && es.decisions.Verdict() != VerdictAllow {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// executeNode executes a single node synchronously.
+func (es *execState) executeNode(nodeID graph.NodeID) {
+	node := es.plan.Nodes[nodeID]
+
+	es.outcomeMu.Lock()
+	hasSC := es.hasSC
+	es.outcomeMu.Unlock()
+	if hasSC || es.specCtx.Err() != nil {
+		es.states[nodeID].state.Store(nsCanceled)
+		return
+	}
+
+	nc := AcquireNodeContext(
+		&es.specCtx,
+		es.inv,
+		es.facts,
+		es.budget,
+		es.decisions,
+		nodeID,
+		es.plan.DefToSlot,
+		es.plan.DefSlots,
+		es.plan.MaxDefID,
+	)
+
+	info := node.Info()
+	for _, obs := range es.scheduler.observers {
+		obs.NodeStarted(info)
+	}
+
+	var runErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				runErr = &nodePanicError{node: node.Name, reason: r}
+			}
+		}()
+		if int(nodeID) < len(es.runners) && es.runners[nodeID] != nil {
+			runErr = es.runners[nodeID](nc)
+		}
+	}()
+
+	for _, obs := range es.scheduler.observers {
+		obs.NodeFinished(info, runErr)
+	}
+
+	es.outcomeMu.Lock()
+	// Direct iteration avoids the defensive copy in nc.Effects()
+	nc.mu.Lock()
+	for _, fx := range nc.effects {
+		es.allEffects = append(es.allEffects, fx)
+	}
+	nc.mu.Unlock()
+	if sc, ok := nc.GetShortCircuit(); ok && !es.hasSC {
+		es.hasSC = true
+		es.scOut = *sc
+		es.specCtx.cancel()
+	}
+	es.outcomeMu.Unlock()
+
+	ReleaseNodeContext(nc)
+
+	if runErr != nil {
+		es.errOnce.Do(func() { es.firstErr = runErr })
+		es.states[nodeID].state.Store(nsCanceled)
+
+		if node.Kind == graph.DecisionNode && es.decisions.Verdict() == VerdictDeny {
+			es.specCtx.cancel()
+		}
+	} else {
+		es.states[nodeID].state.Store(nsComplete)
+	}
+}
+
+// launchAsync launches a node for async execution in a goroutine.
+func (es *execState) launchAsync(nodeID graph.NodeID) {
+	if !es.states[nodeID].state.CompareAndSwap(nsReady, nsRunning) {
+		return
+	}
+
+	es.inFlight.Add(1)
+	es.wg.Add(1)
+	go func() {
+		defer es.wg.Done()
+		es.executeNode(nodeID)
+		select {
+		case es.completed <- nodeID:
+		default:
+		}
+	}()
+}
+
+// checkGatedWait evaluates all waiting nodes and promotes eligible ones.
+func (es *execState) checkGatedWait(dst []graph.NodeID) []graph.NodeID {
+	es.queueMu.Lock()
+	defer es.queueMu.Unlock()
+	if es.gatedMask == 0 && (es.gatedOverflow == nil || len(es.gatedOverflow) == 0) {
+		return dst
+	}
+	for nid := 0; nid < es.nodeCount && nid < 64; nid++ {
+		bit := uint64(1) << nid
+		if es.gatedMask&bit != 0 && es.isGateEligible(es.plan.Nodes[nid]) {
+			es.gatedMask &^= bit
+			es.states[nid].state.Store(nsReady)
+			dst = append(dst, graph.NodeID(nid))
+		}
+	}
+	for nid := range es.gatedOverflow {
+		if nid >= 64 && es.isGateEligible(es.plan.Nodes[nid]) {
+			delete(es.gatedOverflow, nid)
+			es.states[nid].state.Store(nsReady)
+			dst = append(dst, graph.NodeID(nid))
+		}
+	}
+	return dst
+}
+
+// propagateDownstream decrements downstream dependency counters and collects newly ready nodes.
+func (es *execState) propagateDownstream(nodeID graph.NodeID, dst []graph.NodeID) []graph.NodeID {
+	es.queueMu.Lock()
+	defer es.queueMu.Unlock()
+	for _, downstream := range es.plan.Adjacency[nodeID] {
+		remaining := es.states[downstream].remaining.Add(-1)
+		if remaining == 0 {
+			dn := es.plan.Nodes[downstream]
+			if es.isGateEligible(dn) {
+				es.states[downstream].state.Store(nsReady)
+				dst = append(dst, downstream)
+			} else {
+				es.states[downstream].state.Store(nsBlocked)
+				if downstream < 64 {
+					es.gatedMask |= 1 << downstream
+				} else {
+					es.gatedOverflow[int(downstream)] = struct{}{}
+				}
+			}
+		}
+	}
+	return dst
+}
+
+// reportFinish notifies observers of execution completion.
+func (es *execState) reportFinish(err error) {
+	durationMs := float64(time.Since(es.start).Nanoseconds()) / 1e6
+	for _, obs := range es.scheduler.observers {
+		obs.ExecutionFinished(string(es.inv.Intent), durationMs, err)
+	}
+}
+
+// reset clears the execState for reuse via the pool.
+func (es *execState) reset() {
+	es.ctx = nil
+	es.inv = nil
+	es.plan = nil
+	es.runners = nil
+	es.budget = nil
+	es.scheduler = nil
+	es.states = nil
+	es.facts = nil
+	es.decisions = nil
+	es.hasSC = false
+	es.scOut = ExecutionOutcome{}
+	es.allEffects = es.allEffects[:0]
+	es.firstErr = nil
+	es.errOnce = sync.Once{}
+	es.inFlight.Store(0)
+	es.completed = nil
+	es.gatedMask = 0
+	es.gatedOverflow = nil
+	es.statesPtr = nil
+	es.nodeCount = 0
+}
 
 // Scheduler executes a compiled Plan using dependency readiness and explicit gate queues.
 // Dependencies determine readiness — not stage indices.
@@ -128,376 +470,237 @@ func (s *Scheduler) Execute(
 	budget *Budget,
 ) (*ExecutionOutcome, error) {
 	if plan == nil {
-		return nil, fmt.Errorf("ref: cannot execute nil plan")
+		return nil, errNilPlan
 	}
 
-	start := time.Now()
 	nodeCount := len(plan.Nodes)
 
-	// Acquire pooled nodeState slice
-	var states []nodeState
-	var statesPtr *[]nodeState
-	if nodeCount <= 32 {
-		statesPtr = statesPool.Get().(*[]nodeState)
-		states = (*statesPtr)[:nodeCount]
-		defer func() {
-			statesPool.Put(statesPtr)
-		}()
+	// Acquire pooled execState — all mutable state lives here,
+	// eliminating closure heap escapes.
+	es := execStatePool.Get().(*execState)
+	es.ctx = ctx
+	es.inv = inv
+	es.plan = plan
+	es.runners = runners
+	es.budget = budget
+	es.scheduler = s
+	es.nodeCount = nodeCount
+	es.start = time.Now()
+	es.specCtx.reset(ctx)
+	es.firstErr = nil
+	es.errOnce = sync.Once{}
+	es.hasSC = false
+	es.scOut = ExecutionOutcome{}
+	if cap(es.allEffects) > 0 {
+		es.allEffects = es.allEffects[:0]
 	} else {
-		states = make([]nodeState, nodeCount)
+		es.allEffects = nil
+	}
+	es.gatedMask = 0
+	if nodeCount > 64 {
+		es.gatedOverflow = make(map[int]struct{})
+	} else {
+		es.gatedOverflow = nil
+	}
+	es.inFlight.Store(0)
+
+	defer func() {
+		es.specCtx.cancel()
+		// Return pooled resources
+		if es.statesPtr != nil {
+			st := es.states
+			for i := range st {
+				st[i].remaining.Store(0)
+				st[i].state.Store(0)
+			}
+			statesPool.Put(es.statesPtr)
+		}
+		if es.completed != nil && nodeCount <= 32 {
+			for len(es.completed) > 0 {
+				<-es.completed
+			}
+			chanPool.Put(es.completed)
+		}
+		fact.ReleaseStore(es.facts)
+		ReleaseDecisionSet(es.decisions)
+		es.reset()
+		execStatePool.Put(es)
+	}()
+
+	// Acquire pooled nodeState slice
+	if nodeCount <= 32 {
+		es.statesPtr = statesPool.Get().(*[]nodeState)
+		es.states = (*es.statesPtr)[:nodeCount]
+	} else {
+		es.statesPtr = nil
+		es.states = make([]nodeState, nodeCount)
 	}
 
 	for i, deps := range plan.InitialDeps {
-		states[i].remaining.Store(deps)
-		states[i].state.Store(nsBlocked)
+		es.states[i].remaining.Store(deps)
+		es.states[i].state.Store(nsBlocked)
 	}
 
-	facts := fact.AcquireStore(plan.SlotCount)
-	defer fact.ReleaseStore(facts)
+	es.facts = fact.AcquireStore(plan.SlotCount)
+	es.decisions = AcquireDecisionSet(int32(plan.DecisionCount))
 
-	decisions := AcquireDecisionSet(int32(plan.DecisionCount))
-	defer ReleaseDecisionSet(decisions)
-
-	var completed chan graph.NodeID
 	if nodeCount <= 32 {
-		completed = chanPool.Get().(chan graph.NodeID)
-		defer func() {
-			for len(completed) > 0 {
-				<-completed
-			}
-			chanPool.Put(completed)
-		}()
+		es.completed = chanPool.Get().(chan graph.NodeID)
 	} else {
-		completed = make(chan graph.NodeID, nodeCount)
-	}
-
-	var errOnce sync.Once
-	var firstErr error
-	var inFlight atomic.Int32
-
-	var outcomeMu sync.Mutex
-	var shortCircuit *ExecutionOutcome
-	var allEffects []any
-
-	specCtx, specCancel := context.WithCancel(ctx)
-	defer specCancel()
-
-	var wg sync.WaitGroup
-
-	// Bitmask for gatedWait when nodeCount <= 64 (zero map allocations)
-	var gatedMask uint64
-	var queueMu sync.Mutex
-
-	// isGateEligible checks whether a dependency-ready node can run now
-	isGateEligible := func(node *graph.Node) bool {
-		if decisions.Verdict() == VerdictDeny {
-			return false
-		}
-
-		// DecisionNodes themselves make decisions; eligible when dependency-ready
-		if node.Kind == graph.DecisionNode {
-			return true
-		}
-
-		// Operations and Effects strictly require policy gate approval
-		if node.Kind == graph.OperationNode || node.Kind == graph.EffectNode || node.Kind == graph.AsyncEffect {
-			if plan.HasDecisions && decisions.Verdict() != VerdictAllow {
-				return false
-			}
-			return true
-		}
-
-		switch node.Speculation {
-		case graph.NoSpeculation:
-			// NoSpeculation requires all decisions to pass before running
-			if plan.HasDecisions && decisions.Verdict() != VerdictAllow {
-				return false
-			}
-			return true
-
-		case graph.PreAuthSafe:
-			// PreAuthSafe can run before identity or decisions are available
-			return true
-
-		case graph.PostIdentitySafe:
-			// Safe once all its required facts are published
-			for _, slot := range node.Requires {
-				if !facts.Has(slot) {
-					return false
-				}
-			}
-			return true
-
-		case graph.PostPolicySafe:
-			if plan.HasDecisions && decisions.Verdict() != VerdictAllow {
-				return false
-			}
-			return true
-		}
-
-		return false
-	}
-
-	// executeNode executes a single node synchronously
-	executeNode := func(nodeID graph.NodeID) {
-		node := plan.Nodes[nodeID]
-
-		outcomeMu.Lock()
-		hasSC := shortCircuit != nil
-		outcomeMu.Unlock()
-		if hasSC || specCtx.Err() != nil {
-			states[nodeID].state.Store(nsCanceled)
-			return
-		}
-
-		nc := AcquireNodeContext(
-			specCtx,
-			inv,
-			facts,
-			budget,
-			decisions,
-			nodeID,
-			plan.DefToSlot,
-		)
-
-		info := node.Info()
-		for _, obs := range s.observers {
-			obs.NodeStarted(info)
-		}
-
-		var runErr error
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					runErr = fmt.Errorf("ref: panic in node %q: %v", node.Name, r)
-				}
-			}()
-			if int(nodeID) < len(runners) && runners[nodeID] != nil {
-				runErr = runners[nodeID](nc)
-			}
-		}()
-
-		for _, obs := range s.observers {
-			obs.NodeFinished(info, runErr)
-		}
-
-		outcomeMu.Lock()
-		if fx := nc.Effects(); len(fx) > 0 {
-			allEffects = append(allEffects, fx...)
-		}
-		if sc, ok := nc.GetShortCircuit(); ok && shortCircuit == nil {
-			scCopy := *sc
-			shortCircuit = &scCopy
-			specCancel()
-		}
-		outcomeMu.Unlock()
-
-		ReleaseNodeContext(nc)
-
-		if runErr != nil {
-			errOnce.Do(func() { firstErr = runErr })
-			states[nodeID].state.Store(nsCanceled)
-
-			if node.Kind == graph.DecisionNode && decisions.Verdict() == VerdictDeny {
-				specCancel()
-			}
-		} else {
-			states[nodeID].state.Store(nsComplete)
-		}
-	}
-
-	var launchAsync func(nodeID graph.NodeID)
-
-	launchAsync = func(nodeID graph.NodeID) {
-		if !states[nodeID].state.CompareAndSwap(nsReady, nsRunning) {
-			return
-		}
-
-		inFlight.Add(1)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			executeNode(nodeID)
-			select {
-			case completed <- nodeID:
-			default:
-			}
-		}()
-	}
-
-	// checkGatedWait evaluates all waiting nodes and promotes eligible ones
-	checkGatedWait := func() []graph.NodeID {
-		queueMu.Lock()
-		defer queueMu.Unlock()
-
-		if gatedMask == 0 {
-			return nil
-		}
-
-		var newlyEligible []graph.NodeID
-		for nid := 0; nid < nodeCount; nid++ {
-			bit := uint64(1) << nid
-			if (gatedMask & bit) != 0 {
-				node := plan.Nodes[nid]
-				if isGateEligible(node) {
-					gatedMask &= ^bit
-					states[nid].state.Store(nsReady)
-					newlyEligible = append(newlyEligible, graph.NodeID(nid))
-				}
-			}
-		}
-		return newlyEligible
-	}
-
-	// Propagate completion of a node to its downstream neighbors
-	propagateDownstream := func(nodeID graph.NodeID) []graph.NodeID {
-		queueMu.Lock()
-		defer queueMu.Unlock()
-
-		var readyList []graph.NodeID
-		for _, downstream := range plan.Adjacency[nodeID] {
-			remaining := states[downstream].remaining.Add(-1)
-			if remaining == 0 {
-				dn := plan.Nodes[downstream]
-				if isGateEligible(dn) {
-					states[downstream].state.Store(nsReady)
-					readyList = append(readyList, downstream)
-				} else {
-					states[downstream].state.Store(nsBlocked)
-					if downstream < 64 {
-						gatedMask |= 1 << downstream
-					}
-				}
-			}
-		}
-		return readyList
+		es.completed = make(chan graph.NodeID, nodeCount)
 	}
 
 	// Seed: collect initial nodes with zero dependencies
-	queueMu.Lock()
-	var initialReady []graph.NodeID
-	for i := range states {
-		if states[i].remaining.Load() == 0 {
+	es.queueMu.Lock()
+	initialReady := es.readyStorage[:0]
+	for i := range es.states {
+		if es.states[i].remaining.Load() == 0 {
 			node := plan.Nodes[i]
-			if isGateEligible(node) {
-				states[i].state.Store(nsReady)
+			if es.isGateEligible(node) {
+				es.states[i].state.Store(nsReady)
 				initialReady = append(initialReady, graph.NodeID(i))
 			} else {
-				states[i].state.Store(nsBlocked)
+				es.states[i].state.Store(nsBlocked)
 				if i < 64 {
-					gatedMask |= 1 << i
+					es.gatedMask |= 1 << i
 				}
 			}
 		}
 	}
-	queueMu.Unlock()
+	es.queueMu.Unlock()
 
-	// Synchronous Fast-Path: if only 1 node is ready and inFlight == 0, run inline!
-	for len(initialReady) == 1 && inFlight.Load() == 0 {
-		curr := initialReady[0]
-		initialReady = nil
+	// Synchronous Fast-Path: run nodes inline when possible.
+	// Handles multi-root DAGs by running all initial ready nodes sequentially
+	// when they are independent (no goroutine overhead for linear/simple plans).
+	for len(initialReady) >= 1 && es.inFlight.Load() == 0 {
+		if len(initialReady) == 1 {
+			// Single ready node — run inline
+			curr := initialReady[0]
+			initialReady = nil
 
-		states[curr].state.Store(nsRunning)
-		executeNode(curr)
+			es.states[curr].state.Store(nsRunning)
+			es.executeNode(curr)
 
-		outcomeMu.Lock()
-		hasSC := shortCircuit != nil
-		outcomeMu.Unlock()
-		if hasSC || firstErr != nil || (plan.Nodes[curr].Kind == graph.DecisionNode && decisions.Verdict() == VerdictDeny) {
+			es.outcomeMu.Lock()
+			hasSC := es.hasSC
+			es.outcomeMu.Unlock()
+			if hasSC || es.firstErr != nil || (plan.Nodes[curr].Kind == graph.DecisionNode && es.decisions.Verdict() == VerdictDeny) {
+				goto finished
+			}
+
+			nextReady := es.propagateDownstream(curr, es.readyStorage[:0])
+			nextReady = es.checkGatedWait(nextReady)
+
+			if len(nextReady) >= 1 {
+				initialReady = nextReady
+				continue
+			}
+			// No successors — done
 			goto finished
 		}
 
-		nextReady := propagateDownstream(curr)
-		newGated := checkGatedWait()
-		if len(newGated) > 0 {
-			nextReady = append(nextReady, newGated...)
+		// Multiple ready nodes — run all sequentially inline
+		// (avoids goroutine overhead for small plans with independent roots)
+		for _, nid := range initialReady {
+			es.states[nid].state.Store(nsRunning)
+			es.executeNode(nid)
+
+			es.outcomeMu.Lock()
+			hasSC := es.hasSC
+			es.outcomeMu.Unlock()
+			if hasSC || es.firstErr != nil {
+				goto finished
+			}
 		}
 
-		if len(nextReady) == 1 {
-			initialReady = nextReady
-		} else if len(nextReady) > 1 {
-			// Fork parallel branches
-			for _, nid := range nextReady {
-				launchAsync(nid)
-			}
-			break
+		// Propagate all completed roots and collect next wave
+		nextReady := es.readyStorage[:0]
+		for _, nid := range initialReady {
+			nextReady = es.propagateDownstream(nid, nextReady)
 		}
+		nextReady = es.checkGatedWait(nextReady)
+		initialReady = nil
+
+		if len(nextReady) >= 1 {
+			initialReady = nextReady
+			continue
+		}
+		goto finished
 	}
 
-	if inFlight.Load() == 0 && len(initialReady) == 0 {
+	if es.inFlight.Load() == 0 && len(initialReady) == 0 {
 		goto finished
 	}
 
 	// Launch any remaining initial nodes concurrently
 	for _, nid := range initialReady {
-		launchAsync(nid)
+		es.launchAsync(nid)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			specCancel()
-			wg.Wait()
-			durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
-			for _, obs := range s.observers {
-				obs.ExecutionFinished(string(inv.Intent), durationMs, ctx.Err())
-			}
-			return &ExecutionOutcome{State: StateFailed, Err: ctx.Err()}, ctx.Err()
+			es.specCtx.cancel()
+			es.wg.Wait()
+			es.reportFinish(ctx.Err())
+			out := AcquireOutcome()
+			out.State = StateFailed
+			out.Err = ctx.Err()
+			return out, ctx.Err()
 
-		case nodeID := <-completed:
-			inFlight.Add(-1)
+		case nodeID := <-es.completed:
+			es.inFlight.Add(-1)
 
-			outcomeMu.Lock()
-			hasSC := shortCircuit != nil
-			outcomeMu.Unlock()
+			es.outcomeMu.Lock()
+			hasSC := es.hasSC
+			es.outcomeMu.Unlock()
 
 			if hasSC {
-				specCancel()
-				wg.Wait()
-				outcomeMu.Lock()
-				scCopy := *shortCircuit
-				scCopy.Effects = allEffects
-				outcomeMu.Unlock()
-				durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
-				for _, obs := range s.observers {
-					obs.ExecutionFinished(string(inv.Intent), durationMs, nil)
-				}
-				return &scCopy, nil
+				es.specCtx.cancel()
+				es.wg.Wait()
+				es.outcomeMu.Lock()
+				out := AcquireOutcome()
+				*out = es.scOut
+				out.Effects = es.allEffects
+				es.outcomeMu.Unlock()
+				es.reportFinish(nil)
+				return out, nil
 			}
 
-			if firstErr != nil {
-				specCancel()
-				wg.Wait()
-				durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
-				for _, obs := range s.observers {
-					obs.ExecutionFinished(string(inv.Intent), durationMs, firstErr)
+			if es.firstErr != nil {
+				es.specCtx.cancel()
+				es.wg.Wait()
+				es.reportFinish(es.firstErr)
+				out := AcquireOutcome()
+				if es.decisions.Verdict() == VerdictDeny {
+					out.State = StateDenied
+				} else {
+					out.State = StateFailed
 				}
-				if decisions.Verdict() == VerdictDeny {
-					return &ExecutionOutcome{State: StateDenied, Err: firstErr, Effects: allEffects}, firstErr
-				}
-				return &ExecutionOutcome{State: StateFailed, Err: firstErr, Effects: allEffects}, firstErr
+				out.Err = es.firstErr
+				out.Effects = es.allEffects
+				return out, es.firstErr
 			}
 
-			if plan.Nodes[nodeID].Kind == graph.DecisionNode && decisions.Verdict() == VerdictDeny {
-				specCancel()
-				wg.Wait()
-				durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
-				for _, obs := range s.observers {
-					obs.ExecutionFinished(string(inv.Intent), durationMs, nil)
-				}
-				return &ExecutionOutcome{State: StateDenied, Effects: allEffects}, nil
+			if plan.Nodes[nodeID].Kind == graph.DecisionNode && es.decisions.Verdict() == VerdictDeny {
+				es.specCtx.cancel()
+				es.wg.Wait()
+				es.reportFinish(nil)
+				out := AcquireOutcome()
+				out.State = StateDenied
+				out.Effects = es.allEffects
+				return out, nil
 			}
 
 			// Propagate to downstream
-			downstreamReady := propagateDownstream(nodeID)
-			gatedReady := checkGatedWait()
-			downstreamReady = append(downstreamReady, gatedReady...)
+			downstreamReady := es.propagateDownstream(nodeID, es.readyStorage[:0])
+			downstreamReady = es.checkGatedWait(downstreamReady)
 
 			for _, nid := range downstreamReady {
-				launchAsync(nid)
+				es.launchAsync(nid)
 			}
 
-			if inFlight.Load() == 0 {
+			if es.inFlight.Load() == 0 {
 				goto finished
 			}
 		}
@@ -505,52 +708,49 @@ func (s *Scheduler) Execute(
 
 finished:
 
-	wg.Wait()
+	es.wg.Wait()
 
-	durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
-
-	if firstErr != nil {
-		for _, obs := range s.observers {
-			obs.ExecutionFinished(string(inv.Intent), durationMs, firstErr)
+	if es.firstErr != nil {
+		es.reportFinish(es.firstErr)
+		out := AcquireOutcome()
+		if es.decisions.Verdict() == VerdictDeny {
+			out.State = StateDenied
+		} else {
+			out.State = StateFailed
 		}
-		if decisions.Verdict() == VerdictDeny {
-			return &ExecutionOutcome{State: StateDenied, Err: firstErr, Effects: allEffects}, firstErr
-		}
-		return &ExecutionOutcome{State: StateFailed, Err: firstErr, Effects: allEffects}, firstErr
+		out.Err = es.firstErr
+		out.Effects = es.allEffects
+		return out, es.firstErr
 	}
 
-	queueMu.Lock()
-	stuckGated := gatedMask != 0
-	queueMu.Unlock()
+	es.queueMu.Lock()
+	stuckGated := es.gatedMask != 0
+	es.queueMu.Unlock()
 
-	if stuckGated || decisions.Verdict() == VerdictDeny {
-		outcome := &ExecutionOutcome{State: StateDenied, Effects: allEffects}
-		for _, obs := range s.observers {
-			obs.ExecutionFinished(string(inv.Intent), durationMs, nil)
-		}
+	if stuckGated || es.decisions.Verdict() == VerdictDeny {
+		outcome := AcquireOutcome()
+		outcome.State = StateDenied
+		outcome.Effects = es.allEffects
+		es.reportFinish(nil)
 		return outcome, nil
 	}
 
-	outcomeMu.Lock()
-	if shortCircuit != nil {
-		scCopy := *shortCircuit
-		scCopy.Effects = allEffects
-		outcomeMu.Unlock()
-		for _, obs := range s.observers {
-			obs.ExecutionFinished(string(inv.Intent), durationMs, nil)
-		}
-		return &scCopy, nil
+	es.outcomeMu.Lock()
+	if es.hasSC {
+		out := AcquireOutcome()
+		*out = es.scOut
+		out.Effects = es.allEffects
+		es.outcomeMu.Unlock()
+		es.reportFinish(nil)
+		return out, nil
 	}
-	outcomeMu.Unlock()
+	es.outcomeMu.Unlock()
 
-	finalOutcome := &ExecutionOutcome{
-		State:   StateCompleted,
-		Effects: allEffects,
-	}
+	finalOutcome := AcquireOutcome()
+	finalOutcome.State = StateCompleted
+	finalOutcome.Effects = es.allEffects
 
-	for _, obs := range s.observers {
-		obs.ExecutionFinished(string(inv.Intent), durationMs, nil)
-	}
+	es.reportFinish(nil)
 
 	return finalOutcome, nil
 }

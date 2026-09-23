@@ -24,10 +24,11 @@ func TestMemoryStoreConformance(t *testing.T) {
 }
 
 func TestSQLStoreConformance(t *testing.T) {
-	// This package imports no SQL driver on purpose — ref/platform's own tests run
-	// the SQL store against whatever driver the application brought. Skipping with
-	// a reason beats a test that silently covers nothing.
-	t.Skip("the SQL store is exercised from ref/platform, which has a driver imported")
+	// This package imports no SQL driver on purpose — the SQLite conformance
+	// suite lives in store_sql_test.go with modernc.org/sqlite imported.
+	// MySQL conformance should be added in a separate build-tagged file when
+	// a MySQL driver is available.
+	t.Skip("SQL store conformance is in store_sql_test.go (SQLite) and platform's own tests (MySQL/Postgres)")
 }
 
 func runStoreConformance(t *testing.T, open func(*testing.T) Store) {

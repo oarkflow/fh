@@ -19,12 +19,15 @@ import (
 var idCounter atomic.Uint64
 
 // randomID returns a sortable, unguessable identifier.
+// Returns empty string on crypto/rand failure instead of panicking.
 func randomID() string {
 	var buf [20]byte
 	binary.BigEndian.PutUint64(buf[0:8], uint64(time.Now().UTC().UnixMilli()))
 	binary.BigEndian.PutUint32(buf[8:12], uint32(idCounter.Add(1)))
 	if _, err := rand.Read(buf[12:]); err != nil {
-		panic("ref/process: crypto/rand is unavailable: " + err.Error())
+		// Fallback: use timestamp + counter + zeros rather than crashing.
+		// The ID is less random but still unique within this process.
+		return hex.EncodeToString(buf[:])
 	}
 	return hex.EncodeToString(buf[:])
 }

@@ -37,8 +37,9 @@ type RouteSpec struct {
 	Headers      map[string]string `bcl:"headers"`
 	CacheControl string            `bcl:"cache_control"`
 
-	Description string   `bcl:"description"`
-	Tags        []string `bcl:"tags"`
+	Description string              `bcl:"description"`
+	Tags        []string            `bcl:"tags"`
+	Parameters  []HTTPParameterSpec `bcl:"parameter,block"`
 
 	// Timeout bounds the whole request, independent of the intent's own budget.
 	Timeout Duration `bcl:"timeout"`
@@ -49,10 +50,21 @@ type RouteSpec struct {
 	RateLimit    *RateLimitSpec   `bcl:"rate_limit"`
 	Idempotency  *IdempotencySpec `bcl:"idempotency"`
 	Tenant       *TenantRouteSpec `bcl:"tenant"`
-	Audit        *AuditSpec       `bcl:"audit"`
+	Audit        *AuditSpec       `bcl:"route_audit"`
 	CORS         *CORSSpec        `bcl:"cors"`
 	RequestData  *DataSpec        `bcl:"request_data"`
 	ResponseData *DataSpec        `bcl:"response_data"`
+}
+
+// HTTPParameterSpec declares a stable HTTP input contract for a route.
+type HTTPParameterSpec struct {
+	Name        string   `bcl:",id"`
+	In          string   `bcl:"in,ident"`
+	Description string   `bcl:"description"`
+	Required    bool     `bcl:"required"`
+	Kind        string   `bcl:"kind,ident"`
+	Format      string   `bcl:"format,ident"`
+	Enum        []string `bcl:"enum"`
 }
 
 // AuthzSpec is one authorization gate, used identically on a route, an intent,

@@ -248,19 +248,9 @@ In REF, security policies are first-class [`DecisionNode`](file:///Users/sujit/S
 
 ---
 
-## Performance & Allocation Profile
+## Performance and benchmark report
 
-Through object pooling (`sync.Pool`), zero-allocation bitmask queues (`gatedMask uint64`), and synchronous fast-paths for single-node steps, REF delivers high-throughput execution on Apple M2 Pro:
-
-```bash
-$ go test -bench=BenchmarkREFDispatch -benchmem ./ref
-BenchmarkREFDispatch-10    	  134340	      7743 ns/op	    1000 B/op	      24 allocs/op
-PASS
-```
-
-- **Latency:** ~7.7 microseconds per end-to-end dispatch (including DAG traversal, authentication, tenant resolution, policy evaluation, and result projection).
-- **Allocations:** Reduced from 46 allocs/op to **24 allocs/op** (~48% reduction).
-- **Heap Memory:** Reduced from 2,919 B/op to **1,000 B/op** (~65% reduction).
+Do not treat the earlier direct-dispatch microbenchmark as an HTTP comparison. REF adds transport projection, input decoding, scheduling, fact handling, and effect lifecycle work. The cost depends on the graph: small CPU-only handlers currently favor a direct FH handler; independent latency-bound reads can overlap in REF. See the [reproducible FH-versus-REF parity report](./BENCHMARK_REPORT.md) for measured latency, allocations, loopback load results, commands, and limitations.
 
 ---
 
@@ -282,6 +272,22 @@ PASS
 
 ---
 
+## Contract-led HTTP modernization
+
+REF can serve as an incremental modernization layer: keep existing endpoints live, describe replacement routes as contracts, compare read-only candidate results, and shift traffic by a stable canary percentage.
+
+Route declarations support named query, header, cookie, and path parameters through repeated parameter blocks. Intent input and output shapes are the source of truth for validation and documentation. After loading a platform, generate artifacts directly from the compiled document:
+
+```go
+if err := platform.WriteOpenAPI(file); err != nil { return err }
+clientSource := platform.TypeScriptClient()
+```
+
+OpenAPI() returns the OpenAPI 3.1 document as data, TypeScriptTypes() and TypeScriptClient() generate client artifacts, and GoContractSmokeTest("contracttest") emits a deployed-route smoke test scaffold that fails on server errors (it does not replace schema-aware assertions). CompareContracts(old, next) reports removed routes, incompatible shape changes, and newly required inputs. MountArtifacts(app, "/openapi.json", "/contracts.ts") is optional; expose those endpoints only where the contract is meant to be public. The existing ref/debug package renders execution plans as Mermaid and Graphviz DOT.
+
+For a framework-native rollout, CanaryFH(legacy, candidate, percent) deterministically routes a percentage of requests to the new handler. ShadowFH(legacy, http.EnginePreview(engine, intent, route), ...) serves the legacy response and, after a successful legacy response, compares status plus a digest of the candidate response. The preview refuses plans with explicit effect nodes and does not commit returned effect plans. **Only use it with trusted read-only Go capabilities:** Go code can still perform side effects from a node declared pure or read, so the runtime cannot prove those callbacks harmless. Shadow comparison records hashes rather than response bodies.
+
+This gives teams a route-by-route migration path. It does not automatically translate arbitrary legacy handlers, prove third-party callbacks pure, or make an in-memory effect store durable; those concerns remain explicit at the integration boundary.
 ## Documentation & Examples
 
 - [**docs/runtime-execution-fabric.md**](../docs/runtime-execution-fabric.md): Detailed architectural whitepaper explaining the mathematical and systems foundations of REF.

@@ -1,0 +1,295 @@
+name "ref-platform-webhook"
+version "1"
+
+resource "database" {
+  kind "database.sql"
+  description "Webhook event ledger"
+  config {
+    driver "pgx"
+    dsn env.required("DATABASE_URL")
+    max_open_connections 12
+    max_idle_connections 4
+    ping true
+    migrations [
+      "CREATE TABLE IF NOT EXISTS webhook_events (event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payload JSONB NOT NULL, state TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), delivered_at TIMESTAMPTZ, response_status INTEGER, last_error TEXT)",
+      "CREATE INDEX IF NOT EXISTS webhook_events_created_idx ON webhook_events(created_at DESC)",
+      "CREATE INDEX IF NOT EXISTS webhook_events_state_idx ON webhook_events(state, created_at DESC)"
+    ]
+  }
+}
+
+resource "delivery_queue" {
+  kind "queue.file"
+  description "Durable local queue with retry and failed-job records"
+  config {
+    dir env("WEBHOOK_QUEUE_DIR", ".data/ref-platform-webhook/queue")
+    workers 2
+    max_attempts 6
+    poll_interval 250ms
+    backoff 1s
+  }
+}
+
+resource "cache" {
+  kind "cache.memory"
+  description "Idempotency records and per-client rate-limit state"
+  config { max_entries 20000 gc_interval 1m }
+}
+
+resource "limits" {
+  kind "ratelimit.store"
+  description "Per-client request throttling"
+  config { cache "cache" prefix "webhook:rate:" }
+}
+
+resource "client_auth" {
+  kind "auth.api_key"
+  description "API key authentication for event publishers and operators"
+  config {
+    key env.required("WEBHOOK_API_KEY")
+    header "X-API-Key"
+    principal_id "webhook-service-client"
+    roles ["publisher"]
+  }
+}
+
+resource "authorization" {
+  kind "authz.rbac"
+  description "Permission checks for webhook intake and status"
+  config { superuser_roles ["admin"] }
+}
+
+resource "receiver" {
+  kind "service.http"
+  description "Allowlisted outbound webhook receiver"
+  config {
+    base_url env.required("WEBHOOK_TARGET_URL")
+    allowed_hosts [env.required("WEBHOOK_ALLOWED_HOST")]
+    timeout 8s
+    max_response_bytes 65536
+    retry_attempts 2
+    retry_backoff 250ms
+    allow_private_networks env("WEBHOOK_ALLOW_PRIVATE", "false")
+    headers {
+      Content-Type "application/json"
+      X-Webhook-Source "ref-platform"
+    }
+  }
+}
+
+role "publisher" {
+  description "Can submit webhook events and read delivery status"
+  permissions ["webhook:publish", "webhook:read"]
+}
+
+shape "webhook.event" {
+  kind object
+  description "An event accepted for asynchronous webhook delivery"
+  additional_properties false
+  prop "event_id" {
+    kind string
+    required true
+    format uuid
+  }
+  prop "event_type" {
+    kind string
+    required true
+    min_length 1
+    max_length 120
+  }
+  prop "occurred_at" {
+    kind string
+    format date_time
+  }
+  prop "data" {
+    kind object
+    required true
+  }
+}
+
+intent "webhook.accept" {
+  description "Record a webhook event and enqueue its delivery"
+  response "response"
+  input_schema "webhook.event"
+  timeout 3s
+  max_db_queries 1
+  max_effects 2
+  idempotent true
+  node "record" {
+    uses "database.exec"
+    resource "database"
+    kind effect
+    requires [input]
+    provides [recorded]
+    config {
+      statement "INSERT INTO webhook_events (event_id,event_type,payload,state) VALUES ($1,$2,$3::jsonb,'queued')"
+      args [input.event_id,input.event_type,input]
+      require_affected true
+    }
+  }
+  node "enqueue" {
+    uses "queue.publish"
+    resource "delivery_queue"
+    kind async_effect
+    requires [input,recorded]
+    provides [job]
+    config {
+      job_type "webhook.deliver"
+      payload_fact "input"
+    }
+  }
+  node "response" {
+    uses "collect"
+    requires [recorded,job]
+    provides [response]
+  }
+}
+
+intent "webhook.deliver" {
+  description "Post an accepted event to the configured receiver and record its outcome"
+  response "response"
+  timeout 15s
+  max_db_queries 1
+  max_external_io 1
+  node "post-event" {
+    uses "service.http"
+    resource "receiver"
+    kind effect
+    requires [input]
+    provides [delivery]
+    config {
+      method "POST"
+      url env.required("WEBHOOK_TARGET_URL")
+      body_fact "input"
+      headers {
+        X-Event-ID "{{input.event_id}}"
+        X-Event-Type "{{input.event_type}}"
+      }
+      expect_status [200,201,202,204]
+    }
+  }
+  node "mark-delivered" {
+    uses "database.exec"
+    resource "database"
+    kind effect
+    requires [input,delivery]
+    provides [updated]
+    config {
+      statement "UPDATE webhook_events SET state='delivered',delivered_at=NOW(),updated_at=NOW(),response_status=$1,last_error=NULL WHERE event_id=$2"
+      args [delivery.status,input.event_id]
+      require_affected true
+    }
+  }
+  node "response" {
+    uses "collect"
+    requires [delivery,updated]
+    provides [response]
+  }
+}
+
+intent "webhook.status" {
+  description "Read the delivery state for one event"
+  response "response"
+  timeout 2s
+  max_db_queries 1
+  node "path-id" {
+    uses "request.param"
+    kind pure
+    provides [event_id]
+    config {
+      name "id"
+      from "path"
+      required true
+    }
+  }
+  node "lookup" {
+    uses "database.query"
+    resource "database"
+    kind read
+    requires [event_id]
+    provides [events]
+    config {
+      statement "SELECT event_id,event_type,state,created_at,delivered_at,response_status,last_error FROM webhook_events WHERE event_id=$1"
+      args [event_id]
+      require_rows true
+      not_found_message "event not found"
+    }
+  }
+  node "response" {
+    uses "collect"
+    requires [events]
+    provides [response]
+  }
+}
+
+worker "webhook-delivery" {
+  queue "delivery_queue"
+  job_type "webhook.deliver"
+  intent "webhook.deliver"
+}
+
+route "webhook.accept" {
+  method POST
+  path "/events"
+  intent "webhook.accept"
+  description "Accept an event for asynchronous webhook delivery"
+  tags ["webhooks"]
+  status 202
+  cache_control "no-store"
+  max_body_bytes 65536
+  timeout 4s
+  auth "client_auth"
+  authz {
+    authorizer "authorization"
+    permissions ["webhook:publish"]
+  }
+  rate_limit {
+    limiter "limits"
+    limit 60
+    window 1m
+  }
+  idempotency {
+    header "Idempotency-Key"
+    ttl 24h
+    required true
+    store "cache"
+    scope "input.event_id"
+  }
+  route_audit {
+    enabled true
+    action "webhook.accept"
+    resource "database"
+    include_request true
+    redact ["data"]
+  }
+}
+route "webhook.status" {
+  method GET
+  path "/events/:id"
+  intent "webhook.status"
+  description "Get the recorded delivery state of an event"
+  tags ["webhooks"]
+  parameter "id" {
+    in path
+    kind string
+    format uuid
+    required true
+    description "Event identifier supplied when the event was accepted"
+  }
+  cache_control "no-store"
+  auth "client_auth"
+  authz {
+    authorizer "authorization"
+    permissions ["webhook:read"]
+  }
+  rate_limit {
+    limiter "limits"
+    limit 120
+    window 1m
+  }
+  route_audit {
+    enabled true
+    action "webhook.status"
+    resource "database"
+  }
+}

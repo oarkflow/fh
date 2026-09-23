@@ -27,6 +27,8 @@ type NodeContext struct {
 	decisions    *DecisionSet
 	nodeID       graph.NodeID
 	defToSlot    map[fact.DefinitionID]fact.PlanSlot
+	defSlots     []fact.PlanSlot // flat array indexed by DefinitionID for O(1) lookup
+	maxDefID     uint32          // size of defSlots array
 
 	mu      sync.Mutex
 	effects []any
@@ -49,6 +51,8 @@ func AcquireNodeContext(
 	decisions *DecisionSet,
 	nodeID graph.NodeID,
 	defToSlot map[fact.DefinitionID]fact.PlanSlot,
+	defSlots []fact.PlanSlot,
+	maxDefID uint32,
 ) *NodeContext {
 	nc := nodeContextPool.Get().(*NodeContext)
 	nc.Context = ctx
@@ -58,6 +62,8 @@ func AcquireNodeContext(
 	nc.decisions = decisions
 	nc.nodeID = nodeID
 	nc.defToSlot = defToSlot
+	nc.defSlots = defSlots
+	nc.maxDefID = maxDefID
 	nc.effects = nc.effects[:0]
 	nc.hasSC = false
 	return nc
@@ -74,6 +80,8 @@ func ReleaseNodeContext(nc *NodeContext) {
 	nc.budget = nil
 	nc.decisions = nil
 	nc.defToSlot = nil
+	nc.defSlots = nil
+	nc.maxDefID = 0
 	nc.hasSC = false
 	nc.scOut.Value = nil
 	nc.scOut.Meta = nil
@@ -90,6 +98,8 @@ func NewNodeContext(
 	decisions *DecisionSet,
 	nodeID graph.NodeID,
 	defToSlot map[fact.DefinitionID]fact.PlanSlot,
+	defSlots []fact.PlanSlot,
+	maxDefID uint32,
 ) *NodeContext {
 	return &NodeContext{
 		Context:    ctx,
@@ -99,6 +109,8 @@ func NewNodeContext(
 		decisions:  decisions,
 		nodeID:     nodeID,
 		defToSlot:  defToSlot,
+		defSlots:   defSlots,
+		maxDefID:   maxDefID,
 	}
 }
 
@@ -218,7 +230,15 @@ func RequireFact[T any](nc *NodeContext, slot fact.PlanSlot) (T, error) {
 
 // SlotOf finds the plan slot mapped to the given fact DefinitionID.
 func (nc *NodeContext) SlotOf(id fact.DefinitionID) (fact.PlanSlot, bool) {
-	if nc == nil || nc.defToSlot == nil {
+	if nc == nil {
+		return 0, false
+	}
+	// Fast path: flat slice O(1) lookup
+	if nc.defSlots != nil && uint32(id) <= nc.maxDefID && uint32(id) > 0 {
+		return nc.defSlots[id], true
+	}
+	// Fallback: map lookup
+	if nc.defToSlot == nil {
 		return 0, false
 	}
 	s, ok := nc.defToSlot[id]

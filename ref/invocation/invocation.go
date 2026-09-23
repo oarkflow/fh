@@ -39,6 +39,15 @@ func NewInput(raw []byte, contentType string) Input {
 	}
 }
 
+// NewInputDirect creates an Input without cloning the byte slice.
+// Callers must not mutate raw while the invocation is in flight.
+func NewInputDirect(raw []byte, contentType string) Input {
+	return Input{
+		raw:         raw,
+		contentType: contentType,
+	}
+}
+
 // Bytes returns a copy of the raw input. Callers cannot mutate the original.
 func (i Input) Bytes() []byte       { return bytes.Clone(i.raw) }
 // RawBytes returns the internal byte slice without cloning. For read-only operations.
@@ -113,6 +122,19 @@ func NewHTTPMeta(method, path, route, host string, headers, query map[string][]s
 		Headers: clonedHeaders,
 		Query:   clonedQuery,
 		Params:  maps.Clone(params),
+	}
+}
+
+// NewHTTPMetaDirect creates an HTTPMeta taking ownership of maps without re-cloning.
+func NewHTTPMetaDirect(method, path, route, host string, headers, query map[string][]string, params map[string]string) HTTPMeta {
+	return HTTPMeta{
+		Method:  method,
+		Path:    path,
+		Route:   route,
+		Host:    host,
+		Headers: headers,
+		Query:   query,
+		Params:  params,
 	}
 }
 

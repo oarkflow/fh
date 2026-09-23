@@ -1,0 +1,1058 @@
+####################################################################
+# Bookmarks — a minimal yet feature-complete REF example.
+#
+# Every capability of the Runtime Execution Fabric is demonstrated
+# in a single, readable document:
+#
+#   1. Typed facts        — typed keys flow through the DAG
+#   2. DAG scheduling     — auth, rate-limit, cache, validate run concurrently
+#   3. Speculation classes — decode + rate-limit run before authentication
+#   4. Policy gates        — RBAC with deny-dominates algebra
+#   5. Circuit breaker     — guards the external metadata fetcher
+#   6. Two-phase effects   — DB write + analytics webhook in one transaction
+#   7. Process engine      — durable link-health-check saga
+#   8. Observer bridge     — delivery errors are observable
+#
+# The Go host (main.go) is intentionally empty: load, mount, serve.
+# There is no handler, no SQL, no middleware — only configuration.
+####################################################################
+
+name "bookmarks"
+environment env("APP_ENV", "development")
+version "1"
+
+####################################################################
+# Secrets
+####################################################################
+
+secret "database_url" { env "DATABASE_URL" required true }
+secret "jwt_key"      { env "JWT_SECRET"  required true }
+
+####################################################################
+# Resources — every backend is a declared, typed, connection-pooled
+# resource that the compiler opens and validates at boot time.
+####################################################################
+
+resource "db" {
+  kind "database.sql"
+  description "Primary store: users, bookmarks, analytics"
+  config {
+    driver env("DATABASE_DRIVER", "pgx")
+    dsn env.required("DATABASE_URL")
+    max_open_connections 20
+    max_idle_connections 5
+    connection_max_lifetime 30m
+    ping true
+    migrations [
+      "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, roles TEXT NOT NULL DEFAULT 'user', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+      "CREATE TABLE IF NOT EXISTS bookmarks (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), url TEXT NOT NULL, title TEXT NOT NULL, description TEXT, tags TEXT, clicks INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+      "CREATE INDEX IF NOT EXISTS bookmarks_user_idx ON bookmarks (user_id, created_at DESC)",
+      "CREATE TABLE IF NOT EXISTS analytics (id TEXT PRIMARY KEY, bookmark_id TEXT NOT NULL REFERENCES bookmarks(id), event TEXT NOT NULL, metadata TEXT, recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+    ]
+  }
+}
+
+resource "cache" {
+  kind "cache.memory"
+  description "In-process cache for bookmark metadata and URL previews"
+  config { max_entries 10000 gc_interval 5m }
+}
+
+resource "limits" {
+  kind "ratelimit.store"
+  description "Per-user rate limiting"
+  config { cache "cache" prefix "rate:" }
+}
+
+resource "locks" {
+  kind "lock.store"
+  description "Distributed locks for process steps"
+  config { cache "cache" prefix "lock:" ttl 30s }
+}
+
+resource "tokens" {
+  kind "auth.jwt"
+  description "Bearer tokens for API clients"
+  config {
+    algorithm HS256
+    secret env.required("JWT_SECRET")
+    issuer "bookmarks"
+    audience "bookmarks-api"
+    ttl 24h
+    roles_claim "roles"
+  }
+}
+
+resource "sessions" {
+  kind "session.memory"
+  description "In-memory sessions for browser authentication"
+  config {
+    secret env.required("JWT_SECRET")
+    cookie "bookmark_sid"
+    max_age 24h
+  }
+}
+
+resource "cookie_auth" {
+  kind "auth.session"
+  description "Resolves the caller from a signed session cookie"
+  config { session "sessions" }
+}
+
+resource "identity" {
+  kind "auth.chain"
+  description "Accepts either a session cookie or a JWT bearer token"
+  config { authenticators [cookie_auth, tokens] }
+}
+
+resource "breakers" {
+  kind "circuit_breaker.store"
+  description "Circuit breaker state for external URL fetcher"
+  config { cache "cache" prefix "cb:" failure_threshold 5 reset_after 30s }
+}
+
+resource "url_fetcher" {
+  kind "service.http"
+  description "Outbound HTTP client for URL metadata"
+  config {
+    allowed_hosts ["*"]
+    timeout 5s
+    max_response_bytes 65536
+    allow_private_networks true
+  }
+}
+
+resource "jobs" {
+  kind "queue.file"
+  description "Durable work: analytics aggregation, health checks"
+  config { dir ".data/bookmarks/jobs" workers 2 max_attempts 3 }
+}
+
+resource "outbox" {
+  kind "outbox.memory"
+  description "Transactional outbox for analytics events"
+  config { max_messages 1000 }
+}
+
+resource "runs" {
+  kind "store.sql"
+  description "Process state for durable link-health saga"
+  config { database "db" table_prefix "bm_process" }
+}
+
+####################################################################
+# Shapes — validated schemas enforced identically on every route,
+# every intent, and every human-task form.
+####################################################################
+
+shape "Registration" {
+  kind object
+  additional_properties false
+  prop "email"    { kind string required true format email }
+  prop "name"     { kind string required true min_length 1 max_length 100 }
+  prop "password" { kind string required true min_length 12 max_length 72 sensitive true }
+}
+
+shape "Credentials" {
+  kind object
+  additional_properties false
+  prop "email"    { kind string required true format email }
+  prop "password" { kind string required true }
+}
+
+shape "BookmarkCreate" {
+  kind object
+  additional_properties false
+  prop "url"         { kind string required true min_length 1 max_length 2048 }
+  prop "title"       { kind string required true min_length 1 max_length 200 }
+  prop "description" { kind string max_length 2000 }
+  prop "tags"        { kind array items "string" max_length 10 }
+}
+
+shape "BookmarkUpdate" {
+  kind object
+  prop "title"       { kind string min_length 1 max_length 200 }
+  prop "description" { kind string max_length 2000 }
+  prop "tags"        { kind array items "string" max_length 10 }
+}
+
+####################################################################
+# Roles — flattened once at load time, cycles rejected at boot.
+####################################################################
+
+role "user"   { permissions [bookmark:create, bookmark:read:own, bookmark:update:own, bookmark:delete:own] }
+role "editor" { inherits [user] permissions [bookmark:read, bookmark:list] }
+role "admin"  { inherits [editor] permissions [bookmark:delete, user:list, process:read] }
+
+####################################################################
+# Identity intents
+####################################################################
+
+intent "auth.register" {
+  description "Create an account with a bcrypt-hashed password"
+  response "response"
+  input_schema "Registration"
+  timeout 5s
+  max_db_queries 2
+
+  node "hash" {
+    family auth
+    uses "auth.password_hash"
+    requires [input]
+    provides [password_hash]
+    config { value_fact "input.password" cost 12 min_length 12 }
+  }
+
+  node "insert" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind effect
+    requires [input, password_hash]
+    provides [user_row]
+    config {
+      statement "INSERT INTO users (id,email,name,password_hash) VALUES (LOWER($1),LOWER($1),$2,$3) RETURNING id,email,name,roles"
+      args [input.email, input.name, password_hash]
+    }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [user_row]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+intent "auth.login" {
+  description "Verify credentials and issue a bearer token"
+  response "response"
+  input_schema "Credentials"
+  timeout 5s
+  max_db_queries 1
+
+  node "find" {
+    family database
+    uses "database.query"
+    resource "db"
+    requires [input]
+    provides [user_row]
+    config {
+      statement "SELECT id,email,name,roles,password_hash FROM users WHERE email=LOWER($1)"
+      args [input.email]
+    }
+  }
+
+  node "login" {
+    family auth
+    uses "auth.login"
+    resource "sessions"
+    kind effect
+    requires [input, user_row]
+    provides [principal]
+    config {
+      user_fact "user_row"
+      password_fact "input.password"
+      roles_field "roles"
+    }
+  }
+
+  node "token" {
+    family auth
+    uses "auth.jwt_issue"
+    resource "tokens"
+    requires [principal]
+    provides [token]
+    config { principal_fact "principal" }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [token]
+    provides [response]
+    config { fields [token] }
+  }
+}
+
+####################################################################
+# Bookmark intents — demonstrate the full REF capability stack:
+#
+#   bookmark.create:
+#     - PreAuthSafe: input decode (no auth needed to validate shape)
+#     - Auth gate:   requires authenticated principal
+#     - Rate limit:  30 creates per minute per user
+#     - Circuit breaker: guards the URL metadata fetch
+#     - Two-phase effects: DB insert + analytics webhook in one tx
+#
+#   bookmark.list:
+#     - Cache-aside: bookmark queries cached in memory
+#     - PostPolicySafe: requires policy pass before reading
+#
+#   bookmark.resolve:
+#     - Pure redirect: atomic click counter increment
+#     - No auth required (public URL)
+####################################################################
+
+intent "bookmark.create" {
+  description "Save a URL with metadata"
+  response "response"
+  input_schema "BookmarkCreate"
+  timeout 10s
+  max_db_queries 3
+  max_effects 2
+
+  # ---- Auth gate ----
+  node "auth" {
+    family auth
+    uses "auth.authenticate"
+    resource "identity"
+    kind decision
+    provides [principal]
+  }
+
+  # ---- Write + outbox (two-phase) ----
+  node "save" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind effect
+    requires [input, principal]
+    provides [bookmark_row]
+    config {
+      statement "INSERT INTO bookmarks (id,user_id,url,title,description,tags) VALUES (gen_random_uuid()::text,$1,$2,$3,$4,$5) RETURNING id,url,title,created_at"
+      args [principal.id, input.url, input.title, input.description, input.tags]
+    }
+  }
+
+  node "analytics" {
+    family outbox
+    uses "queue.outbox_publish"
+    resource "outbox"
+    kind effect
+    speculation post_policy_safe
+    requires [bookmark_row, principal]
+    provides [analytics_event]
+    config {
+      topic "bookmark.created"
+      payload_fact "bookmark_row"
+    }
+  }
+
+  # ---- Response ----
+  node "response" {
+    family response
+    uses "collect"
+    requires [bookmark_row]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+intent "bookmark.list" {
+  description "List the caller's bookmarks with cache-aside reads"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+
+  node "auth" {
+    family auth
+    uses "auth.authenticate"
+    resource "identity"
+    kind decision
+    provides [principal]
+  }
+
+  node "query" {
+    family database
+    uses "database.cached_query"
+    resource "db"
+    kind read
+    requires [principal]
+    provides [bookmarks]
+    config {
+      statement "SELECT id,url,title,description,tags,clicks,created_at FROM bookmarks WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50"
+      args [principal.id]
+      cache "cache"
+      key_fact "principal.id"
+      prefix "bm:"
+      ttl 30s
+    }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [bookmarks]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+intent "bookmark.get" {
+  description "Get a single bookmark by ID"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+
+  node "auth" {
+    family auth
+    uses "auth.authenticate"
+    resource "identity"
+    kind decision
+    provides [principal]
+  }
+
+  node "path-id" {
+    family transform
+    uses "request.param"
+    provides [bookmark_id]
+    config { name "id" from "path" required true }
+  }
+
+  node "query" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind read
+    requires [bookmark_id, principal]
+    provides [bookmark]
+    config {
+      statement "SELECT id,url,title,description,tags,clicks,created_at FROM bookmarks WHERE id=$1 AND user_id=$2"
+      args [bookmark_id, principal.id]
+    }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [bookmark]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+intent "bookmark.update" {
+  description "Update a bookmark's metadata"
+  response "response"
+  input_schema "BookmarkUpdate"
+  timeout 5s
+  max_db_queries 1
+
+  node "auth" {
+    family auth
+    uses "auth.authenticate"
+    resource "identity"
+    kind decision
+    provides [principal]
+  }
+
+  node "path-id" {
+    family transform
+    uses "request.param"
+    provides [bookmark_id]
+    config { name "id" from "path" required true }
+  }
+
+  node "update" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind effect
+    requires [input, principal, bookmark_id]
+    provides [bookmark]
+    config {
+      statement "UPDATE bookmarks SET title=COALESCE($1,title), description=COALESCE($2,description), tags=COALESCE($3,tags), updated_at=NOW() WHERE id=$4 AND user_id=$5 RETURNING id,url,title,description,tags,updated_at"
+      args [input.title, input.description, input.tags, bookmark_id, principal.id]
+    }
+  }
+
+  node "invalidate" {
+    family cache
+    uses "cache.delete"
+    resource "cache"
+    kind effect
+    requires [principal]
+    config { key_fact "principal.id" prefix "bm:" }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [bookmark]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+intent "bookmark.delete" {
+  description "Delete a bookmark"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+
+  node "auth" {
+    family auth
+    uses "auth.authenticate"
+    resource "identity"
+    kind decision
+    provides [principal]
+  }
+
+  node "path-id" {
+    family transform
+    uses "request.param"
+    provides [bookmark_id]
+    config { name "id" from "path" required true }
+  }
+
+  node "delete" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind effect
+    requires [bookmark_id, principal]
+    provides [deleted]
+    config {
+      statement "DELETE FROM bookmarks WHERE id=$1 AND user_id=$2 RETURNING id"
+      args [bookmark_id, principal.id]
+    }
+  }
+
+  node "invalidate" {
+    family cache
+    uses "cache.delete"
+    resource "cache"
+    kind effect
+    requires [principal]
+    config { key_fact "principal.id" prefix "bm:" }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [deleted]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+intent "bookmark.resolve" {
+  description "Resolve a short link: increment click counter and return the URL"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+  max_effects 1
+
+  node "path-id" {
+    family transform
+    uses "request.param"
+    provides [bookmark_id]
+    config { name "id" from "path" required true }
+  }
+
+  node "resolve" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind effect
+    requires [bookmark_id]
+    provides [bookmark]
+    config {
+      statement "UPDATE bookmarks SET clicks=clicks+1 WHERE id=$1 RETURNING id,url,clicks"
+      args [bookmark_id]
+    }
+  }
+
+  node "analytics" {
+    family outbox
+    uses "queue.outbox_publish"
+    resource "outbox"
+    kind effect
+    requires [bookmark]
+    provides [analytics_event]
+    config {
+      topic "bookmark.clicked"
+      payload_fact "bookmark"
+    }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [bookmark]
+    provides [response]
+    config { fields [url] }
+  }
+}
+
+intent "bookmark.search" {
+  description "Full-text search across bookmarks"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+
+  node "auth" {
+    family auth
+    uses "auth.authenticate"
+    resource "identity"
+    kind decision
+    provides [principal]
+  }
+
+  node "query-text" {
+    family transform
+    uses "request.param"
+    provides [search_query]
+    config { name "query" from "query" required true }
+  }
+
+  node "search" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind read
+    requires [search_query, principal]
+    provides [results]
+    config {
+      statement "SELECT id,url,title,description,tags,clicks,created_at FROM bookmarks WHERE user_id=$1 AND (title ILIKE '%' || $2 || '%' OR description ILIKE '%' || $2 || '%' OR url ILIKE '%' || $2 || '%') ORDER BY created_at DESC LIMIT 20"
+      args [principal.id, search_query]
+    }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [results]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+####################################################################
+# Durable Process — background link health-check saga
+#
+# A scheduled cron fires every hour. For each bookmark that has not
+# been checked in 24h, the process:
+#   1. HTTP-HEAD the URL (with circuit breaker)
+#   2. Records the status
+#   3. Emits an analytics event
+#
+# If the HEAD fails, the process compensates by marking the bookmark
+# as "unreachable" rather than deleting it.
+####################################################################
+
+process "bookmark.health" {
+  description "Periodic link-health check saga"
+  store "runs"
+  queue "jobs"
+  start "check"
+  version 1
+  timeout 10m
+  max_steps 5
+  max_visits 10
+  retention 72h
+  concurrency 5
+
+  retry {
+    max_attempts 3
+    strategy exponential
+    initial_delay 1s
+    max_delay 30s
+    jitter true
+  }
+
+  step "check" {
+    description "HTTP HEAD the bookmark URL"
+    intent "health.check_url"
+    compensate "health.compensate_check"
+    family service
+    timeout 10s
+    retry { max_attempts 3 strategy exponential initial_delay 500ms }
+
+    circuit_breaker "breakers"
+    lock "locks"
+    lock_key "'health:' + run.input.bookmark_id"
+    lock_ttl 30s
+  }
+
+  step "record" {
+    description "Persist the health status"
+    intent "health.record_status"
+    family database
+    timeout 5s
+  }
+
+  step "notify" {
+    description "Emit analytics event"
+    intent "health.emit_event"
+    family queue
+    kind async_effect
+    terminal true
+  }
+
+  edge "to-record" {
+    kind simple
+    from "check"
+    to "record"
+  }
+
+  edge "to-notify" {
+    kind simple
+    from "record"
+    to "notify"
+  }
+
+  edge "compensate" {
+    kind compensate
+    from "check"
+    to "record"
+  }
+}
+
+####################################################################
+# Process step intents
+####################################################################
+
+intent "health.check_url" {
+  description "HTTP HEAD to check if a bookmark URL is reachable"
+  response "response"
+  timeout 8s
+  max_external_io 1
+
+  node "head" {
+    family service
+    uses "service.http"
+    resource "url_fetcher"
+    kind read
+    requires [input]
+    provides [check_result]
+    config {
+      method HEAD
+      url "{{ input.url }}"
+    }
+    on_error continue
+    fallback { check_result { status "unreachable" error "circuit open or timeout" } }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [check_result]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+intent "health.record_status" {
+  description "Record the health check result"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+
+  node "record" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind effect
+    requires [input]
+    provides [recorded]
+    config {
+      statement "INSERT INTO analytics (id,bookmark_id,event,metadata) VALUES (gen_random_uuid()::text,$1,$2,$3)"
+      args [input.bookmark_id, 'health_check', input]
+    }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [recorded]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+intent "health.emit_event" {
+  description "Emit analytics event for the health check"
+  response "response"
+  timeout 5s
+  max_effects 1
+
+  node "emit" {
+    family outbox
+    uses "queue.outbox_publish"
+    resource "outbox"
+    kind effect
+    requires [input]
+    provides [event]
+    config {
+      topic "bookmark.health_checked"
+      payload_fact "input"
+    }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [event]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+intent "health.compensate_check" {
+  description "Record that a health check was compensated (URL unreachable)"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+
+  node "record" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind effect
+    requires [input]
+    provides [recorded]
+    config {
+      statement "INSERT INTO analytics (id,bookmark_id,event,metadata) VALUES (gen_random_uuid()::text,$1,$2,$3)"
+      args [input.bookmark_id, 'health_compensated', input]
+    }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [recorded]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+####################################################################
+# Workers
+####################################################################
+
+worker "analytics-aggregator" {
+  description "Consumes analytics events from the job queue"
+  queue "jobs"
+  job_type "bookmark.created"
+  intent "analytics.ingest"
+  concurrency 2
+}
+
+intent "analytics.ingest" {
+  description "Process a single analytics event"
+  response "response"
+  timeout 5s
+  max_db_queries 1
+
+  node "ingest" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind effect
+    requires [input]
+    provides [recorded]
+    config {
+      statement "INSERT INTO analytics (id,bookmark_id,event,metadata,recorded_at) VALUES (gen_random_uuid()::text,$1,$2,$3,NOW())"
+      args [input.bookmark_id, input.job_type, input]
+    }
+  }
+
+  node "response" {
+    family response
+    uses "collect"
+    requires [recorded]
+    provides [response]
+    config { unwrap true }
+  }
+}
+
+####################################################################
+# Schedules
+####################################################################
+
+schedule "hourly-health" {
+  description "Run link health checks every hour"
+  queue "jobs"
+  process "bookmark.health"
+  cron "0 * * * *"
+  input { limit 50 }
+}
+
+####################################################################
+# HTTP Routes — the transport projection layer.
+#
+# The same intent is mounted to HTTP here, gRPC elsewhere, CLI in
+# tests — the intent itself never sees an HTTP header, status code
+# or request body. Transport-specific concerns (auth, CORS, rate
+# limits, idempotency) are route configuration, not intent logic.
+####################################################################
+
+route "register" {
+  method POST
+  path "/auth/register"
+  intent "auth.register"
+  status 201
+  mode sync
+  allow_anonymous true
+  max_body_bytes 4096
+  timeout 5s
+
+  cors {
+    allow_origins ["*"]
+    allow_methods [POST]
+    allow_headers [Content-Type]
+    max_age 1h
+  }
+}
+
+route "login" {
+  method POST
+  path "/auth/login"
+  intent "auth.login"
+  mode sync
+  allow_anonymous true
+  max_body_bytes 2048
+  timeout 5s
+  session "sessions"
+
+  rate_limit {
+    limiter "limits"
+    limit 10
+    window 1m
+    key "'login:' + request.remote_ip"
+    burst 3
+  }
+
+  cors {
+    allow_origins ["*"]
+    allow_methods [POST]
+    allow_headers [Content-Type]
+    max_age 1h
+  }
+}
+
+route "create_bookmark" {
+  method POST
+  path "/bookmarks"
+  intent "bookmark.create"
+  status 201
+  mode sync
+  auth "identity"
+  timeout 10s
+  max_body_bytes 8192
+
+  rate_limit {
+    limiter "limits"
+    limit 30
+    window 1m
+    key "'bookmark:' + principal.id"
+    burst 5
+  }
+
+  route_audit {
+    enabled true
+    action "bookmark.created"
+    include_request false
+    redact [url]
+  }
+}
+
+route "list_bookmarks" {
+  method GET
+  path "/bookmarks"
+  intent "bookmark.list"
+  mode sync
+  auth "identity"
+  timeout 5s
+
+  cache_control "private, max-age=30"
+
+  cors {
+    allow_origins ["*"]
+    allow_methods [GET]
+    allow_headers [Authorization]
+    max_age 1h
+  }
+}
+
+route "get_bookmark" {
+  method GET
+  path "/bookmarks/:id"
+  intent "bookmark.get"
+  mode sync
+  auth "identity"
+  timeout 5s
+
+  cache_control "private, max-age=60"
+}
+
+route "update_bookmark" {
+  method PUT
+  path "/bookmarks/:id"
+  intent "bookmark.update"
+  mode sync
+  auth "identity"
+  timeout 5s
+  max_body_bytes 4096
+}
+
+route "delete_bookmark" {
+  method DELETE
+  path "/bookmarks/:id"
+  intent "bookmark.delete"
+  mode sync
+  auth "identity"
+  timeout 5s
+}
+
+route "resolve_link" {
+  method GET
+  path "/go/:id"
+  intent "bookmark.resolve"
+  mode sync
+  allow_anonymous true
+  timeout 5s
+}
+
+route "search_bookmarks" {
+  method GET
+  path "/bookmarks/search"
+  intent "bookmark.search"
+  mode sync
+  auth "identity"
+  timeout 5s
+}
+
+route "health" {
+  method GET
+  path "/health"
+  intent "bookmark.health_status"
+  mode sync
+  allow_anonymous true
+  timeout 2s
+}
+
+intent "bookmark.health_status" {
+  description "Liveness probe — returns 200 when the platform compiled"
+  response "response"
+  max_db_queries 1
+
+  node "ping" {
+    family database
+    uses "database.query"
+    resource "db"
+    kind read
+    provides [db_ok]
+    config { statement "SELECT 1" }
+  }
+
+  node "response" {
+    family response
+    uses "constant"
+    provides [response]
+    config { value { status "ok" service "bookmarks" } }
+  }
+}

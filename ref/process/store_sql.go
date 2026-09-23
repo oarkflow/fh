@@ -1232,8 +1232,9 @@ func rebind(dialect, statement string) string {
 func textColumn(dialect string) string {
 	if dialect == "mysql" {
 		// MySQL cannot index an unbounded TEXT column without a prefix length, and
-		// every column typed here is one we index or key on.
-		return "VARCHAR(255)"
+		// every column typed here is one we index or key on. VARCHAR(500) allows
+		// long idempotency keys and process names while remaining indexable.
+		return "VARCHAR(500)"
 	}
 	return "TEXT"
 }
