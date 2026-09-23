@@ -186,18 +186,18 @@ type execState struct {
 	start     time.Time
 
 	// Outcome state (protected by outcomeMu)
-	outcomeMu    sync.Mutex
-	hasSC        bool
-	scOut        ExecutionOutcome
-	allEffects   []any
-	errOnce      sync.Once
-	firstErr     error
+	outcomeMu  sync.Mutex
+	hasSC      bool
+	scOut      ExecutionOutcome
+	allEffects []any
+	errOnce    sync.Once
+	firstErr   error
 
 	// Gate tracking
-	queueMu        sync.Mutex
-	gatedMask       uint64
-	gatedOverflow   map[int]struct{}
-	readyStorage    [32]graph.NodeID
+	queueMu       sync.Mutex
+	gatedMask     uint64
+	gatedOverflow map[int]struct{}
+	readyStorage  [32]graph.NodeID
 
 	// Pooled state ownership
 	statesPtr *[]nodeState
@@ -289,25 +289,21 @@ func (es *execState) executeNode(nodeID graph.NodeID) {
 		es.plan.MaxDefID,
 	)
 
-	info := node.Info()
-	for _, obs := range es.scheduler.observers {
-		obs.NodeStarted(info)
+	hasObs := len(es.scheduler.observers) > 0
+	var info graph.NodeInfo
+	if hasObs {
+		info = node.Info()
+		for _, obs := range es.scheduler.observers {
+			obs.NodeStarted(info)
+		}
 	}
 
-	var runErr error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				runErr = &nodePanicError{node: node.Name, reason: r}
-			}
-		}()
-		if int(nodeID) < len(es.runners) && es.runners[nodeID] != nil {
-			runErr = es.runners[nodeID](nc)
-		}
-	}()
+	runErr := es.safeRun(nodeID, nc)
 
-	for _, obs := range es.scheduler.observers {
-		obs.NodeFinished(info, runErr)
+	if hasObs {
+		for _, obs := range es.scheduler.observers {
+			obs.NodeFinished(info, runErr)
+		}
 	}
 
 	es.outcomeMu.Lock()
@@ -338,6 +334,19 @@ func (es *execState) executeNode(nodeID graph.NodeID) {
 	}
 }
 
+// safeRun runs a runner callback under panic recovery.
+func (es *execState) safeRun(nodeID graph.NodeID, nc *NodeContext) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = &nodePanicError{node: es.plan.Nodes[nodeID].Name, reason: r}
+		}
+	}()
+	if int(nodeID) < len(es.runners) && es.runners[nodeID] != nil {
+		return es.runners[nodeID](nc)
+	}
+	return nil
+}
+
 // launchAsync launches a node for async execution in a goroutine.
 func (es *execState) launchAsync(nodeID graph.NodeID) {
 	if !es.states[nodeID].state.CompareAndSwap(nsReady, nsRunning) {
@@ -360,7 +369,7 @@ func (es *execState) launchAsync(nodeID graph.NodeID) {
 func (es *execState) checkGatedWait(dst []graph.NodeID) []graph.NodeID {
 	es.queueMu.Lock()
 	defer es.queueMu.Unlock()
-	if es.gatedMask == 0 && (es.gatedOverflow == nil || len(es.gatedOverflow) == 0) {
+	if es.gatedMask == 0 && len(es.gatedOverflow) == 0 {
 		return dst
 	}
 	for nid := 0; nid < es.nodeCount && nid < 64; nid++ {
@@ -569,63 +578,33 @@ func (s *Scheduler) Execute(
 	}
 	es.queueMu.Unlock()
 
-	// Synchronous Fast-Path: run nodes inline when possible.
-	// Handles multi-root DAGs by running all initial ready nodes sequentially
-	// when they are independent (no goroutine overhead for linear/simple plans).
-	for len(initialReady) >= 1 && es.inFlight.Load() == 0 {
-		if len(initialReady) == 1 {
-			// Single ready node — run inline
-			curr := initialReady[0]
-			initialReady = nil
+	// Synchronous Fast-Path: if only 1 node is ready and inFlight == 0, run inline!
+	for len(initialReady) == 1 && es.inFlight.Load() == 0 {
+		curr := initialReady[0]
+		initialReady = nil
 
-			es.states[curr].state.Store(nsRunning)
-			es.executeNode(curr)
+		es.states[curr].state.Store(nsRunning)
+		es.executeNode(curr)
 
-			es.outcomeMu.Lock()
-			hasSC := es.hasSC
-			es.outcomeMu.Unlock()
-			if hasSC || es.firstErr != nil || (plan.Nodes[curr].Kind == graph.DecisionNode && es.decisions.Verdict() == VerdictDeny) {
-				goto finished
-			}
-
-			nextReady := es.propagateDownstream(curr, es.readyStorage[:0])
-			nextReady = es.checkGatedWait(nextReady)
-
-			if len(nextReady) >= 1 {
-				initialReady = nextReady
-				continue
-			}
-			// No successors — done
+		es.outcomeMu.Lock()
+		hasSC := es.hasSC
+		es.outcomeMu.Unlock()
+		if hasSC || es.firstErr != nil || (plan.Nodes[curr].Kind == graph.DecisionNode && es.decisions.Verdict() == VerdictDeny) {
 			goto finished
 		}
 
-		// Multiple ready nodes — run all sequentially inline
-		// (avoids goroutine overhead for small plans with independent roots)
-		for _, nid := range initialReady {
-			es.states[nid].state.Store(nsRunning)
-			es.executeNode(nid)
-
-			es.outcomeMu.Lock()
-			hasSC := es.hasSC
-			es.outcomeMu.Unlock()
-			if hasSC || es.firstErr != nil {
-				goto finished
-			}
-		}
-
-		// Propagate all completed roots and collect next wave
-		nextReady := es.readyStorage[:0]
-		for _, nid := range initialReady {
-			nextReady = es.propagateDownstream(nid, nextReady)
-		}
+		nextReady := es.propagateDownstream(curr, es.readyStorage[:0])
 		nextReady = es.checkGatedWait(nextReady)
-		initialReady = nil
 
-		if len(nextReady) >= 1 {
+		if len(nextReady) == 1 {
 			initialReady = nextReady
-			continue
+		} else if len(nextReady) > 1 {
+			// Fork parallel branches
+			for _, nid := range nextReady {
+				es.launchAsync(nid)
+			}
+			break
 		}
-		goto finished
 	}
 
 	if es.inFlight.Load() == 0 && len(initialReady) == 0 {

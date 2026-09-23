@@ -38,11 +38,10 @@ func (r *Runner) Store() EffectStore {
 
 // Run executes the given effect plan with two-phase commit and compensation.
 func (r *Runner) Run(ctx context.Context, executionID string, plan EffectPlan) error {
-	effects := plan.All()
-	if len(effects) == 0 {
+	if plan.IsEmpty() {
 		return nil
 	}
-	if err := CommitPlan(ctx, r.store, executionID, effects, r.onErr); err != nil {
+	if err := CommitEffectPlan(ctx, r.store, executionID, plan, r.onErr); err != nil {
 		return fmt.Errorf("ref: effect runner failed: %w", err)
 	}
 	return nil

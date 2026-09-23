@@ -147,6 +147,60 @@ A direct compiled-engine dispatch benchmark (no HTTP server/client) measured the
 
 Direct benchmark command: go test -run '^$' -bench '^BenchmarkREFDispatch$' -benchmem -benchtime=2s -count=3 -cpu=1 ./. Full REF test suite passes. The remaining allocations include per-node goroutine scheduling, execution contexts, and boxed typed facts; reducing those further needs scheduler/fact-storage changes that preserve cancellation and concurrency semantics.
 
+## Current rerun and flaw tradeoff benchmarks (2026-09-23)
+
+Current code was benchmarked with Go 1.27.1 on the same i9-13900K host. Repeated direct dispatch and matched HTTP runs used CPU=1, three samples; flaw microbenchmarks used 200 ms per sample and three samples, except context passing (500 ms, five samples) and the latest outbox rerun (2 s, three samples, CPU=32). TCP used persistent HTTP/1 keep-alive connections, 100 warmups, 3-second measurement windows, and 1/32 workers.
+
+### Current REF allocation and matched HTTP results
+
+| Benchmark | Median | B/op | allocs/op |
+|---|---:|---:|---:|
+| Direct compiled REF dispatch | 976.7 ns/op | 80 | 4 |
+| FH traditional HTTP path | 15.489 µs/op | 22,473 | 64 |
+| FH with REF adapter | 14.968 µs/op | 24,297 | 104 |
+
+Direct dispatch is down from the prior reported 928 B/op and 23 allocs/op to 80 B/op and 4 allocs/op on the current code. The in-process HTTP microbenchmark has noisy latency and should not be treated as the throughput result.
+
+| TCP clients | Variant | Throughput | p50 | p95 | p99 | Errors |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | FH traditional | 5,961 req/s | 96 µs | 438 µs | 535 µs | 0 |
+| 1 | FH with REF | 4,735 req/s | 118 µs | 488 µs | 603 µs | 0 |
+| 32 | FH traditional | 331,784 req/s | 43 µs | 298 µs | 715 µs | 0 |
+| 32 | FH with REF | 10,017 req/s | 2.77 ms | 7.62 ms | 10.18 ms | 0 |
+
+This run has zero failures. REF throughput is 21% lower at one client and 97% lower at 32 clients for this CPU-bound HTTP endpoint. The direct-dispatch allocation result does not erase the high-concurrency gap.
+
+### Selected flaw benchmarks
+
+Each pair performs the same named operation within that case. For the delay cases, the traditional example is deliberately serial and REF overlaps independent graph nodes. Traditional code can also use concurrency; these numbers measure the selected serial baseline versus the declared REF DAG. Delays use time.Sleep and are illustrative, not database/network measurements.
+
+| Concern and matched work | Traditional median | REF median | Allocations (traditional → REF) | Reading the result |
+|---|---:|---:|---:|---|
+| Pipeline: auth + tenant + quota + profile; each waits 500 µs | 4.441 ms | 1.219 ms | 1 → 14 | REF is 3.6x lower latency; it spends 641 B/op on concurrent scheduling. |
+| Context: six writes and reads, string map | 71.1 ns | 76.6 ns | 0 → 0 | Map is slightly faster; both allocate zero. Typed slots provide checking and naming guarantees, not a speed win over this local map. |
+| Context: six writes and reads, context.WithValue chain | 171.2 ns | 76.6 ns | 6 → 0 | REF is 2.2x faster and avoids 288 B/op in this case. |
+| Context: six writes and reads, sync.Map | 362.5 ns | 76.6 ns | 8 → 0 | REF is 4.7x faster and avoids 632 B/op in this case. |
+| Speculation: auth + config read, each waits 800 µs | 2.254 ms | 1.207 ms | 0 → 10 | REF overlaps safe config work; 46.4% lower latency, with scheduler allocations. |
+| Policy: three checks, each waits 200 µs | 3.314 ms | 1.220 ms | 0 → 11 | Parallel decisions are 2.7x lower latency in this simulated policy case. |
+| Outbox: same Begin, two Record, Commit, Schedule calls | 25.60 ns | 39.28 ns | 0 → 0 | REF orchestration is about 53% slower against this in-memory fake store; persistence latency is excluded. |
+| Transport reuse: same JSON input and business function; HTTP request adaptation vs Invocation dispatch | 858 ns | 803 ns | 16 → 6 | REF is 6% faster here and uses 79% fewer bytes (1,480 → 312 B/op). |
+
+The outbox fake counts operations atomically so the compiler cannot optimize the traditional calls away. A prior 1.27 ns traditional result was from the no-op fake before this guard; that timing was invalid because the compiler removed its work. A controlled -cpu=32 rerun (three 2-second samples) measured 25.60 ns/op traditional and 39.28 ns/op REF, both at zero allocations. REF groups the effect plan before commit, so its production runner now avoids the `EffectPlan.All()` flattening allocation and the runtime kind-classification pass. The benchmark confirms this abstraction still costs about 13.7 ns over the manual sequence; it does not show a speed win. It does not measure a database, broker, crash recovery, or durability. The context map case is intentionally an ordinary request-local map; it demonstrates that typed facts are not inherently faster than every traditional representation. These are focused microbenchmarks of selected tradeoffs, not proof that all traditional applications have these flaws or that REF wins every workload.
+
+Reproduce the flaw cases from ref/:
+
+~~~sh
+go test -run '^$' -bench '^BenchmarkFlaw[1-6]_' -benchmem -benchtime=200ms -count=3 -cpu=1 ./
+go test -run '^$' -bench '^BenchmarkFlaw(2|5)_' -benchmem -benchtime=500ms -count=5 -cpu=1 ./
+~~~
+
 ## Remaining optimization target
 
-REF is an application execution layer, not an HTTP server replacement. FH handles HTTP in both variants; REF adds decoding, metadata capture, graph scheduling, fact storage, and result projection. The small CPU-only endpoint shows this overhead plainly. The next performance work should reduce scheduler allocations and small-plan dispatch cost, then rerun this same keep-alive TCP parity load test. These measurements are a baseline, not a production capacity guarantee.
+REF is an application execution layer, not an HTTP server replacement. FH handles HTTP in both variants; REF adds decoding, metadata capture, graph scheduling, fact storage, and result projection. The small CPU-only endpoint shows this overhead plainly. The selected scheduler allocations have been reduced substantially, but the keep-alive TCP test still shows a severe high-concurrency CPU-bound gap. Profiling that live-load path remains the next optimization target. These measurements are a baseline, not a production capacity guarantee.
+
+
+### Why the parallel flaw rows allocate
+
+The serial traditional examples execute inline. REF starts runnable DAG nodes as goroutines so independent work can overlap and cancellation can stop unfinished work. On this Go runtime, each goroutine launch contributes an allocation; those are the dominant per-operation allocation objects in an allocation profile of the pipeline benchmark. The current measured overhead is modest in bytes (376–641 B/op) but visible in object count (10–14 allocs/op). The counts are not map/context-value leaks: the typed-context cases remain at zero allocations. The allocation is the price of scheduling real concurrent work. Removing those goroutines by running nodes inline would erase the measured latency benefit; a reusable worker pool would impose shared lifecycle, queueing, and cancellation semantics and needs a separate design and workload benchmark. We retain the concurrency semantics and report this cost rather than quietly changing the baseline behavior.
+
+The outbox comparison likewise has zero heap allocations on both sides. Its remaining latency gap is orchestration/interface overhead in the declarative path, not allocation pressure. The runner now uses the pre-grouped plan path; further speed claims need a benchmark that includes the actual store/broker costs and recovery guarantees.

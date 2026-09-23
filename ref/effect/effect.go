@@ -91,9 +91,9 @@ type PendingTransaction struct {
 // or best-effort commit. These errors do not abort the transaction but should
 // be observable for operational health.
 type EffectError struct {
-	Phase   string
-	Name    string
-	Err     error
+	Phase string
+	Name  string
+	Err   error
 }
 
 func (e EffectError) Error() string {
@@ -122,87 +122,112 @@ type EffectErrorFunc func(err EffectError)
 // Non-fatal errors (delivery scheduling, best-effort commit) are reported via onErr
 // when non-nil, instead of being silently discarded.
 func CommitPlan(ctx context.Context, store EffectStore, executionID string, effects []Effect, onErr ...EffectErrorFunc) error {
-	var txID string
-	var err error
-
-	if store != nil {
-		txID, err = store.Begin(ctx, executionID)
-		if err != nil {
-			return fmt.Errorf("ref: effect store begin error: %w", err)
-		}
+	txID, err := beginEffectTransaction(ctx, store, executionID)
+	if err != nil {
+		return err
 	}
-
-	var reportErr func(EffectError)
-	if len(onErr) > 0 && onErr[0] != nil {
+	var reportErr EffectErrorFunc
+	if len(onErr) > 0 {
 		reportErr = onErr[0]
 	}
-
-	// Phase 1: Record all DurableDelivery effects into the transaction BEFORE committing.
-	// This ensures that domain writes and durable outbox records share the exact same transaction.
+	var localBuf, durableBuf, fireBuf [8]Effect
+	local, durable, fire := localBuf[:0], durableBuf[:0], fireBuf[:0]
 	for _, e := range effects {
-		if e.Kind() == DurableDelivery {
-			if store != nil && txID != "" {
-				if err := store.Record(ctx, txID, EffectRecord{
-					Name: e.Name(),
-					Kind: DurableDelivery,
-				}); err != nil {
-					return fmt.Errorf("ref: failed to record durable effect %q: %w", e.Name(), err)
-				}
+		switch e.Kind() {
+		case LocalTransactional:
+			local = append(local, e)
+		case DurableDelivery:
+			durable = append(durable, e)
+		case FireAndForget:
+			fire = append(fire, e)
+		}
+	}
+	return commitEffectGroups(ctx, store, txID, local, durable, fire, reportErr)
+}
+
+// CommitEffectPlan commits effects already grouped by delivery semantics. It
+// avoids flattening the plan and re-classifying each effect at runtime.
+func CommitEffectPlan(ctx context.Context, store EffectStore, executionID string, plan EffectPlan, onErr ...EffectErrorFunc) error {
+	txID, err := beginEffectTransaction(ctx, store, executionID)
+	if err != nil {
+		return err
+	}
+	var reportErr EffectErrorFunc
+	if len(onErr) > 0 {
+		reportErr = onErr[0]
+	}
+	return commitEffectGroups(ctx, store, txID, plan.LocalTx, plan.Durable, plan.FireAndForget, reportErr)
+}
+
+func beginEffectTransaction(ctx context.Context, store EffectStore, executionID string) (string, error) {
+	if store == nil {
+		return "", nil
+	}
+	txID, err := store.Begin(ctx, executionID)
+	if err != nil {
+		return "", fmt.Errorf("ref: effect store begin error: %w", err)
+	}
+	return txID, nil
+}
+
+func commitEffectGroups(ctx context.Context, store EffectStore, txID string, local, durable, fire []Effect, reportErr EffectErrorFunc) error {
+	if store != nil && txID != "" {
+		for _, e := range durable {
+			if err := store.Record(ctx, txID, EffectRecord{Name: e.Name(), Kind: DurableDelivery}); err != nil {
+				return fmt.Errorf("ref: failed to record durable effect %q: %w", e.Name(), err)
 			}
 		}
 	}
 
-	// Phase 2: Commit LocalTransactional effects
-	var committedTx []CompensatingEffect
-	for _, e := range effects {
-		if e.Kind() == LocalTransactional {
-			if err := e.Commit(ctx); err != nil {
-				// Atomic failure — compensate already executed effects in reverse
-				for i := len(committedTx) - 1; i >= 0; i-- {
-					_ = committedTx[i].Compensate(ctx)
+	var committed [8]CompensatingEffect
+	committedCount := 0
+	var overflow []CompensatingEffect
+	for _, e := range local {
+		if err := e.Commit(ctx); err != nil {
+			for i := committedCount - 1; i >= 0; i-- {
+				if i < len(committed) {
+					_ = committed[i].Compensate(ctx)
+				} else {
+					_ = overflow[i-len(committed)].Compensate(ctx)
 				}
-				return fmt.Errorf("ref: local transactional effect %q failed: %w", e.Name(), err)
 			}
-			if ce, ok := e.(CompensatingEffect); ok {
-				committedTx = append(committedTx, ce)
+			return fmt.Errorf("ref: local transactional effect %q failed: %w", e.Name(), err)
+		}
+		if ce, ok := e.(CompensatingEffect); ok {
+			if committedCount < len(committed) {
+				committed[committedCount] = ce
+			} else {
+				overflow = append(overflow, ce)
 			}
+			committedCount++
 		}
 	}
 
-	// Phase 3: Atomic commit of the transaction (domain writes + outbox records commit together)
 	if store != nil && txID != "" {
 		if err := store.Commit(ctx, txID); err != nil {
-			for i := len(committedTx) - 1; i >= 0; i-- {
-				_ = committedTx[i].Compensate(ctx)
+			for i := committedCount - 1; i >= 0; i-- {
+				if i < len(committed) {
+					_ = committed[i].Compensate(ctx)
+				} else {
+					_ = overflow[i-len(committed)].Compensate(ctx)
+				}
 			}
 			return fmt.Errorf("ref: effect store commit error: %w", err)
 		}
-	}
-
-	// Phase 4: Schedule delivery of the committed outbox records
-	if store != nil && txID != "" {
 		if err := store.ScheduleDelivery(ctx, txID); err != nil && reportErr != nil {
 			reportErr(EffectError{Phase: "schedule_delivery", Err: err})
 		}
 	}
 
-	for _, e := range effects {
-		if e.Kind() == DurableDelivery {
-			// Best-effort immediate dispatch; background worker retries if unfulfilled
-			if err := e.Commit(ctx); err != nil && reportErr != nil {
-				reportErr(EffectError{Phase: "durable_commit", Name: e.Name(), Err: err})
-			}
+	for _, e := range durable {
+		if err := e.Commit(ctx); err != nil && reportErr != nil {
+			reportErr(EffectError{Phase: "durable_commit", Name: e.Name(), Err: err})
 		}
 	}
-
-	// Phase 5: Fire-and-forget
-	for _, e := range effects {
-		if e.Kind() == FireAndForget {
-			if err := e.Commit(ctx); err != nil && reportErr != nil {
-				reportErr(EffectError{Phase: "fire_and_forget", Name: e.Name(), Err: err})
-			}
+	for _, e := range fire {
+		if err := e.Commit(ctx); err != nil && reportErr != nil {
+			reportErr(EffectError{Phase: "fire_and_forget", Name: e.Name(), Err: err})
 		}
 	}
-
 	return nil
 }
