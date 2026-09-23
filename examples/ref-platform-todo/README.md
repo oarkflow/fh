@@ -112,7 +112,7 @@ export SESSION_SECRET="$(openssl rand -hex 32)"
 go run ./examples/ref-platform-todo     # from the repository root
 ```
 
-It listens on `:8088`. The document's path is relative, so run it from the
+It listens on `:8089`. The document's path is relative, so run it from the
 repository root (or edit the path in `main.go`).
 
 ---
@@ -177,7 +177,7 @@ oracle.
 ## Walkthrough
 
 ```sh
-BASE=http://localhost:8088
+BASE=http://localhost:8089
 J=/tmp/todo.cookies
 curl() { command curl -sS -c $J -b $J -H 'Content-Type: application/json' "$@"; }
 ```
