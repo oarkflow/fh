@@ -1,8 +1,0 @@
-go 1.26.5
-
-use (
-	.
-	./ref
-	./examples/ref-platform-todo
-	./examples/ref-bookmark
-)
