@@ -54,6 +54,7 @@ options rather than a `Config` value.
 | [SLO Tracking](slo.md) | Route-level availability/latency SLOs and burn-rate alerts |
 | [Budgets](budget.md) | Hierarchical per-request execution budgets (time, memory, upstream, retries) |
 | [Config Reload](configreload.md) | Atomic config/route/policy/certificate reload with generation tracking |
+| [BCL No-Code Platform](ref-no-code-platform.md) | Two tiers of no-code application from one BCL document: request intents and a durable process engine, with the full resource, node, edge and action catalogs |
 | [ACME / Let's Encrypt](acme.md) | Automatic TLS certificate issuance and renewal via TLS-ALPN-01 |
 
 ## Operations

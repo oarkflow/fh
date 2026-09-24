@@ -478,6 +478,7 @@ var ErrRewrite = errors.New("fh: reroute rewritten request")
 type App struct {
 	cfg             Config
 	router          *Router
+	refEngine       REFEngine // Runtime Execution Fabric engine (nil if not enabled)
 	hooks           Hooks
 	logger          Logger
 	middleware      []HandlerFunc
@@ -948,6 +949,46 @@ func (a *App) Group(prefix string, handlers ...HandlerFunc) *Group {
 	g := &Group{app: a, prefix: prefix, middleware: handlers}
 	a.groups = append(a.groups, g)
 	return g
+}
+
+// REFEngine defines the interface for the Runtime Execution Fabric engine.
+// Applications can inject their concrete *ref.Engine implementation here
+// to decouple the fh framework from the ref package.
+type REFEngine interface {
+	// Capabilities returns the capability registry.
+	Capabilities() any
+	
+	// Intents returns the intent registry.
+	Intents() any
+	
+	// RegisterDefinition registers a type-erased intent.
+	RegisterDefinition(def any) error
+	
+	// Compile builds execution plans for all registered intents.
+	Compile() error
+	
+	// Dispatch executes an intent by invocation input.
+	Dispatch(ctx context.Context, inv any) (any, error)
+	
+	// DispatchPreview evaluates an intent without committing effects.
+	DispatchPreview(ctx context.Context, inv any) (any, error)
+	
+	// Plan returns the compiled execution plan for an intent name.
+	Plan(name string) (any, bool)
+}
+
+// SetREF sets the Runtime Execution Fabric (REF) engine on the App.
+func (a *App) SetREF(engine REFEngine) *App {
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
+	a.assertMutable()
+	a.refEngine = engine
+	return a
+}
+
+// REF returns the REF Engine, or nil if REF is not enabled.
+func (a *App) REF() REFEngine {
+	return a.refEngine
 }
 
 // ── Lifecycle hooks ────────────────────────────────────────────────────────
