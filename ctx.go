@@ -1647,16 +1647,7 @@ func (c *DefaultCtx) writeResponseString(s string) error {
 
 func (c *DefaultCtx) writeJSONMapStringString(m map[string]string) error {
 	if c.canDirectWrite200() {
-		if c.writeBuf == nil {
-			c.writeBuf = getBytes()
-			c.writeBufPooled = true
-		}
-		base := (*c.writeBuf)[:0]
-		if cap(base) < directJSONHeaderReserve+1 {
-			base = append(base, make([]byte, directJSONHeaderReserve+1)...)
-		} else {
-			base = base[:directJSONHeaderReserve]
-		}
+		base := c.directJSONBase()
 		body := appendJSONMapStringString(base[directJSONHeaderReserve:directJSONHeaderReserve], m)
 		return c.writeDirectJSONBytes200(base, body)
 	}
@@ -1687,16 +1678,7 @@ func appendJSONMapStringString(body []byte, m map[string]string) []byte {
 
 func (c *DefaultCtx) writeJSONMapStringAny(m map[string]any) error {
 	if c.canDirectWrite200() {
-		if c.writeBuf == nil {
-			c.writeBuf = getBytes()
-			c.writeBufPooled = true
-		}
-		base := (*c.writeBuf)[:0]
-		if cap(base) < directJSONHeaderReserve+1 {
-			base = append(base, make([]byte, directJSONHeaderReserve+1)...)
-		} else {
-			base = base[:directJSONHeaderReserve]
-		}
+		base := c.directJSONBase()
 		body, err := appendJSONMapStringAny(base[directJSONHeaderReserve:directJSONHeaderReserve], m)
 		if err != nil {
 			*c.writeBuf = base[:0]
@@ -1912,16 +1894,7 @@ func (c *DefaultCtx) writeJSONAppender(app JSONAppender) error {
 }
 
 func (c *DefaultCtx) writeDirectJSONAppender200(app JSONAppender) error {
-	if c.writeBuf == nil {
-		c.writeBuf = getBytes()
-		c.writeBufPooled = true
-	}
-	base := (*c.writeBuf)[:0]
-	if cap(base) < directJSONHeaderReserve+1 {
-		base = append(base, make([]byte, directJSONHeaderReserve+1)...)
-	} else {
-		base = base[:directJSONHeaderReserve]
-	}
+	base := c.directJSONBase()
 	body := base[directJSONHeaderReserve:directJSONHeaderReserve]
 	out, err := app.AppendJSON(body)
 	if err != nil {
@@ -1932,6 +1905,21 @@ func (c *DefaultCtx) writeDirectJSONAppender200(app JSONAppender) error {
 }
 
 const directJSONHeaderReserve = 192
+// Keep common small JSON responses in one connection-owned buffer without
+// eagerly allocating the full configured read-buffer size per connection.
+const directJSONInitialBuffer = 512
+
+func (c *DefaultCtx) directJSONBase() []byte {
+	if c.writeBuf == nil {
+		c.writeBuf = getBytes()
+		c.writeBufPooled = true
+	}
+	base := (*c.writeBuf)[:0]
+	if cap(base) < directJSONInitialBuffer {
+		return make([]byte, directJSONHeaderReserve, directJSONInitialBuffer)
+	}
+	return base[:directJSONHeaderReserve]
+}
 
 func (c *DefaultCtx) writeDirectJSONBytes200(base, out []byte) error {
 	c.responded = true

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -62,6 +63,8 @@ func main() {
 	output := flag.String("output", "results/results.json", "JSON result file")
 	only := flag.String("only", "", "run only one server: fh, fiber, or fasthttp")
 	seed := flag.Int64("seed", 0, "server order seed; zero selects a random seed")
+	scenarioNames := flag.String("scenarios", "", "comma-separated scenario names; empty runs all")
+	scenarioSeed := flag.Int64("scenario-seed", 0, "shuffle scenario order with this seed; zero keeps the default order")
 	flag.Parse()
 	if *duration <= 0 || *warmup < 0 || *concurrency <= 0 {
 		fatalf("duration and concurrency must be positive; warmup cannot be negative")
@@ -94,9 +97,23 @@ func main() {
 	rand.New(rand.NewSource(*seed)).Shuffle(len(servers), func(i, j int) {
 		servers[i], servers[j] = servers[j], servers[i]
 	})
+	runScenarios, err := selectScenarios(*scenarioNames)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if *scenarioSeed != 0 {
+		rand.New(rand.NewSource(*scenarioSeed)).Shuffle(len(runScenarios), func(i, j int) {
+			runScenarios[i], runScenarios[j] = runScenarios[j], runScenarios[i]
+		})
+	}
 	fmt.Printf("Server order (seed %d):", *seed)
 	for _, s := range servers {
 		fmt.Printf(" %s", s.name)
+	}
+	fmt.Println()
+	fmt.Printf("Scenario order:")
+	for _, scenario := range runScenarios {
+		fmt.Printf(" %s", scenario.name)
 	}
 	fmt.Println()
 	cleanup, err := startServers(servers)
@@ -117,12 +134,12 @@ func main() {
 	for i := range servers {
 		baseURL := "http://127.0.0.1:" + servers[i].port
 		fmt.Printf("%s: warmup %s\n", servers[i].name, warmup)
-		for _, s := range scenarios {
+		for _, s := range runScenarios {
 			if err := validate(baseURL, s); err != nil {
 				fatalf("%s/%s validation: %v", servers[i].name, s.name, err)
 			}
 		}
-		for _, s := range scenarios {
+		for _, s := range runScenarios {
 			r := runLoad(baseURL, s, *warmup, *duration, *concurrency)
 			r.Server, r.Scenario = servers[i].name, s.name
 			results = append(results, r)
@@ -143,6 +160,33 @@ func main() {
 	fmt.Printf("\nWrote %d results to %s\n", len(results), *output)
 }
 
+func selectScenarios(names string) ([]scenario, error) {
+	if strings.TrimSpace(names) == "" {
+		return append([]scenario(nil), scenarios...), nil
+	}
+	selected := make([]scenario, 0)
+	seen := make(map[string]bool)
+	for _, raw := range strings.Split(names, ",") {
+		name := strings.TrimSpace(raw)
+		if name == "" || seen[name] {
+			return nil, fmt.Errorf("invalid or repeated scenario %q", name)
+		}
+		found := false
+		for _, candidate := range scenarios {
+			if candidate.name == name {
+				selected = append(selected, candidate)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("unknown scenario %q", name)
+		}
+		seen[name] = true
+	}
+	return selected, nil
+}
+
 func startServers(servers []server) (func(), error) {
 	started := make([]server, 0, len(servers))
 	cleanup := func() {
@@ -157,7 +201,7 @@ func startServers(servers []server) (func(), error) {
 		probe, err := net.Listen("tcp", "127.0.0.1:"+servers[i].port)
 		if err != nil {
 			cleanup()
-			return nil, fmt.Errorf("port %s is already in use", servers[i].port)
+			return nil, fmt.Errorf("check listen address 127.0.0.1:%s: %w", servers[i].port, err)
 		}
 		_ = probe.Close()
 		cmd := exec.Command(filepath.Join(filepath.Dir(servers[i].dir), servers[i].name+"-server"))
@@ -250,15 +294,43 @@ func validate(baseURL string, s scenario) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("status %d, body %q", resp.StatusCode, data)
 	}
-	switch s.name {
-	case "plaintext":
+	return validatePayload(s, data)
+}
+
+func validatePayload(s scenario, data []byte) error {
+	if s.name == "plaintext" {
 		if string(data) != "Hello, World!" {
-			return fmt.Errorf("unexpected body %q", data)
+			return fmt.Errorf("unexpected plaintext body %q", data)
 		}
-	case "json", "params", "query", "echo", "users":
-		if !json.Valid(data) {
-			return fmt.Errorf("invalid JSON body %q", data)
+		return nil
+	}
+	var got any
+	if err := json.Unmarshal(data, &got); err != nil {
+		return fmt.Errorf("invalid JSON body %q: %w", data, err)
+	}
+	var want any
+	switch s.name {
+	case "json":
+		want = map[string]any{"message": "Hello, World!"}
+	case "params":
+		want = map[string]any{"id": float64(0), "name": "User 42"}
+	case "query":
+		want = map[string]any{"query": "benchmark"}
+	case "echo":
+		if err := json.Unmarshal([]byte(s.body), &want); err != nil {
+			return fmt.Errorf("invalid benchmark echo body: %w", err)
 		}
+	case "users":
+		users := make([]any, 100)
+		for i := range users {
+			users[i] = map[string]any{"id": float64(i + 1), "name": fmt.Sprintf("User %d", i+1)}
+		}
+		want = users
+	default:
+		return fmt.Errorf("unknown scenario %q", s.name)
+	}
+	if !reflect.DeepEqual(got, want) {
+		return fmt.Errorf("unexpected %s response %q", s.name, data)
 	}
 	return nil
 }

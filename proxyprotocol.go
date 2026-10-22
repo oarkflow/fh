@@ -12,6 +12,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -48,6 +49,12 @@ type ProxyProtocolConfig struct {
 	// public internet. Only use this when the listener is genuinely
 	// unreachable except through a trusted load balancer/proxy.
 	TrustAll bool
+	// MaxPendingHandshakes bounds connections waiting for a PROXY header.
+	// Zero uses 256. Excess connections wait at the accept boundary.
+	MaxPendingHandshakes int
+	// MaxHeaderBytes bounds the PROXY preface, including v2 TLVs.
+	// Zero uses 4096 bytes.
+	MaxHeaderBytes int
 }
 
 func peerTrusted(addr net.Addr, peers []*net.IPNet, trustAll bool) bool {
@@ -82,6 +89,7 @@ func (c *proxyConn) RemoteAddr() net.Addr {
 	}
 	return c.Conn.RemoteAddr()
 }
+func (c *proxyConn) RawRemoteAddr() net.Addr { return c.Conn.RemoteAddr() }
 
 func (c *proxyConn) Read(b []byte) (int, error) {
 	if c.reader != nil {
@@ -93,7 +101,15 @@ func (c *proxyConn) Read(b []byte) (int, error) {
 // ProxyProtocolListener wraps an underlying net.Listener and decodes PROXY headers on accept.
 type ProxyProtocolListener struct {
 	net.Listener
-	cfg ProxyProtocolConfig
+	cfg       ProxyProtocolConfig
+	startOnce sync.Once
+	closeOnce sync.Once
+	stop      chan struct{}
+	ready     chan net.Conn
+	errors    chan error
+	pending   chan struct{}
+	mu        sync.Mutex
+	parsing   map[net.Conn]struct{}
 }
 
 // NewProxyProtocolListener wraps ln with PROXY protocol v1 and v2 support.
@@ -108,6 +124,14 @@ func NewProxyProtocolListener(ln net.Listener, cfg ...ProxyProtocolConfig) *Prox
 		c.FallbackPassthrough = cfg[0].FallbackPassthrough
 		c.TrustedPeers = cfg[0].TrustedPeers
 		c.TrustAll = cfg[0].TrustAll
+		c.MaxPendingHandshakes = cfg[0].MaxPendingHandshakes
+		c.MaxHeaderBytes = cfg[0].MaxHeaderBytes
+	}
+	if c.MaxPendingHandshakes <= 0 {
+		c.MaxPendingHandshakes = 256
+	}
+	if c.MaxHeaderBytes <= 0 {
+		c.MaxHeaderBytes = 4096
 	}
 	if c.TrustAll {
 		slog.Warn("fh/proxyprotocol: TrustAll is enabled — any direct TCP peer can spoof its source IP via a forged PROXY header; only use this when the listener is unreachable except through a trusted load balancer")
@@ -117,16 +141,95 @@ func NewProxyProtocolListener(ln net.Listener, cfg ...ProxyProtocolConfig) *Prox
 	return &ProxyProtocolListener{
 		Listener: ln,
 		cfg:      c,
+		stop:     make(chan struct{}),
+		ready:    make(chan net.Conn),
+		errors:   make(chan error, 1),
+		pending:  make(chan struct{}, c.MaxPendingHandshakes),
+		parsing:  make(map[net.Conn]struct{}),
 	}
 }
 
-// Accept waits for and returns the next connection to the listener, parsing its PROXY header.
+// Accept returns negotiated connections. A bad client never becomes a fatal
+// listener error, and slow header readers cannot serialize later accepts.
 func (l *ProxyProtocolListener) Accept() (net.Conn, error) {
-	rawConn, err := l.Listener.Accept()
-	if err != nil {
+	l.startOnce.Do(func() { go l.acceptLoop() })
+	select {
+	case <-l.stop:
+		return nil, net.ErrClosed
+	case err := <-l.errors:
 		return nil, err
+	case conn := <-l.ready:
+		return conn, nil
 	}
+}
 
+func (l *ProxyProtocolListener) Close() error {
+	var err error
+	l.closeOnce.Do(func() {
+		close(l.stop)
+		err = l.Listener.Close()
+		l.mu.Lock()
+		for conn := range l.parsing {
+			_ = conn.Close()
+		}
+		l.mu.Unlock()
+	})
+	return err
+}
+
+func (l *ProxyProtocolListener) acceptLoop() {
+	for {
+		select {
+		case l.pending <- struct{}{}:
+		case <-l.stop:
+			return
+		}
+		raw, err := l.Listener.Accept()
+		if err != nil {
+			<-l.pending
+			select {
+			case <-l.stop:
+				return
+			default:
+			}
+			select {
+			case l.errors <- err:
+			case <-l.stop:
+			}
+			return
+		}
+		select {
+		case <-l.stop:
+			_ = raw.Close()
+			<-l.pending
+			return
+		default:
+		}
+		l.mu.Lock()
+		l.parsing[raw] = struct{}{}
+		l.mu.Unlock()
+		go func() {
+			defer func() {
+				l.mu.Lock()
+				delete(l.parsing, raw)
+				l.mu.Unlock()
+				<-l.pending
+			}()
+			conn, parseErr := l.negotiate(raw)
+			if parseErr != nil {
+				_ = raw.Close()
+				return
+			}
+			select {
+			case l.ready <- conn:
+			case <-l.stop:
+				_ = conn.Close()
+			}
+		}()
+	}
+}
+
+func (l *ProxyProtocolListener) negotiate(rawConn net.Conn) (net.Conn, error) {
 	if !peerTrusted(rawConn.RemoteAddr(), l.cfg.TrustedPeers, l.cfg.TrustAll) {
 		// The direct TCP peer is not a trusted load balancer/proxy: never let it
 		// assert an arbitrary source IP via a PROXY header. Either pass the
@@ -134,7 +237,6 @@ func (l *ProxyProtocolListener) Accept() (net.Conn, error) {
 		if l.cfg.FallbackPassthrough {
 			return rawConn, nil
 		}
-		_ = rawConn.Close()
 		return nil, ErrUntrustedPeer
 	}
 
@@ -143,14 +245,13 @@ func (l *ProxyProtocolListener) Accept() (net.Conn, error) {
 	}
 
 	bufr := bufio.NewReader(rawConn)
-	remoteAddr, err := parseProxyHeader(bufr, rawConn.RemoteAddr(), l.cfg.FallbackPassthrough)
+	remoteAddr, err := parseProxyHeader(bufr, rawConn.RemoteAddr(), l.cfg.FallbackPassthrough, l.cfg.MaxHeaderBytes)
 
 	if l.cfg.Timeout > 0 {
 		_ = rawConn.SetReadDeadline(time.Time{})
 	}
 
 	if err != nil {
-		_ = rawConn.Close()
 		return nil, err
 	}
 
@@ -161,7 +262,7 @@ func (l *ProxyProtocolListener) Accept() (net.Conn, error) {
 	}, nil
 }
 
-func parseProxyHeader(bufr *bufio.Reader, fallback net.Addr, fallbackPassthrough bool) (net.Addr, error) {
+func parseProxyHeader(bufr *bufio.Reader, fallback net.Addr, fallbackPassthrough bool, maxBytes int) (net.Addr, error) {
 	// Peek at the first few bytes to determine v1 or v2
 	magic, err := bufr.Peek(16)
 	if err != nil && len(magic) < 8 {
@@ -173,12 +274,12 @@ func parseProxyHeader(bufr *bufio.Reader, fallback net.Addr, fallbackPassthrough
 
 	// 1. Check for PROXY protocol v2 (binary, 12-byte magic prefix)
 	if len(magic) >= 12 && bytes.Equal(magic[:12], proxyV2Signature) {
-		return parseProxyV2(bufr)
+		return parseProxyV2(bufr, maxBytes)
 	}
 
 	// 2. Check for PROXY protocol v1 (text: "PROXY ...\r\n")
 	if len(magic) >= 6 && bytes.Equal(magic[:6], []byte("PROXY ")) {
-		return parseProxyV1(bufr)
+		return parseProxyV1(bufr, maxBytes)
 	}
 
 	if fallbackPassthrough {
@@ -189,10 +290,27 @@ func parseProxyHeader(bufr *bufio.Reader, fallback net.Addr, fallbackPassthrough
 
 // parseProxyV1 parses PROXY v1 text header format:
 // PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\n
-func parseProxyV1(bufr *bufio.Reader) (net.Addr, error) {
-	line, err := bufr.ReadString('\n')
-	if err != nil {
-		return nil, err
+func parseProxyV1(bufr *bufio.Reader, maxBytes int) (net.Addr, error) {
+	if maxBytes > 108 {
+		maxBytes = 108
+	}
+	var lineBytes []byte
+	for len(lineBytes) < maxBytes {
+		b, err := bufr.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		lineBytes = append(lineBytes, b)
+		if b == '\n' {
+			break
+		}
+	}
+	if len(lineBytes) == maxBytes && lineBytes[len(lineBytes)-1] != '\n' {
+		return nil, ErrInvalidProxyHeader
+	}
+	line := string(lineBytes)
+	if !strings.HasSuffix(line, "\r\n") {
+		return nil, ErrInvalidProxyHeader
 	}
 
 	line = strings.TrimRight(line, "\r\n")
@@ -235,7 +353,7 @@ func parseProxyV1(bufr *bufio.Reader) (net.Addr, error) {
 }
 
 // parseProxyV2 parses PROXY v2 binary header format.
-func parseProxyV2(bufr *bufio.Reader) (net.Addr, error) {
+func parseProxyV2(bufr *bufio.Reader, maxBytes int) (net.Addr, error) {
 	// Skip 12-byte magic signature
 	_, err := bufr.Discard(12)
 	if err != nil {
@@ -251,6 +369,9 @@ func parseProxyV2(bufr *bufio.Reader) (net.Addr, error) {
 	verCmd := header[0]
 	famTrans := header[1]
 	length := binary.BigEndian.Uint16(header[2:4])
+	if int(length)+16 > maxBytes {
+		return nil, ErrInvalidProxyHeader
+	}
 
 	ver := (verCmd & 0xF0) >> 4
 	cmd := verCmd & 0x0F
@@ -261,11 +382,16 @@ func parseProxyV2(bufr *bufio.Reader) (net.Addr, error) {
 
 	// Command: 0 = LOCAL (ignore addresses), 1 = PROXY
 	if cmd == 0 {
-		_, _ = bufr.Discard(int(length))
+		if _, err := bufr.Discard(int(length)); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	if cmd != 1 {
 		return nil, fmt.Errorf("%w: unknown command %d", ErrInvalidProxyHeader, cmd)
+	}
+	if famTrans&0x0f != 1 && famTrans>>4 != 0 {
+		return nil, ErrInvalidProxyHeader
 	}
 
 	addrBytes := make([]byte, length)
@@ -329,5 +455,5 @@ func (a *App) ListenTLSProxyProtocol(addr, certFile, keyFile string, cfg ...Prox
 		return err
 	}
 	proxyLn := NewProxyProtocolListener(ln, cfg...)
-	return a.Serve(tls.NewListener(proxyLn, tlsConfig))
+	return a.Serve(secureTLSListener{Listener: tls.NewListener(proxyLn, tlsConfig)})
 }

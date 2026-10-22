@@ -46,7 +46,7 @@ type HookFunc func() error
 // Hooks groups all application lifecycle hooks.
 type Hooks struct {
 	onListen   []HookFunc
-	onShutdown []HookFunc
+	onShutdown []func(context.Context) error
 	onConnect  []func(net.Conn)
 	onClose    []func(net.Conn)
 	onError    []func(error)
@@ -70,6 +70,8 @@ type Config struct {
 	// are two separate, narrower-than-they-sound opt-ins. See
 	// docs/production-readiness.md.
 	SecureByDefault bool
+	// DeploymentSecurityGate enables opt-in startup validation.
+	DeploymentSecurityGate *DeploymentSecurityConfig
 	// Mode controls secure default and compliance validation behavior.
 	Mode Mode
 	// Compliance enables business/professional/enterprise/security evidence endpoints and profiles.
@@ -152,15 +154,19 @@ type Config struct {
 	ContentSecurityPolicy string
 	ReadBufferSize        int
 	// WriteBufferSize is the initial size of the per-connection write buffer.
-	// Defaults to ReadBufferSize when zero. Increase for streaming-heavy workloads.
-	WriteBufferSize      int
-	MaxRequestBodySize   int
-	MaxHeaderListSize    int
-	MaxHeaderCount       int
-	MaxRequestLineSize   int
-	MaxConcurrentStreams uint32
-	DisableKeepAlive     bool
-	DisableHTTP2         bool
+	// New and NewFast grow it on demand when zero; NewWithConfig defaults it to
+	// ReadBufferSize. Tune it with workload measurements.
+	WriteBufferSize    int
+	MaxRequestBodySize int
+	// MaxBufferedRequestBytes is an opt-in process-wide ceiling for request
+	// bodies held in memory. Zero disables the ceiling.
+	MaxBufferedRequestBytes int64
+	MaxHeaderListSize       int
+	MaxHeaderCount          int
+	MaxRequestLineSize      int
+	MaxConcurrentStreams    uint32
+	DisableKeepAlive        bool
+	DisableHTTP2            bool
 	// DisableH2C rejects cleartext HTTP/2 prior knowledge and HTTP/1.1 h2c
 	// upgrades while retaining HTTP/2 over TLS/ALPN.
 	DisableH2C bool
@@ -290,6 +296,9 @@ func WithWriteBufferSize(n int) Option {
 func WithMaxRequestBodySize(n int) Option {
 	return func(c *Config) { c.MaxRequestBodySize = n }
 }
+func WithMaxBufferedRequestBytes(n int64) Option {
+	return func(c *Config) { c.MaxBufferedRequestBytes = n }
+}
 func WithMaxHeaderListSize(n int) Option {
 	return func(c *Config) { c.MaxHeaderListSize = n }
 }
@@ -330,6 +339,13 @@ func WithSendKeepAliveHeader(enabled bool) Option {
 // explicitly for those.
 func WithSecureByDefault(enabled bool) Option {
 	return func(c *Config) { c.SecureByDefault = enabled }
+}
+func WithDeploymentSecurityGate(gate DeploymentSecurityConfig) Option {
+	return func(c *Config) {
+		copyGate := gate
+		copyGate.TrustedProxyCIDRs = append([]string(nil), gate.TrustedProxyCIDRs...)
+		c.DeploymentSecurityGate = &copyGate
+	}
 }
 func WithDisableKeepAlive(disabled bool) Option {
 	return func(c *Config) { c.DisableKeepAlive = disabled }
@@ -491,6 +507,9 @@ type App struct {
 	conns           map[net.Conn]*connState
 	connectionsByIP map[string]int
 	shutdownOnce    sync.Once
+	shutdownDone    chan struct{}
+	shutdownErr     error
+	shutdownCtx     context.Context // guarded by contextMu
 	started         atomic.Bool
 	serveReady      chan struct{}
 	buildMu         sync.Mutex
@@ -500,7 +519,8 @@ type App struct {
 	routeMetaMu     sync.RWMutex
 	routeMeta       []RouteInfo
 	healthMu        sync.RWMutex
-	healthChecks    []registeredHealthCheck
+	healthChecks    []*registeredHealthCheck
+	healthSlots     chan struct{}
 	openapi         OpenAPIConfig
 	hasMiddleware   bool
 	reliability     *Reliability
@@ -515,10 +535,12 @@ type App struct {
 	// preforkSupervisor is non-nil only in a ListenPrefork master process,
 	// for the duration of that call, so Reload can reach the running
 	// supervisor without threading it through every call site.
-	preforkSupervisor atomic.Pointer[preforkSupervisor]
-	metrics           metricsTracker
-	contextMu         sync.RWMutex
-	baseContext       context.Context
+	preforkSupervisor    atomic.Pointer[preforkSupervisor]
+	metrics              metricsTracker
+	bufferedRequestBytes atomic.Int64
+	trustedEdgeNets      []*net.IPNet // populated by the opt-in deployment gate before serving
+	contextMu            sync.RWMutex
+	baseContext          context.Context
 }
 
 type connState struct {
@@ -631,6 +653,11 @@ func applyConfigDefaults(cfg *Config) {
 // handlers and initializes the app struct together with the reliability
 // subsystem when enabled.
 func buildApp(cfg Config) *App {
+	if cfg.DeploymentSecurityGate != nil {
+		gate := *cfg.DeploymentSecurityGate
+		gate.TrustedProxyCIDRs = append([]string(nil), gate.TrustedProxyCIDRs...)
+		cfg.DeploymentSecurityGate = &gate
+	}
 	if err := kernel.NormalizeConfig(&cfg.Kernel); err != nil {
 		panic(err)
 	}
@@ -679,6 +706,8 @@ func buildApp(cfg Config) *App {
 		logger:          logger,
 		conns:           make(map[net.Conn]*connState),
 		connectionsByIP: make(map[string]int),
+		healthSlots:     make(chan struct{}, 32),
+		shutdownDone:    make(chan struct{}),
 		drainingCh:      make(chan struct{}),
 		fastHTTP1:       cfg.Mode == ModeFast,
 	}
@@ -957,22 +986,22 @@ func (a *App) Group(prefix string, handlers ...HandlerFunc) *Group {
 type REFEngine interface {
 	// Capabilities returns the capability registry.
 	Capabilities() any
-	
+
 	// Intents returns the intent registry.
 	Intents() any
-	
+
 	// RegisterDefinition registers a type-erased intent.
 	RegisterDefinition(def any) error
-	
+
 	// Compile builds execution plans for all registered intents.
 	Compile() error
-	
+
 	// Dispatch executes an intent by invocation input.
 	Dispatch(ctx context.Context, inv any) (any, error)
-	
+
 	// DispatchPreview evaluates an intent without committing effects.
 	DispatchPreview(ctx context.Context, inv any) (any, error)
-	
+
 	// Plan returns the compiled execution plan for an intent name.
 	Plan(name string) (any, bool)
 }
@@ -1002,6 +1031,16 @@ func (a *App) OnListen(fn HookFunc) *App {
 }
 
 func (a *App) OnShutdown(fn HookFunc) *App {
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
+	a.assertMutable()
+	a.hooks.onShutdown = append(a.hooks.onShutdown, func(context.Context) error { return fn() })
+	return a
+}
+
+// OnShutdownContext registers cleanup that can observe the shutdown deadline.
+// Go cannot stop a callback that ignores context cancellation.
+func (a *App) OnShutdownContext(fn func(context.Context) error) *App {
 	a.buildMu.Lock()
 	defer a.buildMu.Unlock()
 	a.assertMutable()
@@ -1138,7 +1177,7 @@ func (a *App) ListenTLSContext(ctx context.Context, addr, certFile, keyFile stri
 	if err != nil {
 		return err
 	}
-	return a.ServeContext(ctx, tls.NewListener(ln, tlsConfig))
+	return a.ServeContext(ctx, secureTLSListener{Listener: tls.NewListener(ln, tlsConfig)})
 }
 
 // ListenUnix serves HTTP over a Unix-domain socket. The socket path is
@@ -1175,7 +1214,7 @@ func (a *App) ServeTLS(ln net.Listener, config *tls.Config) error {
 	if err != nil {
 		return err
 	}
-	return a.Serve(tls.NewListener(ln, cfg))
+	return a.Serve(secureTLSListener{Listener: tls.NewListener(ln, cfg)})
 }
 
 func (a *App) prepareTLSConfig(config *tls.Config) (*tls.Config, error) {
@@ -1238,7 +1277,7 @@ func (a *App) ListenTLSWithGracefulShutdown(addr, certFile, keyFile string) erro
 	if err != nil {
 		return err
 	}
-	return a.runWithSignal(func() error { return a.Serve(tls.NewListener(ln, tlsConfig)) })
+	return a.runWithSignal(func() error { return a.Serve(secureTLSListener{Listener: tls.NewListener(ln, tlsConfig)}) })
 }
 
 func (a *App) serveWithSignal(ln net.Listener, serve func(net.Listener) error) error {
@@ -1286,7 +1325,8 @@ func (a *App) ServeContext(ctx context.Context, ln net.Listener) error {
 	if ctx == nil {
 		return errors.New("fh: nil context")
 	}
-	if err := a.startServing(ln); err != nil {
+	_, tlsEnabled := ln.(secureTLSListener)
+	if err := a.startServing(ln, tlsEnabled); err != nil {
 		return err
 	}
 	serveDone := make(chan struct{})
@@ -1389,8 +1429,7 @@ func (a *App) Shutdown() error {
 	}
 	err := a.beginShutdown()
 	a.activeConn.Wait()
-	a.runShutdownHooks()
-	return err
+	return errors.Join(err, a.runShutdownHooks(context.Background()))
 }
 
 func (a *App) ShutdownWithTimeout(d time.Duration) error {
@@ -1403,9 +1442,10 @@ func (a *App) ShutdownWithContext(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("fh: nil context")
 	}
-	if err := a.beginShutdown(); err != nil {
-		return err
-	}
+	a.contextMu.Lock()
+	a.shutdownCtx = ctx
+	a.contextMu.Unlock()
+	beginErr := a.beginShutdown()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1414,11 +1454,10 @@ func (a *App) ShutdownWithContext(ctx context.Context) error {
 	}()
 	select {
 	case <-done:
-		a.runShutdownHooks()
-		return nil
+		return errors.Join(beginErr, a.runShutdownHooks(ctx))
 	case <-ctx.Done():
 		a.closeAllConnections()
-		return ctx.Err()
+		return errors.Join(beginErr, ctx.Err())
 	}
 }
 
@@ -1473,36 +1512,64 @@ func (a *App) closeAllConnections() {
 	a.connMu.Unlock()
 }
 
-func (a *App) runShutdownHooks() {
+func (a *App) runShutdownHooks(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.shutdownOnce.Do(func() {
-		for _, root := range a.staticRoots {
-			if err := root.Close(); err != nil {
-				a.logger.Error("static root shutdown error", "error", err)
-			}
-		}
-		if a.audit != nil {
-			if closer, ok := a.audit.(AuditSinkCloser); ok {
-				if err := closer.Close(); err != nil {
-					a.logger.Error("audit shutdown error", "error", err)
+		go func() {
+			defer close(a.shutdownDone)
+			var errs []error
+			for _, root := range a.staticRoots {
+				if err := root.Close(); err != nil {
+					a.logger.Error("static root shutdown error", "error", err)
+					errs = append(errs, err)
 				}
 			}
-		}
-		if a.reliability != nil {
-			if err := a.reliability.Close(); err != nil {
-				a.logger.Error("reliability shutdown error", "error", err)
+			if a.audit != nil {
+				if closer, ok := a.audit.(AuditSinkCloser); ok {
+					if err := closer.Close(); err != nil {
+						a.logger.Error("audit shutdown error", "error", err)
+						errs = append(errs, err)
+					}
+				}
 			}
-		}
-		for _, fn := range a.hooks.onShutdown {
-			if err := fn(); err != nil {
-				a.logger.Error("shutdown hook error", "error", err)
+			if a.reliability != nil {
+				if err := a.reliability.Close(); err != nil {
+					a.logger.Error("reliability shutdown error", "error", err)
+					errs = append(errs, err)
+				}
 			}
-		}
-		if a.cfg.SharedState != nil {
-			if err := a.cfg.SharedState.Close(); err != nil {
-				a.logger.Error("shared state shutdown error", "error", err)
+			for _, fn := range a.hooks.onShutdown {
+				if err := invokeShutdownHook(ctx, fn); err != nil {
+					a.logger.Error("shutdown hook error", "error", err)
+					errs = append(errs, err)
+				}
 			}
-		}
+			if a.cfg.SharedState != nil {
+				if err := a.cfg.SharedState.Close(); err != nil {
+					a.logger.Error("shared state shutdown error", "error", err)
+					errs = append(errs, err)
+				}
+			}
+			a.shutdownErr = errors.Join(errs...)
+		}()
 	})
+	select {
+	case <-a.shutdownDone:
+		return a.shutdownErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func invokeShutdownHook(ctx context.Context, fn func(context.Context) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("shutdown hook panic: %v", r)
+		}
+	}()
+	return fn(ctx)
 }
 
 func (a *App) setH2Conn(conn net.Conn, h2c *h2Conn) {
@@ -1623,6 +1690,8 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 
 	accumulated := buf[:0]
 	readDeadlineArmed := false
+	var reservedBodyBytes int64
+	defer func() { a.releaseBufferedBody(reservedBodyBytes) }()
 
 	for {
 		var requestStart time.Time
@@ -1786,6 +1855,14 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			_ = writeAll(conn, serverError413)
 			return
 		}
+		if (!a.cfg.StreamRequestBody || hasUpgradeH2C(ctx)) && !ctx.Header.Chunked && ctx.Header.ContentLength > 0 {
+			if !a.reserveBufferedBody(int64(ctx.Header.ContentLength)) {
+				releaseCtx(ctx)
+				_ = writeAll(conn, serverError503)
+				return
+			}
+			reservedBodyBytes += int64(ctx.Header.ContentLength)
+		}
 		if a.cfg.RequestHeadHandler != nil {
 			headCtx := connCtx
 			cancelHead := func() {}
@@ -1814,11 +1891,19 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 				_ = writeAll(conn, serverError400)
 				return
 			}
-			leftover, bodyErr := readH2CUpgradeBody(conn, ctx, accumulated, headEnd+4, a.cfg.MaxRequestBodySize, a.cfg.RequestBodyTimeout)
+			leftover, bodyErr := readH2CUpgradeBody(conn, ctx, accumulated, headEnd+4, a.cfg.MaxRequestBodySize, a.cfg.RequestBodyTimeout, func(n int) bool {
+				if !a.reserveBufferedBody(int64(n)) {
+					return false
+				}
+				reservedBodyBytes += int64(n)
+				return true
+			})
 			if bodyErr != nil {
 				releaseCtx(ctx)
 				if errors.Is(bodyErr, ErrBodyTooLarge) {
 					_ = writeAll(conn, serverError413)
+				} else if errors.Is(bodyErr, ErrBufferedBodyBudget) {
+					_ = writeAll(conn, serverError503)
 				} else {
 					_ = writeAll(conn, serverError400)
 				}
@@ -1885,13 +1970,21 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			streamedBody = newRequestBodyStream(conn, accumulated[bodyStart:], bodyLen, chunkedBody, a.cfg.MaxRequestBodySize)
 			ctx.requestBodyStream = streamedBody
 		} else if chunkedBody {
-			body, leftover, trailers, readErr := readChunkedBody(conn, accumulated[bodyStart:], a.cfg.MaxRequestBodySize, bodyBudget)
+			body, leftover, trailers, readErr := readChunkedBodyWithReserve(conn, accumulated[bodyStart:], a.cfg.MaxRequestBodySize, bodyBudget, func(n int) bool {
+				if !a.reserveBufferedBody(int64(n)) {
+					return false
+				}
+				reservedBodyBytes += int64(n)
+				return true
+			})
 			if readErr != nil {
 				releaseCtx(ctx)
 				if isTimeoutErr(readErr) {
 					_ = writeAll(conn, serverError408)
 				} else if errors.Is(readErr, ErrBodyTooLarge) {
 					_ = writeAll(conn, serverError413)
+				} else if errors.Is(readErr, ErrBufferedBodyBudget) {
+					_ = writeAll(conn, serverError503)
 				} else {
 					_ = writeAll(conn, serverError400)
 				}
@@ -1990,6 +2083,8 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		upgraded := ctx.upgraded
 
 		releaseCtx(ctx)
+		a.releaseBufferedBody(reservedBodyBytes)
+		reservedBodyBytes = 0
 
 		if upgraded || !keepAlive {
 			return
@@ -2284,10 +2379,10 @@ func hasUpgradeH2C(ctx *DefaultCtx) bool {
 	return hasHeaderToken(conn, "upgrade") && hasHeaderToken(conn, "http2-settings")
 }
 
-func readH2CUpgradeBody(conn net.Conn, ctx *DefaultCtx, buffered []byte, bodyStart, maxBody int, timeout time.Duration) ([]byte, error) {
+func readH2CUpgradeBody(conn net.Conn, ctx *DefaultCtx, buffered []byte, bodyStart, maxBody int, timeout time.Duration, reserve func(int) bool) ([]byte, error) {
 	data := buffered[bodyStart:]
 	if ctx.Header.Chunked {
-		body, leftover, trailers, err := readChunkedBody(conn, data, maxBody, timeout)
+		body, leftover, trailers, err := readChunkedBodyWithReserve(conn, data, maxBody, timeout, reserve)
 		if err != nil {
 			return nil, err
 		}
@@ -2474,6 +2569,7 @@ func (a *App) Queue() *DurableQueue {
 var serverError400 = []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError408 = []byte("HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError413 = []byte("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError503 = []byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError417 = []byte("HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError431 = []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError505 = []byte("HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")

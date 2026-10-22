@@ -69,7 +69,7 @@ func (a *App) ListenAutoTLS(domains []string, cacheDir string) error {
 	if err != nil {
 		return err
 	}
-	return a.Serve(tls.NewListener(ln, tlsConfig))
+	return a.Serve(secureTLSListener{Listener: tls.NewListener(ln, tlsConfig)})
 }
 
 // ListenAutoTLSWithGracefulShutdown is the graceful-shutdown counterpart to
@@ -87,7 +87,7 @@ func (a *App) ListenAutoTLSWithGracefulShutdown(domains []string, cacheDir strin
 	if err != nil {
 		return err
 	}
-	return a.runWithSignal(func() error { return a.Serve(tls.NewListener(ln, tlsConfig)) })
+	return a.runWithSignal(func() error { return a.Serve(secureTLSListener{Listener: tls.NewListener(ln, tlsConfig)}) })
 }
 
 func (a *App) autoTLSConfig(domains []string, cacheDir string) (*tls.Config, error) {

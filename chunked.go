@@ -10,6 +10,7 @@ import (
 var (
 	ErrInvalidChunkedBody = errors.New("invalid chunked request body")
 	ErrBodyTooLarge       = errors.New("request body too large")
+	ErrBufferedBodyBudget = errors.New("buffered request body budget exceeded")
 )
 
 const maxChunkLine = 4096
@@ -17,6 +18,10 @@ const maxChunkLine = 4096
 // readChunkedBody decodes one RFC 9112 chunked body. Initial may also contain
 // bytes from the next pipelined request; those are returned as leftover.
 func readChunkedBody(conn net.Conn, initial []byte, maxBody int, timeout time.Duration) (body, leftover []byte, trailers []Header, err error) {
+	return readChunkedBodyWithReserve(conn, initial, maxBody, timeout, nil)
+}
+
+func readChunkedBodyWithReserve(conn net.Conn, initial []byte, maxBody int, timeout time.Duration, reserve func(int) bool) (body, leftover []byte, trailers []Header, err error) {
 	// Arm one absolute body deadline. Resetting it for every chunk would let a
 	// slow sender keep the connection alive indefinitely by periodically sending
 	// a byte. A zero timeout intentionally leaves the caller's deadline intact.
@@ -27,7 +32,9 @@ func readChunkedBody(conn net.Conn, initial []byte, maxBody int, timeout time.Du
 	}
 	wire := append(make([]byte, 0, len(initial)+4096), initial...)
 	pos := 0
-	body = make([]byte, 0, minInt(len(initial), maxBody))
+	// Grow the decoded body only after reserve has admitted each chunk.
+	// The wire buffer holds framing bytes and is bounded by the request limits.
+	body = nil
 
 	readMore := func() error {
 		var scratch [4096]byte
@@ -90,6 +97,9 @@ func readChunkedBody(conn net.Conn, initial []byte, maxBody int, timeout time.Du
 		}
 		if size > maxBody-len(body) {
 			return nil, nil, nil, ErrBodyTooLarge
+		}
+		if reserve != nil && !reserve(size) {
+			return nil, nil, nil, ErrBufferedBodyBudget
 		}
 		if err := ensure(size + 2); err != nil {
 			return nil, nil, nil, err

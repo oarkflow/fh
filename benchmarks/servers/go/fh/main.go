@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"os"
+	"runtime/pprof"
 	"strconv"
 
 	"github.com/oarkflow/fh"
@@ -23,11 +25,19 @@ func benchmarkUsers() []user {
 }
 
 func main() {
-	app := fh.NewFast(
+	opts := []fh.Option{
 		fh.WithDisableHTTP2(true),
 		fh.WithDisablePanicRecovery(true),
 		fh.WithSendDateHeader(false),
-	)
+	}
+	if raw := os.Getenv("FH_BENCH_WRITE_BUFFER_SIZE"); raw != "" {
+		size, err := strconv.Atoi(raw)
+		if err != nil || size <= 0 {
+			log.Fatal("FH_BENCH_WRITE_BUFFER_SIZE must be a positive byte count")
+		}
+		opts = append(opts, fh.WithWriteBufferSize(size))
+	}
+	app := fh.NewFast(opts...)
 
 	app.Get("/plaintext", func(c fh.Ctx) error { return c.SendString("Hello, World!") })
 	app.Get("/json", func(c fh.Ctx) error {
@@ -48,5 +58,21 @@ func main() {
 	})
 	app.Get("/users", func(c fh.Ctx) error { return c.JSON(users) })
 
+	if path := os.Getenv("FH_BENCH_CPU_PROFILE"); path != "" {
+		file, err := os.Create(path)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := pprof.StartCPUProfile(file); err != nil {
+			log.Fatal(err)
+		}
+		err = app.ListenWithGracefulShutdown("127.0.0.1:3001")
+		pprof.StopCPUProfile()
+		_ = file.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	log.Fatal(app.Listen("127.0.0.1:3001"))
 }

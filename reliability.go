@@ -102,6 +102,14 @@ type QueueStorage interface {
 	Close() error
 }
 
+// MultiReplicaQueueStorage is an optional capability for stores with atomic
+// claims and fenced, expiring leases. Recover must not reclaim live work owned
+// by another replica. The strict deployment gate requires this capability.
+type MultiReplicaQueueStorage interface {
+	QueueStorage
+	SupportsMultiReplica() bool
+}
+
 // QueueJobLister is an optional extension for QueueStorage implementations that
 // can expose jobs for admin/API tooling. The state value should be one of
 // pending, processing, done or failed; an empty state means all states. Limit <=
@@ -518,6 +526,7 @@ type IdempotencyStore struct {
 	path    string
 	ttl     time.Duration
 	records map[string]*IdempotencyRecord
+	failed  error
 }
 
 func OpenIdempotencyStore(path string, ttl time.Duration) (*IdempotencyStore, error) {
@@ -528,7 +537,9 @@ func OpenIdempotencyStore(path string, ttl time.Duration) (*IdempotencyStore, er
 		return nil, err
 	}
 	s := &IdempotencyStore{path: path, ttl: ttl, records: make(map[string]*IdempotencyRecord)}
-	_ = s.load()
+	if err := s.load(); err != nil {
+		return nil, fmt.Errorf("fh: load idempotency store: %w", err)
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
@@ -551,7 +562,13 @@ func (s *IdempotencyStore) load() error {
 	sc.Buffer(buf, maxScannerBufSize)
 	for sc.Scan() {
 		var rec IdempotencyRecord
-		if json.Unmarshal(sc.Bytes(), &rec) == nil && rec.Key != "" && (rec.ExpiresAt.IsZero() || rec.ExpiresAt.After(now)) {
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+			return fmt.Errorf("fh: invalid idempotency record: %w", err)
+		}
+		if rec.Key == "" {
+			return errors.New("fh: idempotency record missing key")
+		}
+		if rec.ExpiresAt.IsZero() || rec.ExpiresAt.After(now) {
 			cp := rec
 			s.records[rec.Key] = &cp
 		}
@@ -562,6 +579,9 @@ func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (Idempotency
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failed != nil {
+		return 0, nil, s.failed
+	}
 	if rec := s.records[key]; rec != nil {
 		if !rec.ExpiresAt.IsZero() && rec.ExpiresAt.Before(now) {
 			delete(s.records, key)
@@ -576,13 +596,19 @@ func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (Idempotency
 		}
 	}
 	rec := &IdempotencyRecord{Key: key, RequestHash: reqHash, Method: method, Path: path, State: "processing", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(s.ttl)}
+	if err := s.appendLocked(rec); err != nil {
+		return 0, nil, err
+	}
 	s.records[key] = rec
-	return idemNew, cloneIdem(rec), s.appendLocked(rec)
+	return idemNew, cloneIdem(rec), nil
 }
 func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType string, headers map[string][]string, response []byte) error {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failed != nil {
+		return s.failed
+	}
 	rec := s.records[key]
 	if rec == nil {
 		return nil
@@ -590,13 +616,18 @@ func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType
 	if rec.RequestHash != reqHash {
 		return fmt.Errorf("idempotency hash mismatch for key %q", key)
 	}
-	rec.State = "completed"
-	rec.StatusCode = status
-	rec.ContentType = contentType
-	rec.Headers = cleanReplayHeaders(headers)
-	rec.Response = append(rec.Response[:0], response...)
-	rec.UpdatedAt = now
-	return s.appendLocked(rec)
+	completed := cloneIdem(rec)
+	completed.State = "completed"
+	completed.StatusCode = status
+	completed.ContentType = contentType
+	completed.Headers = cleanReplayHeaders(headers)
+	completed.Response = append([]byte(nil), response...)
+	completed.UpdatedAt = now
+	if err := s.appendLocked(completed); err != nil {
+		return err
+	}
+	s.records[key] = completed
+	return nil
 }
 func (s *IdempotencyStore) PurgeExpired(ctx context.Context, now time.Time) (int, error) {
 	if s == nil {
@@ -638,10 +669,18 @@ func (s *IdempotencyStore) appendLocked(rec *IdempotencyRecord) error {
 	if err != nil {
 		return err
 	}
-	if _, err = s.file.Write(append(b, '\n')); err != nil {
-		return err
+	written, err := s.file.Write(append(b, '\n'))
+	if err == nil && written != len(b)+1 {
+		err = io.ErrShortWrite
 	}
-	return s.file.Sync()
+	if err == nil {
+		err = s.file.Sync()
+	}
+	if err != nil {
+		s.failed = fmt.Errorf("fh: idempotency store write failed: %w", err)
+		return s.failed
+	}
+	return nil
 }
 func cloneIdem(r *IdempotencyRecord) *IdempotencyRecord {
 	if r == nil {

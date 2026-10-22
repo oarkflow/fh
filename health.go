@@ -2,8 +2,9 @@ package fh
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -18,12 +19,21 @@ type registeredHealthCheck struct {
 	name    string
 	timeout time.Duration
 	fn      func(context.Context) error
+	mu      sync.Mutex
+	run     *healthRun
+}
+
+type healthRun struct {
+	done chan struct{}
+	err  error // published by closing done
 }
 
 type HealthProbe func() bool
 
 type HealthConfig struct {
 	Probes map[string]HealthProbe
+	// Timeout bounds each legacy probe. Zero uses two seconds.
+	Timeout time.Duration
 }
 
 type HealthResponse struct {
@@ -35,13 +45,15 @@ type HealthResponse struct {
 func (a *App) AddHealthCheck(name string, timeout time.Duration, fn func(context.Context) error) *App {
 	a.healthMu.Lock()
 	defer a.healthMu.Unlock()
-	for i, hc := range a.healthChecks {
+	for _, hc := range a.healthChecks {
 		if hc.name == name {
-			a.healthChecks[i] = registeredHealthCheck{name: name, timeout: timeout, fn: fn}
+			hc.mu.Lock()
+			hc.timeout, hc.fn = timeout, fn
+			hc.mu.Unlock()
 			return a
 		}
 	}
-	a.healthChecks = append(a.healthChecks, registeredHealthCheck{name: name, timeout: timeout, fn: fn})
+	a.healthChecks = append(a.healthChecks, &registeredHealthCheck{name: name, timeout: timeout, fn: fn})
 	return a
 }
 
@@ -51,7 +63,7 @@ func (a *App) HealthStatus(ctx context.Context) (bool, []HealthCheckResult) {
 		ctx = context.Background()
 	}
 	a.healthMu.RLock()
-	checks := append([]registeredHealthCheck(nil), a.healthChecks...)
+	checks := append([]*registeredHealthCheck(nil), a.healthChecks...)
 	a.healthMu.RUnlock()
 
 	if len(checks) == 0 {
@@ -62,17 +74,14 @@ func (a *App) HealthStatus(ctx context.Context) (bool, []HealthCheckResult) {
 	// Each check writes a distinct result slot, but the failure state is shared. Keep the
 	// aggregation atomic so concurrent probes remain race-free without adding
 	// a lock to the (common) result writes.
-	var failed atomic.Bool
 	var wg sync.WaitGroup
 
 	for i, hc := range checks {
 		wg.Add(1)
-		go func(idx int, c registeredHealthCheck) {
+		go func(idx int, c *registeredHealthCheck) {
 			defer wg.Done()
 			start := time.Now()
-			tCtx, cancel := context.WithTimeout(ctx, c.timeout)
-			defer cancel()
-			err := c.fn(tCtx)
+			err := a.runHealthCheck(ctx, c)
 			dur := time.Since(start).String()
 			if err != nil {
 				results[idx] = HealthCheckResult{
@@ -81,7 +90,6 @@ func (a *App) HealthStatus(ctx context.Context) (bool, []HealthCheckResult) {
 					Latency: dur,
 					Error:   err.Error(),
 				}
-				failed.Store(true)
 			} else {
 				results[idx] = HealthCheckResult{
 					Name:    c.name,
@@ -92,33 +100,97 @@ func (a *App) HealthStatus(ctx context.Context) (bool, []HealthCheckResult) {
 		}(i, hc)
 	}
 	wg.Wait()
-	return !failed.Load(), results
+	for _, result := range results {
+		if result.Status != "ok" {
+			return false, results
+		}
+	}
+	return true, results
+}
+
+// runHealthCheck shares an outstanding run between callers. A callback that
+// ignores cancellation can occupy one slot, but repeated polls cannot create
+// additional stuck callbacks for the same check.
+func (a *App) runHealthCheck(ctx context.Context, check *registeredHealthCheck) error {
+	if check == nil {
+		return errors.New("health check is nil")
+	}
+	check.mu.Lock()
+	fn := check.fn
+	if fn == nil {
+		check.mu.Unlock()
+		return errors.New("health check is nil")
+	}
+	timeout := check.timeout
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	run := check.run
+	if run == nil {
+		select {
+		case a.healthSlots <- struct{}{}:
+			run = &healthRun{done: make(chan struct{})}
+			check.run = run
+			go func() {
+				defer func() {
+					if p := recover(); p != nil {
+						run.err = fmt.Errorf("health check panic: %v", p)
+					}
+					<-a.healthSlots
+					check.mu.Lock()
+					check.run = nil
+					close(run.done)
+					check.mu.Unlock()
+				}()
+				run.err = fn(ctx)
+			}()
+		default:
+			check.mu.Unlock()
+			return errors.New("health check capacity exhausted")
+		}
+	}
+	check.mu.Unlock()
+	select {
+	case <-run.done:
+		return run.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // HealthCheck registers a health check endpoint at path with configured probes.
 func (a *App) HealthCheck(path string, config HealthConfig) *App {
+	checks := make(map[string]*registeredHealthCheck, len(config.Probes))
+	for name, probe := range config.Probes {
+		p := probe
+		checks[name] = &registeredHealthCheck{name: name, timeout: config.Timeout, fn: func(context.Context) error {
+			if p == nil || !p() {
+				return errors.New("probe failed")
+			}
+			return nil
+		}}
+	}
 	a.Get(path, func(c Ctx) error {
-		results := make(map[string]bool, len(config.Probes))
+		results := make(map[string]bool, len(checks))
 		allPass := true
 
-		if len(config.Probes) > 0 {
+		if len(checks) > 0 {
 			var wg sync.WaitGroup
 			var mu sync.Mutex
-			for name, probe := range config.Probes {
-				if probe == nil {
-					continue
-				}
+			for name, check := range checks {
 				wg.Add(1)
-				go func(n string, p HealthProbe) {
+				go func(n string, hc *registeredHealthCheck) {
 					defer wg.Done()
-					pass := p()
+					pass := a.runHealthCheck(c.Context(), hc) == nil
 					mu.Lock()
 					results[n] = pass
 					if !pass {
 						allPass = false
 					}
 					mu.Unlock()
-				}(name, probe)
+				}(name, check)
 			}
 			wg.Wait()
 		}

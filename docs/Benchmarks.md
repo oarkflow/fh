@@ -1,5 +1,12 @@
 # Benchmark Results
 
+**Current-run context:** The million-requests-per-second figures below are
+from a historical recorded run with incomplete hardware metadata. A
+[2026-10-22 JSON investigation](../benchmarks/results/2026-10-22-json-investigation.md)
+on an Apple M2 Pro measured around 120,000 req/s with the repository's Go
+client and found substantial run-to-run variation. Treat these as separate
+environments and workloads; neither result is a guaranteed deployment rate.
+
 ## Overview
 
 This document summarizes the supplied `fh` cross-language benchmark run comparing:

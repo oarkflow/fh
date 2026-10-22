@@ -162,21 +162,25 @@ func guardedDialContext(base *net.Dialer, denyNets []*net.IPNet) func(ctx contex
 }
 
 func Gateway(routes map[string]Config) fh.HandlerFunc {
+	// Build once so transports (and their connection pools) are reused.
+	handlers := make(map[string]fh.HandlerFunc, len(routes))
+	for prefix, cfg := range routes {
+		if cfg.StripPrefix == "" {
+			cfg.StripPrefix = prefix
+		}
+		handlers[prefix] = New(cfg)
+	}
 	return func(c fh.Ctx) error {
 		var best string
-		var cfg Config
-		for prefix, candidate := range routes {
+		for prefix := range handlers {
 			if strings.HasPrefix(c.Path(), prefix) && len(prefix) > len(best) {
-				best, cfg = prefix, candidate
+				best = prefix
 			}
 		}
 		if best == "" {
 			return fh.NewHTTPError(fh.StatusBadGateway, "UPSTREAM_NOT_FOUND", "no upstream matches the request path")
 		}
-		if cfg.StripPrefix == "" {
-			cfg.StripPrefix = best
-		}
-		return New(cfg)(c)
+		return handlers[best](c)
 	}
 }
 

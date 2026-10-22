@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"sync/atomic"
 
@@ -22,7 +23,7 @@ type kernelCounters struct {
 	socketOptionErrors atomic.Uint64
 }
 
-func (a *App) startServing(ln net.Listener) error {
+func (a *App) startServing(ln net.Listener, tlsEnabled bool) error {
 	a.buildMu.Lock()
 	if !a.started.CompareAndSwap(false, true) {
 		a.buildMu.Unlock()
@@ -43,6 +44,30 @@ func (a *App) startServing(ln net.Listener) error {
 	a.contextMu.Unlock()
 	a.closed.Store(false)
 	a.draining.Store(false)
+	failStartup := func(err error) error {
+		a.closed.Store(true)
+		a.draining.Store(true)
+		if ln != nil {
+			_ = ln.Close()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), a.effectiveShutdownTimeout())
+		defer cancel()
+		return errors.Join(err, a.runShutdownHooks(ctx))
+	}
+	if err := a.validateDeployment(ln, tlsEnabled); err != nil {
+		return failStartup(err)
+	}
+	if a.reliability != nil {
+		if err := a.reliability.Start(); err != nil {
+			return failStartup(err)
+		}
+	}
+	a.router.Freeze()
+	for _, fn := range a.hooks.onListen {
+		if err := invokeListenHook(fn); err != nil {
+			return failStartup(err)
+		}
+	}
 	a.buildMu.Lock()
 	ready := a.serveReady
 	a.serveReady = nil
@@ -50,30 +75,27 @@ func (a *App) startServing(ln net.Listener) error {
 	if ready != nil {
 		close(ready)
 	}
-
-	if a.reliability != nil {
-		if err := a.reliability.Start(); err != nil {
-			if ln != nil {
-				_ = ln.Close()
-			}
-			return err
-		}
-	}
-	a.router.Freeze()
-	for _, fn := range a.hooks.onListen {
-		if err := fn(); err != nil {
-			if ln != nil {
-				_ = ln.Close()
-			}
-			return err
-		}
-	}
 	return nil
+}
+
+func invokeListenHook(fn HookFunc) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("listen hook panic: %v", r)
+		}
+	}()
+	return fn()
 }
 
 func (a *App) finishServing() {
 	a.activeConn.Wait()
-	a.runShutdownHooks()
+	a.contextMu.RLock()
+	shutdownCtx := a.shutdownCtx
+	a.contextMu.RUnlock()
+	if shutdownCtx == nil {
+		shutdownCtx = context.Background()
+	}
+	_ = a.runShutdownHooks(shutdownCtx)
 	a.contextMu.Lock()
 	a.baseContext = context.Background()
 	a.contextMu.Unlock()
@@ -84,6 +106,12 @@ func (a *App) finishServing() {
 // HTTP/TLS protocol engine. It is safe to call concurrently from reactor shards.
 func (a *App) acceptConnection(conn net.Conn) bool {
 	if conn == nil {
+		return false
+	}
+	if !a.allowedEdgePeer(conn) {
+		_ = conn.Close()
+		a.kernelCounters.dropped.Add(1)
+		a.kernelCounters.rejectedPerIP.Add(1)
 		return false
 	}
 	if a.sem != nil {
@@ -166,7 +194,9 @@ func normalizeServeError(err error, closed bool) error {
 
 func (a *App) listenKernel(addr string, tlsConfig *tls.Config) error {
 	host := kernel.Host{
-		StartServing:        a.startServing,
+		StartServing: func(ln net.Listener) error {
+			return a.startServing(ln, tlsConfig != nil)
+		},
 		FinishServing:       a.finishServing,
 		AcceptConnection:    a.acceptConnection,
 		PrintStartupBanner:  a.printStartupBanner,

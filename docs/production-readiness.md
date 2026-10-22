@@ -69,6 +69,76 @@ Use TLS 1.3 at fh or a trusted edge. `SecureByDefault` disables h2c, adds
 strict parsing/resource ceilings and hardened response headers, but cannot
 infer application policy or provision certificates.
 
+## Opt-in deployment gate and request-body budget
+
+The [hardened server example](../examples/hardened-server/README.md) is a
+runnable direct-origin and trusted-edge setup, with tested startup validation
+and public probes that omit internal health-check errors.
+
+For a public direct origin, configure `WithDeploymentSecurityGate` with
+`DeploymentDirectOrigin`; use `DeploymentTrustedEdge` and explicit
+`TrustedProxyCIDRs` behind an edge. Set `ExpectedReplicas` to the deployed
+replica count. When it exceeds one, confirm shared queue, idempotency, replay,
+and session stores with the corresponding `Shared*` fields. Declare replay
+and session usage with `UsesReplay` and `UsesSessions`, since middleware is
+opaque to the app. A failed gate
+returns a startup error listing the missing controls. Direct mode accepts the
+fh TLS serving entrypoints (`ServeTLS`, `ListenTLS*`, and `ListenAutoTLS*`); an arbitrary
+caller-wrapped TLS listener is not identifiable to the gate.
+For multiple replicas the file queue and file idempotency store are rejected.
+A custom queue must also implement `MultiReplicaQueueStorage` and attest to
+atomic claims, fenced leases, and recovery that does not steal live jobs. The
+built-in SQL queue does not currently provide this capability; use a verified
+external adapter before enabling queue workers across replicas.
+Run `contracttest.RunQueue` and `contracttest.RunIdempotency` from the
+adapter's integration tests against its real shared backend. The fixtures
+exercise independent handles, concurrent claims, lease expiry, restart, and
+backend outages; a passing in-memory mock is not sufficient evidence for a
+multi-replica deployment.
+
+```go
+app := fh.New(
+    fh.WithSecureByDefault(true),
+    fh.WithAllowedHosts("api.example.com"),
+    fh.WithMaxBufferedRequestBytes(64<<20),
+    fh.WithDeploymentSecurityGate(fh.DeploymentSecurityConfig{
+        Mode: fh.DeploymentDirectOrigin,
+        ExpectedReplicas: 1,
+    }),
+)
+```
+
+The gate verifies local configuration and operator declarations. It cannot
+verify external firewall rules, actual proxy placement, or authentication
+inside arbitrary application middleware. In trusted-edge mode, fh rejects
+connections whose raw socket peer is outside `TrustedProxyCIDRs`; configure
+the same CIDRs in `mw/realip` or `ProxyProtocolConfig.TrustedPeers` before
+trusting forwarded client identity.
+PROXY negotiation admits up to 256 pending handshakes by default, bounds
+prefaces to 4096 bytes, and drops bad peers individually. Tune
+`MaxPendingHandshakes` and `MaxHeaderBytes` for the trusted edge's connection
+pool and TLV usage.
+
+`WithMaxBufferedRequestBytes` adds an opt-in process-wide budget for request
+bodies buffered in memory by HTTP/1 and HTTP/2. Exceeding the budget rejects
+the request or resets its stream. Streaming bodies use transport flow control
+and are excluded from this buffered-body budget. Size the budget for expected
+concurrent uploads; it does not cap application allocations or decompressed
+payloads.
+
+Run the example and focused hardening checks with:
+
+```sh
+go test ./examples/hardened-server ./mw/proxy
+go test -race . -run 'Test(HealthProbe|ShutdownHook|StartupReady|DeploymentSecurityGate|ProxyProtocol|.*BufferedBodyBudget|ChunkedBodyBudget)'
+```
+
+Context-aware cleanup can be registered with `OnShutdownContext`. The
+`ShutdownWithContext` deadline covers draining and hooks, returning the
+deadline error if cleanup is still running. Go cannot forcibly terminate a
+callback that ignores context cancellation; such callbacks may continue after
+the call returns.
+
 ## Startup validation
 
 Annotate sensitive routes with `WithRouteSecurity` and fail deployment when

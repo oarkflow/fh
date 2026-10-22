@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,6 +113,52 @@ func TestParseCIDRsInvalidReturnsError(t *testing.T) {
 	_, err := parseCIDRs(Config{DeniedCIDRs: []string{"not-a-cidr"}})
 	if err == nil {
 		t.Fatal("expected error for invalid CIDR")
+	}
+}
+
+func TestGatewayValidatesUpstreamsAtSetup(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("invalid upstream was not rejected when Gateway was built")
+		}
+	}()
+	_ = Gateway(map[string]Config{"/api": {Target: "://invalid"}})
+}
+
+func TestGatewayReusesUpstreamConnection(t *testing.T) {
+	var connections atomic.Int32
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("upstream"))
+	}))
+	upstream.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	upstream.Start()
+	defer upstream.Close()
+
+	app := fh.New(fh.WithStartupBannerDisabled(true))
+	app.All("/*", Gateway(map[string]Config{"/api": {Target: upstream.URL, DisableSSRFGuard: true}}))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = app.Serve(listener) }()
+	defer app.ShutdownWithTimeout(time.Second)
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get("http://" + listener.Addr().String() + "/api/resource")
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("gateway request %d: response=%v err=%v", i, resp, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil || string(body) != "upstream" {
+			t.Fatalf("gateway response %d: body=%q err=%v", i, body, err)
+		}
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("gateway opened %d upstream connections for sequential requests", got)
 	}
 }
 

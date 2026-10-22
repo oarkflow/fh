@@ -149,6 +149,8 @@ type h2Stream struct {
 	trailers         []Header
 	trailerMu        sync.Mutex
 	body             []byte
+	bodyReserved     atomic.Int64
+	handlerStarted   atomic.Bool
 	bodyMu           sync.Mutex
 	bodyCond         *sync.Cond
 	bodyChunks       [][]byte
@@ -255,6 +257,9 @@ func (h *h2Conn) closeAllStreams() {
 	h.mu.Unlock()
 
 	for _, s := range streams {
+		if !s.handlerStarted.Load() {
+			h.app.releaseBufferedBody(s.bodyReserved.Swap(0))
+		}
 		s.reset.Store(true)
 		s.bodyMu.Lock()
 		s.bodyErr = net.ErrClosed
@@ -857,6 +862,12 @@ func (h *h2Conn) handleData(f h2Frame) error {
 		}
 		s.bodyMu.Unlock()
 	} else {
+		if !h.app.reserveBufferedBody(int64(len(p))) {
+			h.mu.Unlock()
+			h.sendRST(f.streamID, h2EnhanceYourCalm)
+			return nil
+		}
+		s.bodyReserved.Add(int64(len(p)))
 		s.body = append(s.body, p...)
 	}
 	if !isConnect {
@@ -1003,7 +1014,16 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 		return
 	}
 
+	h.mu.Lock()
+	if s.reset.Load() {
+		h.mu.Unlock()
+		<-h.streamSem
+		return
+	}
+	s.handlerStarted.Store(true)
+	h.mu.Unlock()
 	go func() {
+		defer h.app.releaseBufferedBody(s.bodyReserved.Swap(0))
 		defer func() { <-h.streamSem }()
 		ctx := h.acquireRequestCtx(s)
 		cancelHandler := func() {}
@@ -1758,6 +1778,9 @@ func (h *h2Conn) resetStream(id uint32) {
 	h.mu.Lock()
 	s := h.streams[id]
 	if s != nil {
+		if !s.handlerStarted.Load() {
+			h.app.releaseBufferedBody(s.bodyReserved.Swap(0))
+		}
 		s.reset.Store(true)
 		s.bodyMu.Lock()
 		s.bodyErr = net.ErrClosed

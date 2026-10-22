@@ -45,13 +45,12 @@ func (a *App) EnableHealth(prefix string, middleware ...HandlerFunc) *App {
 	a.Get(prefix+"/health", withHandlers(middleware, func(c Ctx) error { return c.JSON(Map{"status": "ok", "time": time.Now().UTC()}) })...)
 	a.Get(prefix+"/live", withHandlers(middleware, func(c Ctx) error { return c.JSON(Map{"status": "alive"}) })...)
 	a.Get(prefix+"/ready", withHandlers(middleware, func(c Ctx) error {
+		if a.IsDraining() {
+			return c.Status(StatusServiceUnavailable).JSON(Map{"status": "draining"})
+		}
 		ready, checks := a.HealthStatus(c.Context())
 		if !ready {
-			status := "unready"
-			if a.IsDraining() {
-				status = "draining"
-			}
-			return c.Status(StatusServiceUnavailable).JSON(Map{"status": status, "checks": checks})
+			return c.Status(StatusServiceUnavailable).JSON(Map{"status": "unready", "checks": checks})
 		}
 		return c.JSON(Map{"status": "ready", "checks": checks})
 	})...)
