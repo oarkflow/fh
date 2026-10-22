@@ -1905,6 +1905,7 @@ func (c *DefaultCtx) writeDirectJSONAppender200(app JSONAppender) error {
 }
 
 const directJSONHeaderReserve = 192
+
 // Keep common small JSON responses in one connection-owned buffer without
 // eagerly allocating the full configured read-buffer size per connection.
 const directJSONInitialBuffer = 512
@@ -1913,13 +1914,26 @@ func (c *DefaultCtx) directJSONBase() []byte {
 	if c.writeBuf == nil {
 		c.writeBuf = getBytes()
 		c.writeBufPooled = true
+		return (*c.writeBuf)[:directJSONHeaderReserve]
 	}
 	base := (*c.writeBuf)[:0]
-	if cap(base) < directJSONInitialBuffer {
-		return make([]byte, directJSONHeaderReserve, directJSONInitialBuffer)
+	if cap(base) >= directJSONInitialBuffer {
+		return base[:directJSONHeaderReserve]
 	}
-	return base[:directJSONHeaderReserve]
+	// Documented grow-on-demand behavior for New and NewFast, whose
+	// WriteBufferSize stays zero: persist a real connection-sized buffer
+	// instead of returning a per-request temp, so JSON bodies up to a few KiB
+	// stay contiguous with their header inside one buffer and small responses
+	// reuse it across requests without a fresh allocation.
+	*c.writeBuf = make([]byte, 0, growDirectJSONBufferBytes)
+	return (*c.writeBuf)[:directJSONHeaderReserve]
 }
+
+// growDirectJSONBufferBytes sizes the first grow-on-demand promotion of a
+// connection-owned write buffer that was created empty (WriteBufferSize zero).
+// It must hold JSON-header-reserve plus a typical small API response; 4 KiB
+// matches the shared bytesPool size class for later putBytes reuse.
+const growDirectJSONBufferBytes = 4096
 
 func (c *DefaultCtx) writeDirectJSONBytes200(base, out []byte) error {
 	c.responded = true

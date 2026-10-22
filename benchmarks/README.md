@@ -49,3 +49,11 @@ servers from the same run rather than treating them as universal rankings.
 The Go client, server processes, and percentile collection all share the
 benchmark host's CPU and memory. A short run can therefore show transient
 throughput dips unrelated to one handler's serialization cost.
+
+For repeated sampling that is robust to those background bursts, use
+interleaved rounds: `-rounds=N` (N > 1) reshuffles both server and scenario
+order every round, measures every server once per round, and prints a
+median-of-rounds table — each server is sampled inside the same time band, so
+a multi-second background spike cannot penalize a whole server section
+exclusively. `-nostart` assumes the servers are already running (for profiling
+or when starting them manually with custom `GODEBUG` settings).

@@ -38,6 +38,7 @@ type server struct {
 type result struct {
 	Server            string  `json:"server"`
 	Scenario          string  `json:"scenario"`
+	Round             int     `json:"round,omitempty"`
 	Requests          uint64  `json:"requests"`
 	Errors            uint64  `json:"errors"`
 	RequestsPerSecond float64 `json:"requests_per_second"`
@@ -65,6 +66,8 @@ func main() {
 	seed := flag.Int64("seed", 0, "server order seed; zero selects a random seed")
 	scenarioNames := flag.String("scenarios", "", "comma-separated scenario names; empty runs all")
 	scenarioSeed := flag.Int64("scenario-seed", 0, "shuffle scenario order with this seed; zero keeps the default order")
+	rounds := flag.Int("rounds", 1, "repeat rounds > 1 interleaves servers per scenario and reports medians")
+	noStart := flag.Bool("nostart", false, "assume servers are already running (profiling/debug runs)")
 	flag.Parse()
 	if *duration <= 0 || *warmup < 0 || *concurrency <= 0 {
 		fatalf("duration and concurrency must be positive; warmup cannot be negative")
@@ -116,11 +119,15 @@ func main() {
 		fmt.Printf(" %s", scenario.name)
 	}
 	fmt.Println()
-	cleanup, err := startServers(servers)
-	if err != nil {
-		fatalf("start servers: %v", err)
+	cleanup := func() {}
+	if !*noStart {
+		var err error
+		cleanup, err = startServers(servers)
+		if err != nil {
+			fatalf("start servers: %v", err)
+		}
+		defer cleanup()
 	}
-	defer cleanup()
 
 	for i := range servers {
 		if !waitReady(servers[i].port, 15*time.Second) {
@@ -130,20 +137,24 @@ func main() {
 
 	warmCPU(2 * time.Second)
 
-	results := make([]result, 0, len(servers)*len(scenarios))
-	for i := range servers {
-		baseURL := "http://127.0.0.1:" + servers[i].port
-		fmt.Printf("%s: warmup %s\n", servers[i].name, warmup)
-		for _, s := range runScenarios {
-			if err := validate(baseURL, s); err != nil {
-				fatalf("%s/%s validation: %v", servers[i].name, s.name, err)
+	results := make([]result, 0, len(servers)*len(runScenarios))
+	if *rounds > 1 {
+		runInterleavedRounds(*rounds, *seed, *scenarioSeed, servers, runScenarios, *warmup, *duration, *concurrency, &results)
+	} else {
+		for i := range servers {
+			baseURL := "http://127.0.0.1:" + servers[i].port
+			fmt.Printf("%s: warmup %s\n", servers[i].name, warmup)
+			for _, s := range runScenarios {
+				if err := validate(baseURL, s); err != nil {
+					fatalf("%s/%s validation: %v", servers[i].name, s.name, err)
+				}
 			}
-		}
-		for _, s := range runScenarios {
-			r := runLoad(baseURL, s, *warmup, *duration, *concurrency)
-			r.Server, r.Scenario = servers[i].name, s.name
-			results = append(results, r)
-			fmt.Printf("%-9s %-10s %9.0f req/s  p50 %7.3f ms  p95 %7.3f ms  errors %d\n", r.Server, r.Scenario, r.RequestsPerSecond, r.P50LatencyMS, r.P95LatencyMS, r.Errors)
+			for _, s := range runScenarios {
+				r := runLoad(baseURL, s, *warmup, *duration, *concurrency)
+				r.Server, r.Scenario = servers[i].name, s.name
+				results = append(results, r)
+				fmt.Printf("%-9s %-10s %9.0f req/s  p50 %7.3f ms  p95 %7.3f ms  errors %d\n", r.Server, r.Scenario, r.RequestsPerSecond, r.P50LatencyMS, r.P95LatencyMS, r.Errors)
+			}
 		}
 	}
 
@@ -158,6 +169,85 @@ func main() {
 		fatalf("write results: %v", err)
 	}
 	fmt.Printf("\nWrote %d results to %s\n", len(results), *output)
+	if *rounds > 1 {
+		printMedianSummary(results, servers, runScenarios)
+	}
+}
+
+// runInterleavedRounds measures each scenario once per server per round, with
+// both scenario and server order reshuffled every round. Desktop machines run
+// background tasks in multi-second bursts; sequential per-server sections can
+// be unlucky for a whole section, while interleaving samples every server in
+// the same time band and medians absorb isolated environmental bursts.
+func runInterleavedRounds(rounds int, seed, scenarioSeed int64, servers []server, runScenarios []scenario, warmup, duration time.Duration, concurrency int, results *[]result) {
+	// Validate every route once up front so mid-round validation failures do
+	// not waste measurement time.
+	for i := range servers {
+		baseURL := "http://127.0.0.1:" + servers[i].port
+		for _, s := range runScenarios {
+			if err := validate(baseURL, s); err != nil {
+				fatalf("%s/%s validation: %v", servers[i].name, s.name, err)
+			}
+		}
+	}
+	fmt.Printf("%d rounds x %d scenarios x %d servers; warmup %s, duration %s each\n", rounds, len(runScenarios), len(servers), warmup, duration)
+	for r := 0; r < rounds; r++ {
+		roundScenarios := append([]scenario(nil), runScenarios...)
+		rand.New(rand.NewSource(scenarioSeed)).Shuffle(len(roundScenarios), func(i, j int) {
+			roundScenarios[i], roundScenarios[j] = roundScenarios[j], roundScenarios[i]
+		})
+		for k, s := range roundScenarios {
+			scenarioServers := append([]server(nil), servers...)
+			rand.New(rand.NewSource(seed+int64(r)*1000+int64(k))).Shuffle(len(scenarioServers), func(i, j int) {
+				scenarioServers[i], scenarioServers[j] = scenarioServers[j], scenarioServers[i]
+			})
+			for i := range scenarioServers {
+				baseURL := "http://127.0.0.1:" + scenarioServers[i].port
+				out := runLoad(baseURL, s, warmup, duration, concurrency)
+				out.Server, out.Scenario, out.Round = scenarioServers[i].name, s.name, r
+				start := len(*results)
+				*results = append(*results, out)
+				out2 := (*results)[start]
+				fmt.Printf("[[%s]] round %d %-9s %-10s %9.0f req/s  p50 %7.3f ms  p95 %7.3f ms  errors %d\n", time.Now().Format("15:04:05.000"), out2.Round, out2.Server, out2.Scenario, out2.RequestsPerSecond, out2.P50LatencyMS, out2.P95LatencyMS, out2.Errors)
+			}
+		}
+	}
+}
+
+func printMedianSummary(results []result, servers []server, runScenarios []scenario) {
+	type key struct{ server, scenario string }
+	byKey := make(map[key][]result)
+	for _, r := range results {
+		k := key{r.Server, r.Scenario}
+		byKey[k] = append(byKey[k], r)
+	}
+	median := func(vals []float64) float64 {
+		sort.Float64s(vals)
+		return vals[len(vals)/2]
+	}
+	fmt.Println("\nMedian across rounds:")
+	fmt.Printf("%-9s %-10s %11s %11s %11s %11s %11s\n", "server", "scenario", "req/s", "avg ms", "p50 ms", "p95 ms", "p99 ms")
+	for i := range servers {
+		for _, s := range runScenarios {
+			rs := byKey[key{servers[i].name, s.name}]
+			if len(rs) == 0 {
+				continue
+			}
+			collect := func(f func(result) float64) []float64 {
+				vals := make([]float64, len(rs))
+				for i := range rs {
+					vals[i] = f(rs[i])
+				}
+				return vals
+			}
+			fmt.Printf("%-9s %-10s %11.0f %11.3f %11.3f %11.3f %11.3f\n", servers[i].name, s.name,
+				median(collect(func(r result) float64 { return r.RequestsPerSecond })),
+				median(collect(func(r result) float64 { return r.AverageLatencyMS })),
+				median(collect(func(r result) float64 { return r.P50LatencyMS })),
+				median(collect(func(r result) float64 { return r.P95LatencyMS })),
+				median(collect(func(r result) float64 { return r.P99LatencyMS })))
+		}
+	}
 }
 
 func selectScenarios(names string) ([]scenario, error) {
