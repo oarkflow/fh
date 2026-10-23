@@ -875,5 +875,8 @@ Remaining packages — see `mw/<package>/README.md` for full usage:
 | `mw/tracing` | Creates/propagates trace IDs and span metadata |
 | `mw/validate` | Request validation |
 | `mw/webhook` | Verifies webhook signatures with replay protection |
+| `mw/favicon` | Serves favicon.ico from memory or disk with caching, ETag, and 204 fallback |
+| `mw/redirect` | Enforces HTTPS, canonical host/domain redirection, and path mapping rules |
+| `mw/trailingslash` | Normalizes trailing slashes via HTTP 301/308 redirect or transparent rewrite |
 
 See [`mw/README.md`](../mw/README.md) for the package overview.

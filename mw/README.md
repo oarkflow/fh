@@ -128,5 +128,8 @@ Use the following middleware order for most public APIs:
 | `tracing` | Parses, creates and propagates trace context. |
 | `validate` | Applies core validation to untyped routes. |
 | `webhook` | Verifies, replay-protects and deduplicates webhook delivery. |
+| `favicon` | Serves favicon.ico from memory or disk with caching, ETag, and 204 fallback. |
+| `redirect` | Enforces HTTPS, canonical host/domain redirection, and path mapping rules. |
+| `trailingslash` | Normalizes trailing slashes via HTTP 301/308 redirect or transparent rewrite. |
 
 Each subdirectory contains its own `README.md` with focused examples.

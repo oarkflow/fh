@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Redirect Middleware (`mw/redirect`)**: HTTP redirect handler supporting automatic HTTPS enforcement, canonical domain/host redirection, and path mapping rules.
+- **Trailing Slash Middleware (`mw/trailingslash`)**: Normalizes trailing slashes via HTTP 301/308 redirects or transparent zero-roundtrip in-flight rewrites.
+- **Favicon Middleware (`mw/favicon`)**: Serves favicon from memory or file with ETag validation, long-lived caching, and 204 No Content fallback.
 - **JSON Buffer Growth**: Implemented grow-on-demand buffer allocation (`GrowBuffer`) for direct JSON serializations and interleaved benchmarks.
 - **Documentation Verification**: Full suite doc-example compile-checker testing all 32 subsystem guides.
 - **Supply Chain Integrity**: Added `go mod verify` step to lint pipeline.

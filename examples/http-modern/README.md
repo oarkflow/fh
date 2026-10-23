@@ -6,6 +6,9 @@ This example demonstrates the dependency-free modern HTTP features in `fh`:
 - General informational responses with `SendInformational`
 - `PushResource` helpers for stylesheets, scripts, and fonts
 - RFC 9218 `Priority` request parsing and response generation
+- In-memory Favicon serving with ETag and 204 fallback (`mw/favicon`)
+- URL trailing slash normalization with in-flight rewrites (`mw/trailingslash`)
+- Route redirection rules (`mw/redirect`)
 - HTTP/2 support for Early Hints and resource push, with HTTP/1.1 Early Hints fallback
 
 Run it from the repository root:
@@ -20,6 +23,9 @@ Then inspect the responses:
 curl -i http://localhost:8084/early-hints
 curl -i http://localhost:8084/resources
 curl -i -H 'Priority: u=1, i' http://localhost:8084/priority
+curl -i http://localhost:8084/favicon.ico
+curl -i http://localhost:8084/resources/
+curl -i http://localhost:8084/old-priority
 ```
 
 The priority endpoint returns the parsed request priority and emits a `Priority`

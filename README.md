@@ -23,7 +23,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 - **Live Config & Certificate Hot-Reload** — transactional, zero-downtime reconfiguration of routes, policies, and TLS certificates with generation tracking (`ConfigReloader`).
 - **Tamper-Evident Merkle Audit Ledger** — cryptographic audit logging with SHA-256 Merkle tree checkpoints for verifiable integrity.
 - **Codec system** — pluggable body parsers for JSON (grow-on-demand buffer), XML, form, multipart, CSV, NDJSON, text, and binary.
-- **74 built-in middleware packages** — security, CORS, CSRF, rate limiting, distributed caching, circuit breaking, tracing, metrics, sessions, and compliance.
+- **77 built-in middleware packages** — security, CORS, CSRF, rate limiting, redirects, trailing slash, favicon, caching, circuit breaking, tracing, metrics, sessions, and compliance.
 - **Reliability layer** — request journaling, idempotency keys, durable async queue, outbox/inbox, and dead letter queues (DLQ) without external queue services.
 - **Compliance layer** — 10 compliance profiles (Business, Professional, Enterprise, Strict, Financial, Healthcare, Government) with auto-mounted evidence endpoints.
 - **Zero-allocation pool design** — `sync.Pool` recycling for request contexts, byte buffers, HPACK decoders, and writers.
@@ -235,16 +235,16 @@ app.Get("/dashboard", authMiddleware, dashboardHandler)
 admin := app.Group("/admin", authMiddleware, adminLogger)
 ```
 
-`fh` includes **74 modular middleware packages** under `mw/`, each importable independently and documented with its own `README.md`:
+`fh` includes **77 modular middleware packages** under `mw/`, each importable independently and documented with its own `README.md`:
 
 | Category | Packages | Description |
 |---|---|---|
 | **Auth & Access Control** | `basicauth`, `apikey`, `csrf`, `cors`, `hostguard`, `security`, `mtls`, `ipwhitelist`, `ipthrottle`, `ipreputation`, `fetchmetadata`, `slowloris`, `earlydata`, `compliance` | Basic/API-key auth, CSRF, CORS, client-cert mTLS, host guards, IP throttling/reputation, and security headers. |
 | **Resilience & Traffic** | `ratelimiter`, `slidingwindow`, `circuitbreaker`, `bulkhead`, `loadshed`, `backpressure`, `adaptiveconcurrency`, `retrybudget`, `timeout`, `bodylimit` | Sliding window rate limits, circuit breakers, bulkheads, load shedding, adaptive concurrency, and timeouts. |
-| **Performance & Cache** | `cache`, `smartcache`, `coalesce`, `compress`, `decompress`, `etag`, `static`, `requestdedup` | In-memory/file response caching, request coalescing, deduplication, gzip compression/decompression, and ETags. |
+| **Performance & Cache** | `cache`, `smartcache`, `coalesce`, `compress`, `decompress`, `etag`, `static`, `requestdedup`, `favicon` | In-memory/file response caching, request coalescing, deduplication, gzip compression/decompression, ETags, and favicon serving. |
 | **Observability & Audit** | `logger`, `slowlog`, `tracing`, `metrics`, `servertiming`, `audit`, `auditlog`, `correlationid`, `requestid`, `pprof` | Structured logging, Prometheus metrics, distributed tracing propagation, audit ledgers, and pprof profiling. |
-| **Transport & Cryptography** | `httpsignature`, `securetransport`, `contentdigest`, `signature`, `realip`, `proxy`, `override`, `timestamp` | RFC 9421 Ed25519 signatures, RFC 9530 Content-Digest, device-bound WASM encryption, reverse proxy, and trusted IP normalization. |
-| **State & Orchestration** | `session`, `reliability`, `workflow`, `idempotency`, `replay`, `requesthash`, `tenant`, `tenantlimit`, `policy`, `actor`, `scheduler`, `lifecycle`, `acceptquery`, `apiversion`, `maintenance`, `conditional`, `skip`, `recover`, `rewrite`, `contract`, `privacy`, `admin`, `validate` | Multi-tenancy, sessions, idempotent execution, actor queues, API versioning, contract assertions, and panic recovery. |
+| **Transport & Cryptography** | `httpsignature`, `securetransport`, `contentdigest`, `signature`, `realip`, `proxy`, `override`, `timestamp`, `redirect` | RFC 9421 signatures, Content-Digest, device-bound encryption, reverse proxy, HTTPS/host redirects, and trusted IP normalization. |
+| **State & Orchestration** | `session`, `reliability`, `workflow`, `idempotency`, `replay`, `requesthash`, `tenant`, `tenantlimit`, `policy`, `actor`, `scheduler`, `lifecycle`, `acceptquery`, `apiversion`, `maintenance`, `conditional`, `skip`, `recover`, `rewrite`, `contract`, `privacy`, `admin`, `validate`, `trailingslash` | Multi-tenancy, sessions, idempotent execution, actor queues, trailing slash normalization, API versioning, and contracts. |
 
 See [`docs/middleware.md`](docs/middleware.md) for full configuration guides and recommended pipeline ordering, or [`mw/README.md`](mw/README.md) for the index.
 

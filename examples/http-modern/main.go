@@ -1,14 +1,36 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"log"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/favicon"
+	"github.com/oarkflow/fh/mw/redirect"
+	"github.com/oarkflow/fh/mw/trailingslash"
 )
 
-func main() {
+//go:embed favicon.ico
+var sampleFavicon []byte
+
+func buildApp() *fh.App {
 	app := fh.New()
+
+	// 1. Favicon middleware: serves sample favicon.ico with ETag and immutable caching
+	app.Use(favicon.New(favicon.Config{
+		Data: sampleFavicon,
+	}))
+
+	// 2. Trailing slash normalization: removes trailing slashes with transparent rewrite
+	app.Use(trailingslash.RemoveSlash(false))
+
+	// 3. Redirect middleware: redirect legacy endpoints to canonical routes
+	app.Use(redirect.New(redirect.Config{
+		Rules: map[string]string{
+			"/old-priority": "/priority",
+		},
+	}))
 
 	app.Get("/", func(c fh.Ctx) error {
 		return c.HTML(`<!doctype html>
@@ -20,6 +42,8 @@ func main() {
 <li><a href="/early-hints">Early Hints</a></li>
 <li><a href="/resources">Resource hints</a></li>
 <li><a href="/priority">RFC 9218 priority</a></li>
+<li><a href="/old-priority">Legacy redirect (/old-priority -> /priority)</a></li>
+<li><a href="/favicon.ico">Favicon (/favicon.ico)</a></li>
 </ul>
 </body>
 </html>`)
@@ -69,5 +93,10 @@ func main() {
 		})
 	})
 
+	return app
+}
+
+func main() {
+	app := buildApp()
 	log.Fatal(app.Listen(":8084"))
 }
