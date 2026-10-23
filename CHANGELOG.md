@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Production-Resilient Showcase Example (`examples/production-resilient`)**: End-to-end battle-tested microservice demonstrating zero-third-party-dependency defense-in-depth, panic recovery, circuit breaker, singleflight request coalescing, ingress body limits, sliding-window rate limiting, K8s liveness/readiness probes, Prometheus metrics, and high-concurrency benchmarks.
 - **Redirect Middleware (`mw/redirect`)**: HTTP redirect handler supporting automatic HTTPS enforcement, canonical domain/host redirection, and path mapping rules.
 - **Trailing Slash Middleware (`mw/trailingslash`)**: Normalizes trailing slashes via HTTP 301/308 redirects or transparent zero-roundtrip in-flight rewrites.
 - **Favicon Middleware (`mw/favicon`)**: Serves favicon from memory or file with ETag validation, long-lived caching, and 204 No Content fallback.

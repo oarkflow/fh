@@ -692,6 +692,7 @@ Full working examples in [`examples/`](examples/):
 | `basic` | Minimal "Hello World" |
 | `flash-messages` | Session-backed one-time flash messages and redirects |
 | `hardened-server` | Pre-configured production security baseline with audit logging, rate limiting, and graceful drain |
+| `production-resilient` | Battle-tested microservice showcase: defense-in-depth, panic recovery, circuit breaker, singleflight coalescing, K8s probes, and parallel load benchmarks |
 | `http-modern` | Modern HTTP helpers and protocol behavior |
 | `kernel_server` | Kernel-assisted server configuration and readiness |
 | `prefork` | Multi-process prefork serving |
