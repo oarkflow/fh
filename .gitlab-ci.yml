@@ -68,6 +68,7 @@ lint:
     - go vet ./...
     - staticcheck ./...
     - govulncheck ./...
+    - go mod verify
 
 # ============================================================================
 # test — Linux, matrixed across the declared Go version and current Go,
@@ -79,7 +80,7 @@ test:linux:
   tags: [linux]
   parallel:
     matrix:
-      - GO_VERSION: ["1.26.5", "1.27"]
+      - GO_VERSION: ["1.27.3", "1.27"]
   script:
     - go build ./...
     - go test ./... -count=1

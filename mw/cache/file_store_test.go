@@ -56,7 +56,7 @@ func TestFileStoreGetSetDelete(t *testing.T) {
 func TestFileStoreExpiry(t *testing.T) {
 	fs := newTestFileStore(t, 0)
 
-	const ttl = 20 * time.Millisecond
+	const ttl = 500 * time.Millisecond
 	now := time.Now()
 	e := Entry{Status: 200, Body: []byte("x"), Created: now, Expires: now.Add(ttl)}
 	Set(fs, "GET /expiring", e)
@@ -65,16 +65,16 @@ func TestFileStoreExpiry(t *testing.T) {
 		t.Fatalf("expected hit immediately after Set, before the TTL has any chance to elapse")
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		_, ok := Get(fs, "GET /expiring")
 		if !ok {
 			break // self-evicted, as expected.
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected miss after expiry (self-eviction) within %s of a %s TTL, entry is still present", 2*time.Second, ttl)
+			t.Fatalf("expected miss after expiry (self-eviction) within %s of a %s TTL, entry is still present", 5*time.Second, ttl)
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

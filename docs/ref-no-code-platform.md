@@ -684,7 +684,7 @@ only that package, and registering one needs no change to `ref/platform`.
 
 A complete Redis cache adapter:
 
-```go
+```text
 package redisadapter
 
 import (

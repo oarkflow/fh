@@ -46,7 +46,7 @@ In REF, execution order is determined strictly by **data dependency**, not the a
 
 #### The Problem in Traditional Frameworks:
 Middleware communicate by stuffing untyped, unstructured values into a shared request map:
-```go
+```text
 // Traditional HTTP Framework:
 func TenantMiddleware(c fh.Ctx) error {
     c.Locals("tenant_id", c.Get("X-Tenant-ID")) // untyped string key
@@ -68,7 +68,7 @@ func Handler(c fh.Ctx) error {
 #### How REF Fixes It: Typed Fact Keys & Dense Atomic Plan Slots
 REF replaces string-keyed maps with **strongly typed Fact Keys** and compile-time slot allocation:
 
-```go
+```text
 // 1. Declare typed fact key at package level
 var TenantKey    = fact.NewKey[string]("app.tenant_id")
 var PrincipalKey = fact.NewKey[PrincipalFact]("auth.principal")
@@ -101,7 +101,7 @@ func (MyIntent) Run(nc *ref.NodeContext, in MyInput) (ref.Outcome[MyOutput], err
 
 #### The Problem in Traditional Frameworks:
 Business logic is inextricably tied to HTTP structs (`fh.Ctx`, `http.Request`, `http.ResponseWriter`):
-```go
+```text
 // Traditional Handler:
 func HandleCreateOrder(c fh.Ctx) error {
     token := c.Get("Authorization")
@@ -120,7 +120,7 @@ If the business needs this same order creation triggered via **gRPC**, **WebSock
 #### How REF Fixes It: Pure Intent Contracts & Transport Projections
 In REF, business logic is written as a transport-neutral [`Intent[I, O]`](file:///Users/sujit/Sites/fh/ref/intent/intent.go):
 
-```go
+```text
 type CreateOrderIntent struct{}
 
 func (CreateOrderIntent) Name() ref.IntentName { return "order.create" }
@@ -173,7 +173,7 @@ When errors occur, REF maps transport-neutral categories into native protocol st
 
 #### The Problem in Traditional Frameworks:
 Handlers execute ad-hoc direct database writes, payment gateway calls, and email dispatches in the middle of request execution:
-```go
+```text
 // Traditional Handler:
 func HandleTransfer(c fh.Ctx) error {
     // Direct DB mutation
@@ -274,7 +274,7 @@ If dependencies are ready but decisions are pending, nodes wait in `gatedWait` (
 
 #### The Problem in Traditional Frameworks:
 Middleware evaluate security serially. The first middleware calls `c.Next()`. Another middleware might overwrite tenant or user context fields, leading to the **confused deputy problem**:
-```go
+```text
 // Traditional: Last writer wins, confused deputy hazard
 c.Locals("tenant", "org-A") // Set by header
 ...

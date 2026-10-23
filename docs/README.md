@@ -2,10 +2,10 @@
 
 **fh** is a standalone Go web framework that implements HTTP/1.1, HTTP/2, and WebSocket protocols entirely from scratch using only the Go standard library plus `golang.org/x/crypto` (OCSP stapling and ACME/`autocert`, both optional). It is not a wrapper around `net/http` or `fasthttp` — it has its own TCP server, HTTP parser, trie-based router, HTTP/2 framing engine, HPACK encoder/decoder, and WebSocket implementation.
 
-**Module:** `github.com/oarkflow/fh` · **Go:** 1.26.5+
+**Module:** `github.com/oarkflow/fh` · **Go:** 1.27.3+
 
-**Documentation version:** current `main` after `v0.0.23` · reviewed
-2026-09-13. For deployed applications, use the documentation from the exact
+**Documentation version:** current `main` after `v0.0.26` · reviewed
+2026-10-23. For deployed applications, use the documentation from the exact
 tag pinned in `go.mod`.
 
 See the [root README](../README.md) for a quick tour. This folder is the full reference.
@@ -23,6 +23,7 @@ options rather than a `Config` value.
 |---|---|
 | [Getting Started](getting-started.md) | Installation, quick start, basic concepts |
 | [API Conventions](api-conventions.md) | Handler/context types, construction, errors, streaming and lifecycle signatures |
+| [Versioning & Compatibility](versioning-and-compatibility.md) | Semantic versioning policy, pre-v1 expectations, and roadmap to v1.0 |
 | [Configuration](configuration.md) | Full `fh.Config` reference (timeouts, buffers, HTTP/2, codec, reliability, static) |
 | [Routing](routing.md) | Router, route groups, parameters, named routes, route listing |
 | [Request & Response](response.md) | All request/response methods and types |
@@ -55,6 +56,7 @@ options rather than a `Config` value.
 | [Budgets](budget.md) | Hierarchical per-request execution budgets (time, memory, upstream, retries) |
 | [Config Reload](configreload.md) | Atomic config/route/policy/certificate reload with generation tracking |
 | [BCL No-Code Platform](ref-no-code-platform.md) | Two tiers of no-code application from one BCL document: request intents and a durable process engine, with the full resource, node, edge and action catalogs |
+| [Runtime Execution Fabric](runtime-execution-fabric.md) | Data-dependency DAG execution engine with strongly typed Fact keys and pure Intent contracts |
 | [ACME / Let's Encrypt](acme.md) | Automatic TLS certificate issuance and renewal via TLS-ALPN-01 |
 
 ## Operations

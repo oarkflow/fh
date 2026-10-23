@@ -4,30 +4,33 @@
 
 Full reference documentation lives in [`docs/`](docs/README.md).
 
+[Documentation](docs/README.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Versioning & Stability](docs/versioning-and-compatibility.md)
+
 ## Features
 
-- **Minimal dependencies** — the Go standard library plus `golang.org/x/crypto`, both optional (OCSP stapling, ACME)
-- **HTTP/1.1** — full request/response parsing, chunked transfer, trailers
-- **HTTP/2** — TLS ALPN, optional h2c prior knowledge/upgrade, stream multiplexing, flow control, RFC 8441 extended CONNECT
-- **WebSocket** — RFC 6455 server implementation with `EventHub` pub/sub layer, transparently served over HTTP/1.1 or HTTP/2
-- **Trie-based router** — radix tree with named (`:param`) and wildcard (`*wild`) parameters
-- **Codec system** — pluggable body parsers for JSON, XML, form, multipart, CSV, NDJSON, text, binary
-- **70+ built-in middleware packages** — see [Middleware](#middleware) below
-- **Typed endpoints & OpenAPI 3.1** — generic request/response handlers with auto-generated specs
-- **Reliability layer** — request journaling, idempotency, durable async queue, outbox/inbox, DLQ
-- **Compliance layer** — Business/Professional/Enterprise/Security profiles, audit ledger, route security metadata
-- **Opt-in fail-closed baseline** — `fh.WithSecureByDefault(true)` bounds every protocol input, enables strict parsing, recovery, redaction, and hardened response headers. Neither this nor `fh.NewProduction()` adds authentication, CSRF protection, rate limiting, or a Host allow-list — see [Production Readiness](docs/production-readiness.md#newproduction-and-securebydefault-are-narrower-than-they-sound)
-- **Template engine** — agnostic interface, any engine implementing `Render(w, name, data, layout...)`
-- **Static file serving** — direct streaming, range requests, streaming gzip, precompressed Brotli/gzip, cache control
-- **Streaming uploads** — opt-in incremental HTTP/1 body consumption with bounded draining and trailer support
-- **Graceful shutdown** — `app.ServeContext(ctx, listener)`, `app.ListenContext(ctx, addr)`, `app.ListenUnixContext(ctx, path)`, `app.ShutdownWithContext(ctx)`, or `app.ListenWithGracefulShutdown(addr)`
-- **Graceful TLS shutdown** — `app.ListenTLSWithGracefulShutdown(addr, certFile, keyFile)`
-- **Pool-based zero-allocation** — `sync.Pool` for contexts, byte buffers, HPACK decoders
-- **Hardened TLS/mTLS** — TLS 1.3 config builder, verified peer state in request contexts, atomic certificate reload
-- **ACME / Let's Encrypt** — `app.ListenAutoTLS(domains, cacheDir)` issues and renews certificates automatically via TLS-ALPN-01
-- **Prefork & zero-downtime restarts** — `app.ListenPrefork(addr)` runs a multi-process `SO_REUSEPORT` supervisor; `SIGHUP` rolls out a new binary with zero dropped connections
-- **Outbound HTTP client** — connection pooling, retries, circuit breaker, SSRF protection (`fh.NewClient`)
-- **Linux kernel-assisted transport** — raw sockets, sharded epoll or io_uring, SO_REUSEPORT CPU steering, socket tuning, and optional XDP admission with safe fallback
+- **Minimal dependencies** — only the Go standard library plus `golang.org/x/crypto` (used for optional OCSP stapling and ACME/autocert).
+- **HTTP/1.1** — full request/response parsing, keep-alive, pipelining, chunked transfer, trailers, incremental streaming uploads.
+- **HTTP/2** — TLS ALPN, h2c prior knowledge/upgrade, stream multiplexing, HPACK encoding/decoding, RFC 8441 extended CONNECT.
+- **WebSocket (RFC 6455)** — low-level `Conn` and high-level `EventHub` pub/sub layer (rooms, topics, authorization, heartbeats), served over HTTP/1.1 or HTTP/2.
+- **Trie-based router** — high-performance radix tree router with named (`:param`) and wildcard (`*wild`) parameters, named routes, and route groups.
+- **Typed endpoints & OpenAPI 3.1** — generic `GetTyped`, `PostTyped`, `QueryTyped` handlers with struct validation (`param`, `query`, `header`, `cookie` tags), auto-generated OpenAPI 3.1 schemas, and embedded Swagger UI.
+- **HTTP QUERY Method** — draft-compliant safe and idempotent queries carrying request bodies (`app.Query`, `app.QueryTyped`).
+- **Server-Sent Events (SSE)** — native `c.SSE` streaming with comment keep-alives, custom event types, and automatic disconnect handling.
+- **Runtime Execution Fabric (REF)** — data-dependency DAG execution engine with typed fact keys, decoupled intent contracts, and transport-neutral projections.
+- **Shared State & Clustered KV** — application-wide `kv.Provider` and `kv.Store` abstraction with atomic `Mutate`, CAS, background TTL sweeps, and memory/file/distributed implementations.
+- **Hierarchical Request Budgets** — per-request deadline, CPU, memory, and outbound call limits with sub-budget delegation (`fh.Budget`).
+- **Service Level Objectives (SLO)** — route-level latency and error rate targets with multi-window sliding burn-rate tracking (`SLOTracker`).
+- **Live Config & Certificate Hot-Reload** — transactional, zero-downtime reconfiguration of routes, policies, and TLS certificates with generation tracking (`ConfigReloader`).
+- **Tamper-Evident Merkle Audit Ledger** — cryptographic audit logging with SHA-256 Merkle tree checkpoints for verifiable integrity.
+- **Codec system** — pluggable body parsers for JSON (grow-on-demand buffer), XML, form, multipart, CSV, NDJSON, text, and binary.
+- **74 built-in middleware packages** — security, CORS, CSRF, rate limiting, distributed caching, circuit breaking, tracing, metrics, sessions, and compliance.
+- **Reliability layer** — request journaling, idempotency keys, durable async queue, outbox/inbox, and dead letter queues (DLQ) without external queue services.
+- **Compliance layer** — 10 compliance profiles (Business, Professional, Enterprise, Strict, Financial, Healthcare, Government) with auto-mounted evidence endpoints.
+- **Zero-allocation pool design** — `sync.Pool` recycling for request contexts, byte buffers, HPACK decoders, and writers.
+- **Hardened TLS/mTLS** — TLS 1.3 config builder, verified peer state extraction, cert pinning, OCSP stapling, and ACME / Let's Encrypt automation.
+- **Prefork & zero-downtime restarts** — multi-process `SO_REUSEPORT` supervisor with `SIGHUP` rolling worker handoff and zero dropped connections.
+- **Outbound HTTP client** — fluent HTTP/1.1 + HTTP/2 client (`fh.NewClient`) with connection pooling, retries, jitter backoff, circuit breaker, and SSRF protection.
+- **Linux kernel-assisted transport** — raw nonblocking sockets, sharded epoll or io_uring, SO_REUSEPORT CPU steering, and optional XDP packet admission.
 
 ## Installation
 
@@ -35,7 +38,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 go get github.com/oarkflow/fh
 ```
 
-Requires Go 1.26.5 or later.
+Requires Go 1.27.3 or later.
 
 ## Quick Start
 
@@ -58,6 +61,17 @@ func main() {
     log.Fatal(app.ListenWithGracefulShutdown(":8080"))
 }
 ```
+
+## Runtime Profiles
+
+`fh` provides specialized application profiles tailored to different deployment tiers:
+
+- **`fh.New(opts...)`**: The flexible baseline. You configure explicitly what you need.
+- **`fh.NewFast(opts...)`**: Maximum throughput candidate for microbenchmarks and protected internal topologies, stripping unnecessary checks and optimizing hot paths.
+- **`fh.NewProduction(opts...)`**: Balanced production defaults with bounded memory buffers, strict protocol parsing, panic recovery, and safe error rendering. Combine with `fh.WithSecureByDefault(true)` to enforce security headers and bounds.
+- **`fh.NewEnterprise(opts...)`**: Full enterprise posture with strict compliance enforcement (`ComplianceEnterprise`), structured audit logs, reliability queue, and auto-mounted evidence endpoints (`/_fh/compliance`, `/_fh/runtime`, `/_fh/routes`).
+
+See [Performance Profiles](docs/performance_profiles.md) for detailed configuration differences.
 
 ## Production application template
 
@@ -169,9 +183,45 @@ admin := api.Group("/admin", adminMiddleware)
 admin.Get("/dashboard", dashboardHandler)
 ```
 
-Typed endpoints (`GetTyped`, `PostTyped`, ... `AllTyped`) provide automatic JSON parsing, validation, struct binding (`param`/`query`/`header`/`cookie` tags), and OpenAPI schema generation. See [Native Features](docs/native-features.md).
+### Typed Endpoints & OpenAPI 3.1
 
-See [Routing](docs/routing.md) for the full reference.
+Typed endpoints (`GetTyped`, `PostTyped`, `PutTyped`, `DeleteTyped`, `QueryTyped`, `AllTyped`) provide automatic struct parsing, validation, multi-source binding (`param`, `query`, `header`, `cookie` struct tags), and JSON schema generation:
+
+```go
+type CreateUserRequest struct {
+    Name  string `json:"name" validate:"required"`
+    Email string `json:"email" validate:"required,email"`
+}
+
+type UserResponse struct {
+    ID    string `json:"id"`
+    Name  string `json:"name"`
+    Email string `json:"email"`
+}
+
+app.PostTyped("/users", func(c fh.Ctx, req CreateUserRequest) (UserResponse, error) {
+    return UserResponse{ID: "usr_100", Name: req.Name, Email: req.Email}, nil
+})
+
+// Expose auto-generated OpenAPI 3.1 schema and interactive HTML docs
+app.EnableOpenAPI("/openapi.json", fh.OpenAPIConfig{
+    Title:   "API Documentation",
+    Version: "1.0.0",
+})
+app.EnableDocs("/docs")
+```
+
+### HTTP QUERY Method
+
+`fh` natively supports the draft IETF HTTP `QUERY` method — an idempotent, safe request method that carries a request body:
+
+```go
+app.Query("/search", func(c fh.Ctx) error {
+    return c.SendString("Search query processed: " + string(c.Body()))
+})
+```
+
+See [Routing](docs/routing.md) and [Native Features](docs/native-features.md) for full references.
 
 ## Middleware
 
@@ -185,34 +235,18 @@ app.Get("/dashboard", authMiddleware, dashboardHandler)
 admin := app.Group("/admin", authMiddleware, adminLogger)
 ```
 
-Commonly used packages:
+`fh` includes **74 modular middleware packages** under `mw/`, each importable independently and documented with its own `README.md`:
 
-| Package | Description |
-|---|---|
-| `mw/basicauth` | HTTP Basic Authentication (single-user, multi-user, storage-backed) |
-| `mw/apikey` | API key authentication via header or query |
-| `mw/cors` | Cross-Origin Resource Sharing |
-| `mw/csrf` | CSRF protection |
-| `mw/ratelimiter` | Rate limiting |
-| `mw/cache` | Response caching with TTL |
-| `mw/compress` / `mw/decompress` | Gzip response compression / bounded request decompression |
-| `mw/security` | Security headers (CSP, HSTS, XFO, etc.) |
-| `mw/session` | Cookie-based sessions with HMAC signing |
-| `mw/logger` | Request logging (common, combined, tiny, json, custom) |
-| `mw/recover` | Panic recovery |
-| `mw/requestid` / `mw/correlationid` | Request tracking and correlation |
-| `mw/realip` | Trusted proxy-chain parsing, client-IP normalization |
-| `mw/timeout` / `mw/bodylimit` | Request timeout and body-size limits |
-| `mw/circuitbreaker` / `mw/bulkhead` / `mw/loadshed` | Overload and fault protection |
-| `mw/proxy` | Reverse proxy and API gateway handlers |
-| `mw/mtls` | Verified client-certificate authorization |
-| `mw/httpsignature` | Nonce-bound RFC 9421 Ed25519 response signatures |
-| `mw/metrics` | Prometheus-style metrics endpoint |
+| Category | Packages | Description |
+|---|---|---|
+| **Auth & Access Control** | `basicauth`, `apikey`, `csrf`, `cors`, `hostguard`, `security`, `mtls`, `ipwhitelist`, `ipthrottle`, `ipreputation`, `fetchmetadata`, `slowloris`, `earlydata`, `compliance` | Basic/API-key auth, CSRF, CORS, client-cert mTLS, host guards, IP throttling/reputation, and security headers. |
+| **Resilience & Traffic** | `ratelimiter`, `slidingwindow`, `circuitbreaker`, `bulkhead`, `loadshed`, `backpressure`, `adaptiveconcurrency`, `retrybudget`, `timeout`, `bodylimit` | Sliding window rate limits, circuit breakers, bulkheads, load shedding, adaptive concurrency, and timeouts. |
+| **Performance & Cache** | `cache`, `smartcache`, `coalesce`, `compress`, `decompress`, `etag`, `static`, `requestdedup` | In-memory/file response caching, request coalescing, deduplication, gzip compression/decompression, and ETags. |
+| **Observability & Audit** | `logger`, `slowlog`, `tracing`, `metrics`, `servertiming`, `audit`, `auditlog`, `correlationid`, `requestid`, `pprof` | Structured logging, Prometheus metrics, distributed tracing propagation, audit ledgers, and pprof profiling. |
+| **Transport & Cryptography** | `httpsignature`, `securetransport`, `contentdigest`, `signature`, `realip`, `proxy`, `override`, `timestamp` | RFC 9421 Ed25519 signatures, RFC 9530 Content-Digest, device-bound WASM encryption, reverse proxy, and trusted IP normalization. |
+| **State & Orchestration** | `session`, `reliability`, `workflow`, `idempotency`, `replay`, `requesthash`, `tenant`, `tenantlimit`, `policy`, `actor`, `scheduler`, `lifecycle`, `acceptquery`, `apiversion`, `maintenance`, `conditional`, `skip`, `recover`, `rewrite`, `contract`, `privacy`, `admin`, `validate` | Multi-tenancy, sessions, idempotent execution, actor queues, API versioning, contract assertions, and panic recovery. |
 
-This is a subset — fh ships **70+ middleware packages** under `mw/`, each with
-its own `README.md`. See [`docs/middleware.md`](docs/middleware.md) for the full
-reference and recommended ordering, or [`mw/README.md`](mw/README.md) for the
-package index.
+See [`docs/middleware.md`](docs/middleware.md) for full configuration guides and recommended pipeline ordering, or [`mw/README.md`](mw/README.md) for the index.
 
 ## Body Parsing & Codecs
 
@@ -254,6 +288,31 @@ c.Status(201).JSON(createdResource)
 ```
 
 See [Request & Response](docs/response.md) for the full method reference.
+
+## Server-Sent Events (SSE)
+
+Native streaming SSE support with comment heartbeats, named event types, and automatic disconnect handling:
+
+```go
+app.Get("/events", func(c fh.Ctx) error {
+    return c.SSE(func(events *fh.SSE) error {
+        for i := 0; i < 5; i++ {
+            if err := events.WriteEvent(fh.SSEEvent{
+                Event: "notice",
+                Data:  fmt.Sprintf("Message #%d", i),
+                ID:    fmt.Sprintf("%d", i),
+            }); err != nil {
+                return err // client disconnected
+            }
+            if err := events.Ping(); err != nil {
+                return err
+            }
+            time.Sleep(1 * time.Second)
+        }
+        return nil
+    })
+})
+```
 
 ## Static Files
 
@@ -488,6 +547,113 @@ app.Post("/payments", fh.RequireAuth(), fh.RequireScope("payments:create"), crea
 
 When `Compliance.ExposeEndpoints` is enabled, fh registers `/_fh/compliance`, `/_fh/compliance/controls`, `/_fh/compliance/findings`, `/_fh/config/safe`, `/_fh/runtime`, `/_fh/routes`, `/_fh/health`, `/_fh/live`, `/_fh/ready`, and (when the queue is enabled) `/_fh/queue/stats` and admin queue ops endpoints.
 
+## Shared State & Key-Value Storage
+
+`fh` provides a clean `kv.Provider` and `kv.Store` abstraction for features requiring persistence or coordination (sessions, rate limits, replay protection, response caching, reputation scores):
+
+```go
+import (
+    "context"
+
+    "github.com/oarkflow/fh/pkg/storage/kv"
+)
+
+// In-memory provider for single-node deployments
+provider := kv.NewMemoryProvider()
+
+// File-backed durable provider
+fileProvider, _ := kv.NewFileProvider("./.fh-data/state")
+
+app := fh.New(fh.WithSharedState(provider))
+
+// Acquire an isolated namespace store
+store, err := app.StateStore(context.Background(), "ratelimit")
+```
+
+For distributed deployments, the [`fh-contrib`](https://github.com/oarkflow/fh-contrib) repository provides Redis and PostgreSQL `kv.Provider` adapters with atomic cross-process `Mutate` operations. See [Shared State](docs/shared-state.md).
+
+## Hierarchical Request Budgets
+
+Request budgets ensure no single request consumes unbounded system resources. Limits travel with the request context through handlers, database queries, and outbound client calls:
+
+```go
+import (
+    "context"
+    "time"
+)
+
+budget := &fh.Budget{
+    Deadline:         time.Now().Add(5 * time.Second),
+    MaxCPUTime:       500 * time.Millisecond,
+    MaxMemoryBytes:   16 * 1024 * 1024,
+    MaxUpstreamCalls: 3,
+}
+ctx := fh.WithBudget(context.Background(), budget)
+```
+
+Sub-budgets can be carved out for child routines or third-party dependencies. See [Budgets](docs/budget.md).
+
+## Service Level Objectives (SLO)
+
+Route-level latency and error budget tracking with real-time sliding-window burn-rate alerts:
+
+```go
+import "time"
+
+tracker := fh.NewSLOTracker(10 * time.Second)
+defer tracker.Stop()
+
+tracker.Register("/api/v1/orders", fh.SLO{
+    Availability:   0.999,
+    P99Latency:     200 * time.Millisecond,
+    BurnRateWindow: 5 * time.Minute,
+})
+
+app.Use(tracker.Handler())
+```
+
+See [SLO Tracking](docs/slo.md).
+
+## Live Configuration & Certificate Hot-Reload
+
+Zero-downtime, transactional updates of routing, security policies, and TLS certificates without restarting the server:
+
+```go
+reloader := fh.NewConfigReloader(app)
+
+// Validates the new configuration structure before applying
+gen, err := reloader.Reload(newConfig)
+```
+
+Every request records which `ConfigGeneration` handled it for deterministic operational debugging. See [Config Reload](docs/configreload.md).
+
+## Tamper-Evident Merkle Audit Ledger
+
+Cryptographically verifiable audit log tracking with chained SHA-256 Merkle tree checkpoints to guarantee audit immutability:
+
+```go
+import "time"
+
+sink := fh.NewMerkleAuditSink(fh.MerkleConfig{
+    BucketSize:         100,
+    CheckpointInterval: time.Minute,
+})
+_ = sink
+```
+
+See [Merkle Audit](docs/merkle_audit.md).
+
+## Runtime Execution Fabric (REF)
+
+The Runtime Execution Fabric separates transport concerns from business domain logic by expressing operations as transport-neutral intents connected via a data-dependency DAG:
+
+```go
+// Connect fh to an execution engine
+app.SetREF(engine)
+```
+
+See [Runtime Execution Fabric](docs/runtime-execution-fabric.md) and [`examples/ref_integration`](examples/ref_integration).
+
 ## Outbound HTTP Client
 
 A production-grade HTTP/1.1 + HTTP/2 client lives directly in the root `fh` package — no separate `client/` module.
@@ -525,12 +691,14 @@ Full working examples in [`examples/`](examples/):
 |---|---|
 | `basic` | Minimal "Hello World" |
 | `flash-messages` | Session-backed one-time flash messages and redirects |
+| `hardened-server` | Pre-configured production security baseline with audit logging, rate limiting, and graceful drain |
 | `http-modern` | Modern HTTP helpers and protocol behavior |
 | `kernel_server` | Kernel-assisted server configuration and readiness |
 | `prefork` | Multi-process prefork serving |
-| `secure_wasm` | Session + secure WASM client demo for encrypted API calls |
-| `rfc9421` | RFC 9421 signed-response server plus fail-closed Go and WebCrypto clients |
 | `production-app` | Checked-in `fh-init` output: sessions, RBAC, SQLite, secure WASM transport, and the `@oarkflow/lithe` frontend |
+| `ref_integration` | Runtime Execution Fabric integration: typed fact keys, decoupled intents, and transport adapters |
+| `rfc9421` | RFC 9421 signed-response server plus fail-closed Go and WebCrypto clients |
+| `secure_wasm` | Session + secure WASM client demo for encrypted API calls |
 
 ## Testing & Benchmarks
 
@@ -558,9 +726,12 @@ The following product limitations must also be planned around:
 - **Process-local defaults.** Middleware and cluster state use the shared `pkg/storage/kv.Store` interface. Defaults are in-process, so rate limits, caches, sessions, replay markers, and cluster leases are per instance unless you configure a shared provider. `kv.Provider` and `fh.WithSharedState` give isolated application-wide namespaces and lifecycle management; the built-in providers are memory and single-host files. For a distributed deployment, [`fh-contrib`](https://github.com/oarkflow/fh-contrib) provides Redis and PostgreSQL `kv.Provider` adapters with cross-process-atomic `Mutate`. See [Shared State](docs/shared-state.md).
 - **No gRPC or GraphQL protocol handlers.** Only MIME-type constants exist for GraphQL; there's no built-in gRPC server. Both are addressable via a reverse-proxy route (`mw/proxy`) to a dedicated service if needed.
 
-## Security
+## Community & Governance
 
-See [SECURITY.md](SECURITY.md) for the supported-version policy and how to report a vulnerability privately. Do not open a public issue for security reports.
+- **Changelog**: Detailed release notes and version history are recorded in [CHANGELOG.md](CHANGELOG.md).
+- **Versioning & Stability Policy**: Pre-v1 stability guidance, deprecation timelines, and our roadmap to v1.0 are documented in [Versioning and API Stability](docs/versioning-and-compatibility.md).
+- **Contributing**: Guidelines for bug reports, local development, code conventions, and pull requests live in [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Security**: Vulnerability reporting process and supported version windows are detailed in [SECURITY.md](SECURITY.md).
 
 ## License
 

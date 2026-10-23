@@ -1,6 +1,6 @@
 module github.com/oarkflow/fh
 
-go 1.26.5
+go 1.27.3
 
 require golang.org/x/crypto v0.58.0
 
