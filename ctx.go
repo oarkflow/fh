@@ -343,6 +343,7 @@ type DefaultCtx struct {
 	requestBodyStream    *requestBodyStream
 	requestBodyStreamErr error
 	requestBodyReader    io.Reader
+	requestBodyLimit     *boundedRequestReader
 	flags                uint32
 }
 
@@ -471,6 +472,7 @@ func (c *DefaultCtx) reset() {
 	c.requestBodyStream = nil
 	c.requestBodyStreamErr = nil
 	c.requestBodyReader = nil
+	c.requestBodyLimit = nil
 }
 
 // CaptureResponseBody enables a stable in-request response body snapshot for
@@ -599,6 +601,15 @@ func (c *DefaultCtx) path() []byte {
 }
 
 func (c *DefaultCtx) Path() string { return string(c.path()) }
+
+// RoutePattern returns the matched route template, or an empty string for
+// unmatched requests. Middleware can use it for low-cardinality labels.
+func (c *DefaultCtx) RoutePattern() string {
+	if c.server == nil || c.server.router == nil {
+		return ""
+	}
+	return c.server.router.Pattern(c.Method(), c.Path())
+}
 
 // Rewrite updates the request URI and asks the application to route it again.
 // It is intended for rewrite middleware and is bounded by the application to
@@ -773,7 +784,11 @@ func (c *DefaultCtx) StreamBody(fn func(io.Reader) error) error {
 		return err
 	}
 	if c.requestBodyStream != nil {
-		err := fn(c.requestBodyStream)
+		reader := io.Reader(c.requestBodyStream)
+		if c.requestBodyLimit != nil {
+			reader = c.requestBodyLimit
+		}
+		err := fn(reader)
 		if c.requestBodyStream.done {
 			_, c.trailers, c.requestBodyStreamErr = c.requestBodyStream.finish()
 			if err == nil {
@@ -783,6 +798,9 @@ func (c *DefaultCtx) StreamBody(fn func(io.Reader) error) error {
 		return err
 	}
 	if c.requestBodyReader != nil {
+		if c.requestBodyLimit != nil {
+			return fn(c.requestBodyLimit)
+		}
 		return fn(c.requestBodyReader)
 	}
 	return fn(bytes.NewReader(c.body))
@@ -800,7 +818,11 @@ func (c *DefaultCtx) ensureRequestBody() error {
 		if c.requestBodyReader == nil {
 			return c.requestBodyStreamErr
 		}
-		body, err := io.ReadAll(c.requestBodyReader)
+		reader := c.requestBodyReader
+		if c.requestBodyLimit != nil {
+			reader = c.requestBodyLimit
+		}
+		body, err := io.ReadAll(reader)
 		c.body = body
 		c.requestBodyStreamErr = err
 		return err
@@ -811,7 +833,11 @@ func (c *DefaultCtx) ensureRequestBody() error {
 		}
 		return c.requestBodyStreamErr
 	}
-	body, err := io.ReadAll(c.requestBodyStream)
+	reader := io.Reader(c.requestBodyStream)
+	if c.requestBodyLimit != nil {
+		reader = c.requestBodyLimit
+	}
+	body, err := io.ReadAll(reader)
 	c.body = body
 	c.requestBodyStreamErr = err
 	return err

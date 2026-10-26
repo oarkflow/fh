@@ -340,7 +340,14 @@ func ClientLoadBalance(sel EndpointSelector) ClientMiddleware {
 				cp.Path = strings.TrimRight(base.Path, "/") + old.Path
 			}
 			r.URL = &cp
+			reported := false
+			defer func() {
+				if !reported {
+					sel.Report(base, nil, errors.New("fh client: round trip aborted"))
+				}
+			}()
 			res, err := next.RoundTrip(r)
+			reported = true
 			sel.Report(base, res, err)
 			return res, err
 		})
@@ -352,16 +359,9 @@ func (r *Response) DownloadTo(w io.Writer) (int64, error) {
 	if r == nil || r.Raw == nil || r.Raw.Body == nil {
 		return 0, nil
 	}
-	defer r.Raw.Body.Close()
-	rd := io.Reader(r.Raw.Body)
-	if r.limit > 0 {
-		rd = io.LimitReader(rd, r.limit+1)
-	}
-	n, err := io.Copy(w, rd)
-	if r.limit > 0 && n > r.limit {
-		return n, ErrClientBodyTooLarge
-	}
-	return n, err
+	reader := r.Reader()
+	defer reader.Close()
+	return io.Copy(w, reader)
 }
 
 // SaveAtomic writes a response to path through a temporary file and atomic rename.

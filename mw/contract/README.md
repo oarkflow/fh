@@ -35,3 +35,8 @@ Run after version extraction and before handlers. In development, run stricter c
 ## Production considerations
 
 Keep contracts under source control. Add CI checks for OpenAPI/schema compatibility and route behavior.
+
+`MaxBodyBytes` also applies to streamed request bodies. Enable
+`fh.WithStreamRequestBody(true)` to avoid initial buffering, and return any
+read error from the handler. Known oversized `Content-Length` values are
+rejected before the handler runs.

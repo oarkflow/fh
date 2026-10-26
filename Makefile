@@ -39,7 +39,7 @@ endif
 WASM_TRUST_LDFLAGS := -X main.embeddedTrustedOrigin=$(WASM_TRUSTED_ORIGIN) -X main.embeddedTransportPublicKey=$(WASM_TRUSTED_TRANSPORT_KEY) -X main.embeddedTransportKeyID=$(WASM_TRUSTED_TRANSPORT_KEY_ID) -X main.embeddedResponseSigningPublicKey=$(WASM_TRUSTED_RESPONSE_KEY) -X main.embeddedResponseSigningKeyID=$(WASM_TRUSTED_RESPONSE_KEY_ID)
 endif
 
-.PHONY: all test check template-check production-app-check production-app-update secure-test kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-trusted wasm-require-trust wasm-clean clean
+.PHONY: all test check api-check template-check production-app-check production-app-update secure-test kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-trusted wasm-require-trust wasm-clean clean
 
 all: test wasm
 
@@ -47,6 +47,10 @@ test:
 	$(GO) test ./...
 
 check: test template-check production-app-check
+
+api-check:
+	@test -n "$(BASELINE_REF)" || (echo "BASELINE_REF is required, e.g. make api-check BASELINE_REF=v1.0.0" >&2; exit 1)
+	$(GO) run ./cmd/apicheck -baseline "$(BASELINE_REF)"
 
 template-check:
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \

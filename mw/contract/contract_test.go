@@ -150,6 +150,24 @@ func TestBodyOverLimitIsRejected(t *testing.T) {
 	}
 }
 
+func TestStreamingContractLimit(t *testing.T) {
+	app := fh.New(fh.WithStreamRequestBody(true))
+	app.Use(New(Config{MaxBodyBytes: 3}))
+	app.Post("/", func(c fh.Ctx) error {
+		return c.StreamBody(func(r io.Reader) error { _, err := io.Copy(io.Discard, r); return err })
+	})
+	addr := testServer(t, app)
+	for _, tc := range []struct {
+		body   string
+		status int
+	}{{"abc", 200}, {"abcd", 413}} {
+		status, _ := doRequest(t, addr, "POST", "/", nil, tc.body)
+		if status != tc.status {
+			t.Fatalf("body %q: status=%d want=%d", tc.body, status, tc.status)
+		}
+	}
+}
+
 // TestContentTypeNotInAllowlistIsRejected proves an unsupported (or
 // missing) Content-Type is rejected with 415 when ContentTypes is
 // configured — a request lacking the header at all must fail closed rather

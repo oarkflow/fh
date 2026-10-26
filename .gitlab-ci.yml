@@ -170,6 +170,14 @@ release-gate:linux:
     - go install honnef.co/go/tools/cmd/staticcheck@latest
     - go install golang.org/x/vuln/cmd/govulncheck@latest
   script:
+    - git fetch --tags --force
+    - |
+      baseline=$(git tag --list 'v[1-9]*' --sort=-version:refname | awk -v current="$CI_COMMIT_TAG" '$0 ~ /^v[1-9][0-9]*\.[0-9]+\.[0-9]+$/ && $0 != current { print; exit }')
+      if [ -n "$baseline" ]; then
+        go run ./cmd/apicheck -baseline "$baseline"
+      else
+        echo "No earlier stable tag; this release establishes the API baseline"
+      fi
     - go build ./...
     - go vet ./...
     - staticcheck ./...

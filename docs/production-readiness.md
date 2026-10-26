@@ -194,10 +194,11 @@ Also require:
    target in the module;
 3. dependency and reachable-vulnerability review — `govulncheck`, in both the
    `lint` and `release-gate` stages;
-4. API compatibility checks against the previous release — **not yet
-   automated**; there is no compatibility policy or stable release line yet
-   (tracked as a pre-v1 roadmap item), so review diffs manually until one
-   exists;
+4. API compatibility checks against the previous stable release — the Linux
+   release gate runs `cmd/apicheck` when an earlier `v1+` tag exists. The first
+   stable tag establishes the baseline. Run
+   `make api-check BASELINE_REF=v1.0.0` locally for a specific baseline;
+   review any reported changes because the source-level check is conservative;
 5. signed, reproducible release artifacts and an SBOM where policy
    requires it — **not yet automated**; no release pipeline produces
    artifacts yet, so treat this as a gap to close before cutting a v1.

@@ -382,6 +382,8 @@ type Request struct {
 	bodyBytes        []byte
 	bodyReader       io.Reader
 	bodyCloser       io.Closer
+	multipartFields  map[string]string
+	multipartFiles   []UploadFile
 	contentType      string
 	timeout          time.Duration
 	retry            *RetryPolicy
@@ -401,8 +403,11 @@ func (r *Request) reset(c *Client) {
 	r.method = ""
 	r.rawURL = ""
 	r.body = nil
+	r.bodyBytes = nil
 	r.bodyReader = nil
 	r.bodyCloser = nil
+	r.multipartFields = nil
+	r.multipartFiles = nil
 	r.contentType = ""
 	r.timeout = 0
 	r.retry = nil
@@ -521,17 +526,14 @@ func (r *Request) Form(values url.Values) *Request {
 }
 
 func (r *Request) Multipart(fields map[string]string, files ...UploadFile) *Request {
-	var b bytes.Buffer
-	mw := multipart.NewWriter(&b)
+	r.multipartFields = make(map[string]string, len(fields))
 	for k, v := range fields {
-		_ = mw.WriteField(k, v)
+		r.multipartFields[k] = v
 	}
-	for _, f := range files {
-		_ = f.writeTo(mw)
-	}
-	_ = mw.Close()
-	r.bodyBytes = b.Bytes()
-	r.contentType = mw.FormDataContentType()
+	r.multipartFiles = append([]UploadFile(nil), files...)
+	r.body = nil
+	r.bodyBytes = nil
+	r.bodyReader = nil
 	return r
 }
 
@@ -623,12 +625,27 @@ func (r *Request) Do(ctx context.Context, method, rawurl string) (*Response, err
 	if err != nil {
 		return nil, err
 	}
+	if r.multipartFields != nil || r.multipartFiles != nil {
+		mw := multipart.NewWriter(io.Discard)
+		r.contentType = mw.FormDataContentType()
+		boundary := mw.Boundary()
+		if err := mw.Close(); err != nil {
+			return nil, err
+		}
+		r.bodyReader = newMultipartBody(ctx, boundary, r.multipartFields, r.multipartFiles)
+	}
 	body, err := r.makeBody()
 	if err != nil {
+		if closer, ok := r.bodyReader.(io.Closer); ok {
+			_ = closer.Close()
+		}
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, method, finalURL, body)
 	if err != nil {
+		if closer, ok := body.(io.Closer); ok {
+			_ = closer.Close()
+		}
 		return nil, err
 	}
 	if r.bodyBytes != nil {
@@ -636,7 +653,31 @@ func (r *Request) Do(ctx context.Context, method, rawurl string) (*Response, err
 		req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }
 		req.ContentLength = int64(len(b))
 	}
+	if r.multipartFields != nil || r.multipartFiles != nil {
+		replayable := true
+		for _, file := range r.multipartFiles {
+			if file.Path == "" {
+				replayable = false
+				break
+			}
+		}
+		if replayable {
+			boundary := strings.TrimPrefix(r.contentType, "multipart/form-data; boundary=")
+			req.GetBody = func() (io.ReadCloser, error) {
+				body := io.Reader(newMultipartBody(ctx, boundary, r.multipartFields, r.multipartFiles))
+				limit := r.bodyLimit
+				if limit == 0 {
+					limit = c.cfg.BodyLimit
+				}
+				if limit > 0 {
+					body = &clientLimitReader{reader: body, remaining: limit}
+				}
+				return body.(io.ReadCloser), nil
+			}
+		}
+	}
 	if r.bodyLimit > 0 && req.ContentLength > r.bodyLimit {
+		_ = req.Body.Close()
 		return nil, ErrClientBodyTooLarge
 	}
 	req.Header = cloneHeader(r.headers)
@@ -758,9 +799,82 @@ func (r *Request) makeBody() (io.Reader, error) {
 		limit = r.client.cfg.BodyLimit
 	}
 	if limit > 0 && rd != nil {
-		rd = io.LimitReader(rd, limit)
+		if n, ok := knownBodyLength(rd); ok && n > limit {
+			return nil, ErrClientBodyTooLarge
+		}
+		rd = &clientLimitReader{reader: rd, remaining: limit}
 	}
 	return rd, nil
+}
+
+func knownBodyLength(r io.Reader) (int64, bool) {
+	switch v := r.(type) {
+	case *bytes.Reader:
+		return int64(v.Len()), true
+	case *strings.Reader:
+		return int64(v.Len()), true
+	}
+	return 0, false
+}
+
+type clientLimitReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func (r *clientLimitReader) Close() error {
+	if closer, ok := r.reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+func (r *clientLimitReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		var extra [1]byte
+		n, err := r.reader.Read(extra[:])
+		if n > 0 {
+			return 0, ErrClientBodyTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:int(r.remaining)]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	return n, err
+}
+
+func newMultipartBody(ctx context.Context, boundary string, fields map[string]string, files []UploadFile) *io.PipeReader {
+	reader, writer := io.Pipe()
+	stop := context.AfterFunc(ctx, func() { _ = writer.CloseWithError(ctx.Err()) })
+	go func() {
+		defer stop()
+		mw := multipart.NewWriter(writer)
+		if err := mw.SetBoundary(boundary); err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+		for k, v := range fields {
+			if err := mw.WriteField(k, v); err != nil {
+				_ = writer.CloseWithError(err)
+				return
+			}
+		}
+		for _, file := range files {
+			if err := file.writeTo(mw); err != nil {
+				_ = writer.CloseWithError(err)
+				return
+			}
+		}
+		if err := mw.Close(); err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+		_ = writer.Close()
+	}()
+	return reader
 }
 
 // Response wraps http.Response with safe helpers.
@@ -772,7 +886,40 @@ type Response struct {
 	started time.Time
 	limit   int64
 	stream  bool
+	reader  io.ReadCloser
 }
+
+type boundedResponseReader struct {
+	reader io.ReadCloser
+	left   int64
+	err    error
+}
+
+func (r *boundedResponseReader) Read(p []byte) (int, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.left == 0 {
+		var probe [1]byte
+		n, err := r.reader.Read(probe[:])
+		if n > 0 {
+			r.err = ErrClientBodyTooLarge
+			return 0, r.err
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.left {
+		p = p[:int(r.left)]
+	}
+	n, err := r.reader.Read(p)
+	r.left -= int64(n)
+	return n, err
+}
+
+func (r *boundedResponseReader) Close() error { return r.reader.Close() }
 
 func (r *Response) StatusCode() int {
 	if r == nil || r.Raw == nil {
@@ -795,10 +942,16 @@ func (r *Response) Cookies() []*http.Cookie {
 func (r *Response) IsSuccess() bool { c := r.StatusCode(); return c >= 200 && c < 300 }
 func (r *Response) IsError() bool   { return r.StatusCode() >= 400 }
 func (r *Response) Reader() io.ReadCloser {
-	if r == nil || r.Raw == nil {
+	if r == nil || r.Raw == nil || r.Raw.Body == nil {
 		return io.NopCloser(bytes.NewReader(nil))
 	}
-	return r.Raw.Body
+	if r.reader == nil {
+		r.reader = r.Raw.Body
+		if r.limit > 0 {
+			r.reader = &boundedResponseReader{reader: r.Raw.Body, left: r.limit}
+		}
+	}
+	return r.reader
 }
 func (r *Response) Bytes() ([]byte, error) {
 	if r == nil || r.Raw == nil || r.Raw.Body == nil {
@@ -810,17 +963,11 @@ func (r *Response) Bytes() ([]byte, error) {
 	if r.stream {
 		return nil, ErrClientBodyStreamed
 	}
-	defer r.Raw.Body.Close()
-	var rd io.Reader = r.Raw.Body
-	if r.limit > 0 {
-		rd = io.LimitReader(rd, r.limit+1)
-	}
-	b, err := io.ReadAll(rd)
+	reader := r.Reader()
+	defer reader.Close()
+	b, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, err
-	}
-	if r.limit > 0 && int64(len(b)) > r.limit {
-		return nil, ErrClientBodyTooLarge
 	}
 	r.body = b
 	r.read = true
@@ -879,14 +1026,15 @@ func doWithRetry(ctx context.Context, hc *http.Client, req *http.Request, p Retr
 	var res *http.Response
 	for attempt := 1; attempt <= p.MaxAttempts; attempt++ {
 		clone := req.Clone(ctx)
-		if req.GetBody != nil {
+		if attempt > 1 && req.GetBody != nil {
 			b, err := req.GetBody()
-			if err == nil {
-				clone.Body = b
+			if err != nil {
+				return res, err
 			}
+			clone.Body = b
 		}
 		res, lastErr = hc.Do(clone)
-		if !shouldRetry(req, res, lastErr, p) || attempt == p.MaxAttempts {
+		if !shouldRetry(req, res, lastErr, p) || attempt == p.MaxAttempts || (req.Body != nil && req.Body != http.NoBody && req.GetBody == nil) {
 			return res, lastErr
 		}
 		if res != nil && res.Body != nil {
@@ -909,6 +1057,9 @@ func doWithRetry(ctx context.Context, hc *http.Client, req *http.Request, p Retr
 	return res, lastErr
 }
 func shouldRetry(req *http.Request, res *http.Response, err error, p RetryPolicy) bool {
+	if errors.Is(err, ErrClientNoHealthyEndpoints) {
+		return false
+	}
 	if p.Predicate != nil {
 		return p.Predicate(res, err)
 	}
@@ -1212,8 +1363,14 @@ func ClientRateLimit(ratePerSecond int) ClientMiddleware {
 func ClientBodyLimit(n int64) ClientMiddleware {
 	return func(next http.RoundTripper) http.RoundTripper {
 		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			if n > 0 && r.Body != nil && r.ContentLength > n {
-				return nil, ErrClientBodyTooLarge
+			if n > 0 && r.Body != nil {
+				if r.ContentLength > n {
+					_ = r.Body.Close()
+					return nil, ErrClientBodyTooLarge
+				}
+				if r.ContentLength <= 0 && r.Body != http.NoBody {
+					r.Body = &clientLimitReader{reader: r.Body, remaining: n}
+				}
 			}
 			return next.RoundTrip(r)
 		})

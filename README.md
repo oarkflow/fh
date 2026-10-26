@@ -690,6 +690,7 @@ Full working examples in [`examples/`](examples/):
 | Example | Description |
 |---|---|
 | `basic` | Minimal "Hello World" |
+| [`bounded-download`](examples/bounded-download) | Client response limits with atomic, writer, and reader download modes |
 | `flash-messages` | Session-backed one-time flash messages and redirects |
 | `hardened-server` | Pre-configured production security baseline with audit logging, rate limiting, and graceful drain |
 | `production-resilient` | Battle-tested microservice showcase: defense-in-depth, panic recovery, circuit breaker, singleflight coalescing, K8s probes, and parallel load benchmarks |
@@ -700,6 +701,7 @@ Full working examples in [`examples/`](examples/):
 | `ref_integration` | Runtime Execution Fabric integration: typed fact keys, decoupled intents, and transport adapters |
 | `rfc9421` | RFC 9421 signed-response server plus fail-closed Go and WebCrypto clients |
 | `secure_wasm` | Session + secure WASM client demo for encrypted API calls |
+| [`streaming-upload`](examples/streaming-upload) | Streaming multipart uploads with body limits, contracts, and bounded route metrics |
 
 ## Testing & Benchmarks
 

@@ -1039,7 +1039,7 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 			}
 		}()
 		s.trailerMu.Lock()
-		if h.app.cfg.StreamRequestBody && s.connectConn == nil && !s.ended {
+		if h.app.cfg.StreamRequestBody && s.connectConn == nil {
 			ctx.requestBodyReader = &h2RequestBodyReader{conn: h, stream: s}
 		} else {
 			ctx.body, ctx.trailers = s.body, s.trailers

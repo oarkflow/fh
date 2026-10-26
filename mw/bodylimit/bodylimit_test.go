@@ -1,10 +1,51 @@
 package bodylimit
 
 import (
+	"io"
+	"net"
+	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/oarkflow/fh"
 )
+
+func TestStreamingLimitRejectsChunkedBody(t *testing.T) {
+	app := fh.New(fh.WithStreamRequestBody(true))
+	app.Use(New(3))
+	app.Post("/", func(c fh.Ctx) error {
+		if err := c.StreamBody(func(r io.Reader) error { _, err := io.Copy(io.Discard, r); return err }); err != nil {
+			return err
+		}
+		return c.SendString("ok")
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = app.Serve(ln) }()
+	t.Cleanup(func() { _ = app.ShutdownWithTimeout(time.Second) })
+	for _, tc := range []struct {
+		body   string
+		status int
+	}{{"abc", 200}, {"abcd", 413}} {
+		req, err := http.NewRequest(http.MethodPost, "http://"+ln.Addr().String()+"/", strings.NewReader(tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.ContentLength = -1
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != tc.status {
+			t.Fatalf("body %q: status=%d want=%d", tc.body, resp.StatusCode, tc.status)
+		}
+	}
+}
 
 func TestNewRejectsZeroLimit(t *testing.T) {
 	defer func() {

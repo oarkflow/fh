@@ -19,10 +19,14 @@ func WithConfig(cfg Config) fh.HandlerFunc {
 		if cfg.Next != nil && cfg.Next(c) {
 			return c.Next()
 		}
-		if len(c.Body()) > cfg.Limit {
-			return fh.PayloadTooLarge("Request body exceeds the " + formatBytes(cfg.Limit) + " limit")
+		if err := fh.LimitRequestBody(c, int64(cfg.Limit)); err != nil {
+			return err
 		}
-		return c.Next()
+		err := c.Next()
+		if limitErr := fh.RequestBodyLimitError(c); limitErr != nil {
+			return limitErr
+		}
+		return err
 	}
 }
 

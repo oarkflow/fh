@@ -73,6 +73,24 @@ file, err := c.FormFile("avatar") // get uploaded file header
 err := c.SaveFile(file, "/uploads/avatar.jpg") // save to disk
 ```
 
+For large uploads, enable `fh.WithStreamRequestBody(true)` and use
+`fh.StreamMultipart` so file contents are read incrementally:
+
+```go
+err := fh.StreamMultipart(c, fh.MultipartStreamOptions{
+    MaxParts: 4, MaxFieldBytes: 8 << 10,
+    MaxFileBytes: 100 << 20, MaxTotalBytes: 101 << 20,
+}, func(part fh.MultipartStreamPart) error {
+    if part.FieldName != "avatar" { return nil }
+    _, err := io.Copy(destination, part.Reader)
+    return err
+})
+```
+
+The callback's reader is valid only during that callback. Unread part bytes
+are drained with the same limit. Server `MaxRequestBodySize` still applies, so
+set it high enough for the intended upload size.
+
 ### Request Metadata
 
 ```go

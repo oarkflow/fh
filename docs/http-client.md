@@ -95,9 +95,26 @@ The root `fh` package HTTP client also includes:
 - in-memory HTTP cache with ETag / Last-Modified support through `ClientCache`
 - service clients through `client.Service(baseURL)`
 - round-robin load balancing through `NewRoundRobinSelector` and `ClientLoadBalance`
+- health-aware endpoint selection through `NewHealthAwareSelector`
 - atomic download support through `Response.SaveAtomic`
 - streaming download support through `Response.DownloadTo`
 - stricter dial-path SSRF protection through `ClientSecurityDialContext`
+
+`ResponseBodyLimit` applies to `Response.Reader`, `Bytes`, `DownloadTo`, and
+`SaveAtomic`. An oversized response returns `ErrClientBodyTooLarge`. Streaming
+reads and downloads expose at most the configured number of bytes; an atomic
+download leaves its destination untouched on this error.
+
+### Streaming multipart uploads and body limits
+
+`Request.Multipart` streams fields and files as the request is sent. File paths
+are reopened for retries; one-shot `io.Reader` files are sent once even if the
+retry policy would otherwise retry the method. Upload errors are returned by
+`Do` instead of being discarded. A configured `BodyLimit` rejects known
+oversized bodies before sending and returns `ErrClientBodyTooLarge` when a
+stream crosses the limit. A streaming body may already have sent bytes when
+the limit is reached, so use a known-size body when the server must receive
+nothing on rejection.
 
 ### Service client
 
@@ -130,6 +147,26 @@ selector, _ := fh.NewRoundRobinSelector(
 )
 client.Use(fh.ClientLoadBalance(selector))
 ```
+
+### Health-aware load balancing
+
+```go
+selector, err := fh.NewHealthAwareSelector(fh.HealthSelectorConfig{
+    FailureThreshold: 3,
+    EjectionDuration: 30 * time.Second,
+}, "https://api-1.example.com", "https://api-2.example.com")
+if err != nil { return err }
+client.Use(fh.ClientLoadBalance(selector))
+```
+
+Transport errors and HTTP 500, 502, 503, and 504 count toward ejection by
+default. Successful responses reset the failure count. After the cooldown,
+one request probes the endpoint; other requests use healthy endpoints. If all
+endpoints are ejected or being probed, requests fail with
+`ErrClientNoHealthyEndpoints`. `selector.Snapshot()` exposes current state.
+Canceled requests do not count as endpoint failures. The selector affects
+which endpoint each retry uses; the client's retry policy still decides
+whether a request is retried.
 
 ### Atomic file download
 

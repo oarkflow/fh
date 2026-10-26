@@ -37,7 +37,7 @@ Reaching `v1.0.0` signals a formal commitment to backwards compatibility:
    - The primary interfaces (`fh.Ctx`, `fh.HandlerFunc`, `fh.ErrorHandler`) and core router methods (`app.Get`, `app.Post`, `app.Use`, `app.Listen`) will be strictly frozen.
    - Any signature changes to exported methods will require a major version bump (`v2.0.0`).
 2. **Automated Compatibility Checks**:
-   - CI will enforce API compatibility checks using tooling such as `apidiff` or `gorelease` against the latest release tag to detect unintended breaking changes before merging.
+   - The Linux release gate compares exported declarations with the latest earlier stable tag using `cmd/apicheck`. The first stable tag establishes the baseline. The check is conservative, so reported changes require review before release.
 3. **Deprecation Cycle**:
    - Obsolete methods or configurations will be marked with a `// Deprecated:` comment at least **one minor version** before removal, providing alternatives and deprecation timelines.
 4. **Supported Go Versions**:

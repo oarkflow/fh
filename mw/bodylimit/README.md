@@ -35,3 +35,9 @@ Run before body parsing, typed handlers, compression, validation, or handlers th
 ## Production considerations
 
 Set different limits by route where needed. File-upload routes should use streaming and explicit limits. Return clear errors without echoing payload content.
+
+With `fh.WithStreamRequestBody(true)`, the middleware installs a read-time
+limit and does not buffer the body before the handler. Requests with a known
+oversized `Content-Length` are rejected before the handler. The handler should
+return errors from `c.StreamBody` or `fh.StreamMultipart` so a streamed body
+that exceeds the limit produces a 413 response.

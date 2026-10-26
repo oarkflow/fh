@@ -198,6 +198,7 @@ type node struct {
 type routeEndpoint struct {
 	fn        HandlerFunc
 	paramKeys []string
+	pattern   string
 }
 
 // paramShortcut is a compact hot-path matcher for very common REST routes of
@@ -1165,6 +1166,7 @@ func insertRoute(
 		n.handler = &routeEndpoint{
 			fn:        h,
 			paramKeys: append([]string(nil), paramKeys...),
+			pattern:   fullPath,
 		}
 
 		return
@@ -1208,6 +1210,7 @@ func insertRoute(
 			n.handler = &routeEndpoint{
 				fn:        h,
 				paramKeys: append([]string(nil), paramKeys[:len(paramKeys)-1]...),
+				pattern:   fullPath,
 			}
 		}
 
@@ -1376,6 +1379,65 @@ func matchesPath(n *node, path []byte) bool {
 		return true
 	}
 	return n.wild != nil && n.wild.handler != nil
+}
+
+// Pattern returns the registered route template for a method and path.
+// An empty result means no route matched. It follows the same precedence as Find.
+func (r *Router) Pattern(method, path string) string {
+	if !r.frozen.Load() {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
+	method = strings.ToUpper(method)
+	lookup := cleanLookupPath(routeLookupPath(s2b(path)))
+	if root := r.trees[method]; root != nil {
+		if pattern := matchPattern(root, lookup); pattern != "" {
+			return pattern
+		}
+	}
+	if method == "HEAD" {
+		if root := r.trees["GET"]; root != nil {
+			return matchPattern(root, lookup)
+		}
+	}
+	return ""
+}
+
+func matchPattern(n *node, path []byte) string {
+	if len(path) == 0 {
+		if n.handler != nil {
+			return n.handler.pattern
+		}
+		if n.wild != nil && n.wild.handler != nil {
+			return n.wild.handler.pattern
+		}
+		return ""
+	}
+	seg, rest := nextSegment(path)
+	if child := n.static[b2s(seg)]; child != nil {
+		if pattern := matchPattern(child, rest); pattern != "" {
+			return pattern
+		}
+	}
+	if len(seg) > 0 {
+		segString := b2s(seg)
+		for _, child := range n.paramConstraints {
+			if child.constraint.Match(segString) {
+				if pattern := matchPattern(child, rest); pattern != "" {
+					return pattern
+				}
+			}
+		}
+		if n.param != nil {
+			if pattern := matchPattern(n.param, rest); pattern != "" {
+				return pattern
+			}
+		}
+	}
+	if n.wild != nil && n.wild.handler != nil {
+		return n.wild.handler.pattern
+	}
+	return ""
 }
 
 func endpointHandler(endpoint *routeEndpoint, params *[]Param) HandlerFunc {

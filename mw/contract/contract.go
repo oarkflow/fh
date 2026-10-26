@@ -18,8 +18,10 @@ func New(cfg Config) fh.HandlerFunc {
 		if len(cfg.Methods) > 0 && !equal(cfg.Methods, c.Method()) {
 			return fh.NewHTTPError(fh.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
 		}
-		if cfg.MaxBodyBytes > 0 && len(c.Body()) > cfg.MaxBodyBytes {
-			return fh.PayloadTooLarge("request body exceeds contract limit")
+		if cfg.MaxBodyBytes > 0 {
+			if err := fh.LimitRequestBody(c, int64(cfg.MaxBodyBytes)); err != nil {
+				return err
+			}
 		}
 		if len(cfg.ContentTypes) > 0 && !prefix(cfg.ContentTypes, c.Get(fh.HeaderContentType)) {
 			return fh.UnsupportedMediaType("content type is not supported")
@@ -29,7 +31,11 @@ func New(cfg Config) fh.HandlerFunc {
 				return fh.NewHTTPError(fh.StatusBadRequest, "HEADER_REQUIRED", "required header is missing: "+h)
 			}
 		}
-		return c.Next()
+		err := c.Next()
+		if limitErr := fh.RequestBodyLimitError(c); limitErr != nil {
+			return limitErr
+		}
+		return err
 	}
 }
 func equal(vs []string, s string) bool {

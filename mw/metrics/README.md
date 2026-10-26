@@ -16,7 +16,7 @@ import (
 
 func main() {
 	app := fh.New()
-	m := metrics.New()
+	m := metrics.NewWithConfig(metrics.Config{MaxRoutes: 256})
 	app.Use(m.Middleware())
 	app.Get("/_fh/metrics", m.Handler())
 
@@ -34,4 +34,12 @@ Run near the outside of the chain after request ID/tracing. Register the metrics
 
 ## Production considerations
 
-Use stable route labels to avoid high-cardinality metrics. Avoid labeling by raw path, user, token, or request ID.
+Route counts use matched route templates (for example `/users/:id`) rather than
+raw request paths. Unmatched requests use `<unmatched>`. The default cap is 256
+distinct method-and-route series; `MaxRoutes` changes that cap. Additional
+series are counted under `<overflow>`.
+
+The Prometheus output includes `fh_route_requests_total` and
+`fh_route_request_duration_seconds` by method, route template, and status
+class. The route cap also applies to these series; overflow uses one shared
+`<overflow>` route label. The existing JSON fields are unchanged.
