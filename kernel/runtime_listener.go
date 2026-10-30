@@ -74,7 +74,9 @@ func listenStandardWithFallback(addr string, tlsCfg *tls.Config, cfg KernelConfi
 	return listenRuntime(addr, tlsCfg, cfg, host, KernelRuntimeInfo{Enabled: true, Accelerated: false, Profile: cfg.Profile, OS: runtime.GOOS, Arch: runtime.GOARCH, Backend: KernelBackendStandard, RequestedBackend: requested, NativePoller: poller, Reactors: 1, FallbackReason: cause.Error()})
 }
 func listenRuntime(addr string, tlsCfg *tls.Config, cfg KernelConfig, host Host, info KernelRuntimeInfo) error {
-	ln, err := (&net.ListenConfig{KeepAlive: cfg.TCPKeepAlive}).Listen(context.Background(), "tcp", addr)
+	listenCfg := net.ListenConfig{KeepAlive: cfg.TCPKeepAlive}
+	listenCfg.SetMultipathTCP(false)
+	ln, err := listenCfg.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return err
 	}

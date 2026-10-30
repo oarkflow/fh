@@ -433,7 +433,7 @@ func parseProxyV2(bufr *bufio.Reader, maxBytes int) (net.Addr, error) {
 
 // ListenProxyProtocol starts listening on addr with PROXY protocol v1/v2 support.
 func (a *App) ListenProxyProtocol(addr string, cfg ...ProxyProtocolConfig) error {
-	ln, err := net.Listen("tcp", addr)
+	ln, err := listenTCP(addr)
 	if err != nil {
 		return err
 	}
@@ -450,7 +450,7 @@ func (a *App) ListenTLSProxyProtocol(addr, certFile, keyFile string, cfg ...Prox
 	if err != nil {
 		return err
 	}
-	ln, err := net.Listen("tcp", addr)
+	ln, err := listenTCP(addr)
 	if err != nil {
 		return err
 	}

@@ -38,6 +38,32 @@ reminder is unconditional rather than a "detected" claim.
 
 ## Supported deployment shape
 
+### Linux TCP vulnerability CVE-2026-98432
+
+CVE-2026-98432 is a use-after-free in the Linux kernel's IPv4 TCP handshake.
+The fix is to install a kernel package containing the fix from your Linux
+vendor and boot into that kernel. Updating Go or fh alone does not fix it.
+
+Go 1.24 and later enable Multipath TCP (MPTCP) on Linux listeners by default.
+fh now explicitly disables MPTCP on TCP listeners created by its `Listen*`
+methods, including the standard kernel fallback. The raw Linux kernel
+transport already creates ordinary TCP sockets. This reduces exposure to the
+published MPTCP-based exploit while the host kernel is being patched; the
+underlying bug may also be exploitable on ordinary TCP listeners.
+
+Applications passing their own listener to `Serve`, `ServeTLS`, or
+`ServeContext` must configure that listener separately. For Go-created
+listeners, call `net.ListenConfig.SetMultipathTCP(false)` before `Listen`, or
+set `GODEBUG=multipathtcp=0` for the application process. A `godebug` directive
+in this repository's `go.mod` affects only binaries built from this module;
+it does not propagate to applications importing fh. Explicit per-listener
+MPTCP settings can override `GODEBUG`. Check every listener in the deployed
+process and follow your Linux vendor's advisory for kernel patch status.
+
+References: [Linux kernel CVE record](https://www.cve.org/CVERecord?id=CVE-2026-98432),
+[Go security team advisory, mirrored on oss-security](https://seclists.org/oss-sec/2026/q4/437),
+[Go MPTCP defaults](https://go.dev/doc/godebug#go-124).
+
 The best-supported shape is HTTP/1.1 or HTTP/2 behind a trusted CDN, WAF or
 load balancer, with TLS either at fh or at that trusted edge. HTTP/3, gRPC and
 GraphQL servers are not built in. Default rate-limit, cache, session, replay,

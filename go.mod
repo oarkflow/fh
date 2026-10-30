@@ -2,6 +2,8 @@ module github.com/oarkflow/fh
 
 go 1.27.3
 
+godebug multipathtcp=0
+
 require golang.org/x/crypto v0.58.0
 
 require (

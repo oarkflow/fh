@@ -1120,7 +1120,7 @@ func (a *App) ListenContext(ctx context.Context, addr string) error {
 			}
 		}
 	}
-	ln, err := net.Listen("tcp", addr)
+	ln, err := listenTCP(addr)
 	if err != nil {
 		return err
 	}
@@ -1173,7 +1173,7 @@ func (a *App) ListenTLSContext(ctx context.Context, addr, certFile, keyFile stri
 			}
 		}
 	}
-	ln, err := net.Listen("tcp", addr)
+	ln, err := listenTCP(addr)
 	if err != nil {
 		return err
 	}
@@ -1251,7 +1251,7 @@ func (a *App) ListenWithGracefulShutdown(addr string) error {
 	if a.cfg.Kernel.Enabled {
 		return a.runWithSignal(func() error { return a.listenKernel(addr, nil) })
 	}
-	ln, err := net.Listen("tcp", addr)
+	ln, err := listenTCP(addr)
 	if err != nil {
 		return err
 	}
@@ -1273,7 +1273,7 @@ func (a *App) ListenTLSWithGracefulShutdown(addr, certFile, keyFile string) erro
 	if a.cfg.Kernel.Enabled {
 		return a.runWithSignal(func() error { return a.listenKernel(addr, tlsConfig) })
 	}
-	ln, err := net.Listen("tcp", addr)
+	ln, err := listenTCP(addr)
 	if err != nil {
 		return err
 	}

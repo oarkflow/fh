@@ -3,7 +3,6 @@ package fh
 import (
 	"crypto/tls"
 	"errors"
-	"net"
 
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -65,7 +64,7 @@ func (a *App) ListenAutoTLS(domains []string, cacheDir string) error {
 	if a.cfg.Kernel.Enabled {
 		return a.listenKernel(":https", tlsConfig)
 	}
-	ln, err := net.Listen("tcp", ":https")
+	ln, err := listenTCP(":https")
 	if err != nil {
 		return err
 	}
@@ -83,7 +82,7 @@ func (a *App) ListenAutoTLSWithGracefulShutdown(domains []string, cacheDir strin
 	if a.cfg.Kernel.Enabled {
 		return a.runWithSignal(func() error { return a.listenKernel(":https", tlsConfig) })
 	}
-	ln, err := net.Listen("tcp", ":https")
+	ln, err := listenTCP(":https")
 	if err != nil {
 		return err
 	}
