@@ -178,7 +178,16 @@ export async function loadDevice(): Promise<StoredDevice | null> {
   return { id: id.slice(), publicKey: publicKey.slice(), name: record.name };
 }
 
-export async function signClientHello(data: Uint8Array): Promise<Uint8Array> {
+let bridgeAuthToken: string | undefined;
+
+export function setBridgeAuthToken(token: string): void {
+  bridgeAuthToken = token;
+}
+
+export async function signClientHello(data: Uint8Array, token?: string): Promise<Uint8Array> {
+  if (bridgeAuthToken !== undefined && token !== bridgeAuthToken) {
+    throw new Error("FH secure storage signing: unauthorized token");
+  }
   if (!validClientHello(data)) throw new Error("FH secure signing accepts only a versioned ClientHello transcript");
   const record = await signingKeyRecord();
   if (!record) throw new Error("FH secure device signing key is unavailable");
@@ -200,7 +209,9 @@ export async function clearDevice(): Promise<void> {
   ]);
 }
 
-export function installSecureStorageBridge(): void {
+export function installSecureStorageBridge(token?: string): void {
+  if (token) bridgeAuthToken = token;
+  if (globalThis.__fhSecureStorage) return;
   Object.defineProperty(globalThis, "__fhSecureStorage", {
     configurable: false,
     enumerable: false,

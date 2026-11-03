@@ -180,7 +180,8 @@ func (m *Metrics) Prometheus() string {
 		if !found {
 			method, route = "overflow", key
 		}
-		for class, stats := range &value.(*routeSeries).classes {
+		for class := range value.(*routeSeries).classes {
+			stats := &value.(*routeSeries).classes[class]
 			count := stats.requests.Load()
 			if count == 0 {
 				continue

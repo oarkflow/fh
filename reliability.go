@@ -54,6 +54,7 @@ type ReliabilityConfig struct {
 	IdempotencyHeader            string
 	RequireIdempotencyKey        bool
 	IdempotencyTTL               time.Duration
+	IdempotencyProcessingTimeout time.Duration
 	IdempotencyProcessingStatus  int
 	IdempotencyReplayHeaderValue string
 
@@ -86,6 +87,12 @@ type IdempotencyRepository interface {
 // replay records should not grow without bounds.
 type IdempotencyJanitor interface {
 	PurgeExpired(context.Context, time.Time) (int, error)
+}
+
+// IdempotencyAborter is an optional extension for repositories that can cancel
+// in-flight processing records when a request fails or panics before completion.
+type IdempotencyAborter interface {
+	Abort(key, reqHash string) error
 }
 
 // QueueStorage is the persistence contract used by DurableQueue. A DBMS backend
@@ -186,7 +193,7 @@ func NewReliability(cfg ReliabilityConfig) (*Reliability, error) {
 		if cfg.IdempotencyRepository != nil {
 			r.idem = cfg.IdempotencyRepository
 		} else {
-			r.idem, err = OpenIdempotencyStore(filepath.Join(cfg.DataDir, "idempotency.jsonl"), cfg.IdempotencyTTL)
+			r.idem, err = OpenIdempotencyStore(filepath.Join(cfg.DataDir, "idempotency.jsonl"), cfg.IdempotencyTTL, cfg.IdempotencyProcessingTimeout)
 			if err != nil {
 				r.Close()
 				return nil, err
@@ -232,6 +239,9 @@ func normalizeReliabilityConfig(cfg ReliabilityConfig) ReliabilityConfig {
 	}
 	if cfg.IdempotencyTTL <= 0 {
 		cfg.IdempotencyTTL = 24 * time.Hour
+	}
+	if cfg.IdempotencyProcessingTimeout <= 0 {
+		cfg.IdempotencyProcessingTimeout = 60 * time.Second
 	}
 	if cfg.IdempotencyProcessingStatus == 0 {
 		cfg.IdempotencyProcessingStatus = StatusConflict
@@ -360,9 +370,18 @@ func (r *Reliability) Middleware() HandlerFunc {
 			}
 			c.Locals("fh.idem_started", true)
 			c.CaptureResponseBody()
+			idemCompleted := false
 			c.OnBeforeResponse(func(ctx Ctx) error {
+				idemCompleted = true
 				return r.idem.Complete(scopedKey, reqHash, ctx.StatusCode(), ctx.ResponseHeader(HeaderContentType), ctx.GetRespHeaders(), ctx.ResponseBody())
 			})
+			defer func() {
+				if !idemCompleted {
+					if aborter, ok := r.idem.(IdempotencyAborter); ok {
+						_ = aborter.Abort(scopedKey, reqHash)
+					}
+				}
+			}()
 		}
 		return c.Next()
 	}
@@ -521,22 +540,27 @@ type IdempotencyRecord struct {
 }
 
 type IdempotencyStore struct {
-	mu      sync.Mutex
-	file    *os.File
-	path    string
-	ttl     time.Duration
-	records map[string]*IdempotencyRecord
-	failed  error
+	mu                sync.Mutex
+	file              *os.File
+	path              string
+	ttl               time.Duration
+	processingTimeout time.Duration
+	records           map[string]*IdempotencyRecord
+	failed            error
 }
 
-func OpenIdempotencyStore(path string, ttl time.Duration) (*IdempotencyStore, error) {
+func OpenIdempotencyStore(path string, ttl time.Duration, processingTimeout ...time.Duration) (*IdempotencyStore, error) {
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
+	}
+	pTimeout := 60 * time.Second
+	if len(processingTimeout) > 0 && processingTimeout[0] > 0 {
+		pTimeout = processingTimeout[0]
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	s := &IdempotencyStore{path: path, ttl: ttl, records: make(map[string]*IdempotencyRecord)}
+	s := &IdempotencyStore{path: path, ttl: ttl, processingTimeout: pTimeout, records: make(map[string]*IdempotencyRecord)}
 	if err := s.load(); err != nil {
 		return nil, fmt.Errorf("fh: load idempotency store: %w", err)
 	}
@@ -592,7 +616,19 @@ func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (Idempotency
 			if rec.State == "completed" {
 				return idemReplay, cloneIdem(rec), nil
 			}
-			return idemProcessing, cloneIdem(rec), nil
+			if rec.State == "processing" {
+				procTimeout := s.processingTimeout
+				if procTimeout <= 0 {
+					procTimeout = 60 * time.Second
+				}
+				if now.Sub(rec.UpdatedAt) > procTimeout {
+					delete(s.records, key)
+				} else {
+					return idemProcessing, cloneIdem(rec), nil
+				}
+			} else {
+				return idemProcessing, cloneIdem(rec), nil
+			}
 		}
 	}
 	rec := &IdempotencyRecord{Key: key, RequestHash: reqHash, Method: method, Path: path, State: "processing", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(s.ttl)}
@@ -628,6 +664,30 @@ func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType
 	}
 	s.records[key] = completed
 	return nil
+}
+func (s *IdempotencyStore) Abort(key, reqHash string) error {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failed != nil {
+		return s.failed
+	}
+	rec := s.records[key]
+	if rec == nil {
+		return nil
+	}
+	if rec.RequestHash != reqHash {
+		return fmt.Errorf("idempotency hash mismatch for key %q", key)
+	}
+	if rec.State != "processing" {
+		return nil
+	}
+	delete(s.records, key)
+	aborted := cloneIdem(rec)
+	aborted.State = "aborted"
+	aborted.UpdatedAt = now
+	aborted.ExpiresAt = now
+	return s.appendLocked(aborted)
 }
 func (s *IdempotencyStore) PurgeExpired(ctx context.Context, now time.Time) (int, error) {
 	if s == nil {
@@ -1362,9 +1422,18 @@ func (r *Reliability) ApplyPolicy(c Ctx, p ReliabilityPolicy) error {
 				return c.Status(r.cfg.IdempotencyProcessingStatus).JSON(Map{"error": "idempotency_key_processing", "request_id": requestID})
 			}
 			c.CaptureResponseBody()
+			idemCompleted := false
 			c.OnBeforeResponse(func(ctx Ctx) error {
+				idemCompleted = true
 				return r.idem.Complete(key, reqHash, ctx.StatusCode(), ctx.ResponseHeader(HeaderContentType), ctx.GetRespHeaders(), ctx.ResponseBody())
 			})
+			defer func() {
+				if !idemCompleted {
+					if aborter, ok := r.idem.(IdempotencyAborter); ok {
+						_ = aborter.Abort(key, reqHash)
+					}
+				}
+			}()
 		}
 	}
 	return c.Next()

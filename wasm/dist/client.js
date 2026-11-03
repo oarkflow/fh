@@ -207,6 +207,9 @@ export function createClient(fetchImpl, config = {}) {
             cfg,
         ]));
         const { retries, retryDelay, retryCondition } = normalizeRetryConfig(cfg.retries);
+        const isStream = typeof ReadableStream !== "undefined" && body instanceof ReadableStream;
+        // ReadableStream bodies cannot be re-read after consumption; disable retries for streams.
+        const effectiveRetries = isStream ? 0 : retries;
         const totalBytes = typeof body === "string"
             ? new TextEncoder().encode(body).byteLength
             : body instanceof Blob
@@ -238,7 +241,7 @@ export function createClient(fetchImpl, config = {}) {
                     upload: false,
                     synthetic: true,
                 });
-                if (attemptResult.error && attempt <= retries && retryCondition(attemptResult.error, attempt)) {
+                if (attemptResult.error && attempt <= effectiveRetries && retryCondition(attemptResult.error, attempt)) {
                     await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt, attemptResult.error)));
                     continue;
                 }
@@ -252,7 +255,7 @@ export function createClient(fetchImpl, config = {}) {
                         ? "ECONNABORTED"
                         : "ERR_CANCELED";
                 const fhError = new FHError(aborted ? (code === "ECONNABORTED" ? "Request timed out" : "Request canceled") : "Network error", code, cfg, request);
-                if (code !== "ERR_CANCELED" && attempt <= retries && retryCondition(fhError, attempt)) {
+                if (code !== "ERR_CANCELED" && attempt <= effectiveRetries && retryCondition(fhError, attempt)) {
                     await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt, fhError)));
                     continue;
                 }

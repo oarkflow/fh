@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -23,6 +24,9 @@ const (
 	DefaultLabel = "sig1"
 	DefaultTag   = "fh-rfc9421-response"
 	Algorithm    = "ed25519"
+
+	RequestDefaultTag        = "fh-rfc9421-request"
+	RequestCoveredComponents = "(\"@method\" \"@target-uri\" \"content-digest\" \"content-type\")"
 
 	// CoveredComponents is the exact RFC 9421 Inner List used by this profile.
 	// Request method and target URI bind the response to the request that caused
@@ -185,6 +189,71 @@ func SignResponse(privateKey ed25519.PrivateKey, label string, params Parameters
 	return contentDigest, signatureInput, signature, nil
 }
 
+// FormatRequestSignatureInput serializes the Signature-Input structured field dictionary member for requests.
+func FormatRequestSignatureInput(label string, params Parameters) (string, string, error) {
+	label = defaultString(label, DefaultLabel)
+	if !validToken(label) || !validToken(params.KeyID) || !validNonce(params.Nonce) || params.Created <= 0 || params.Expires <= params.Created {
+		return "", "", ErrPolicy
+	}
+	tag := params.Tag
+	if tag == "" {
+		tag = RequestDefaultTag
+	}
+	raw := RequestCoveredComponents +
+		";created=" + strconv.FormatInt(params.Created, 10) +
+		";expires=" + strconv.FormatInt(params.Expires, 10) +
+		";nonce=" + quote(params.Nonce) +
+		";keyid=" + quote(params.KeyID) +
+		";alg=\"" + Algorithm + "\";tag=\"" + tag + "\""
+	return label + "=" + raw, raw, nil
+}
+
+// RequestSignatureBase constructs the exact RFC 9421 signature base for request messages.
+func RequestSignatureBase(method, targetURI, contentDigest, contentType, signatureParams string) ([]byte, error) {
+	if !validDerived(method) || !validDerived(targetURI) || !validFieldValue(contentDigest) || !validFieldValue(contentType) || !strings.HasPrefix(signatureParams, RequestCoveredComponents) {
+		return nil, ErrPolicy
+	}
+	var base strings.Builder
+	base.WriteString("\"@method\": ")
+	base.WriteString(method)
+	base.WriteByte('\n')
+	base.WriteString("\"@target-uri\": ")
+	base.WriteString(targetURI)
+	base.WriteByte('\n')
+	base.WriteString("\"content-digest\": ")
+	base.WriteString(contentDigest)
+	base.WriteByte('\n')
+	base.WriteString("\"content-type\": ")
+	base.WriteString(contentType)
+	base.WriteByte('\n')
+	base.WriteString("\"@signature-params\": ")
+	base.WriteString(signatureParams)
+	return []byte(base.String()), nil
+}
+
+// SignRequest produces the Content-Digest, Signature-Input, and Signature headers for an outbound request.
+func SignRequest(privateKey ed25519.PrivateKey, label string, params Parameters, method, targetURI, contentType string, content []byte) (contentDigest, signatureInput, signature string, err error) {
+	contentDigest = FormatContentDigest(content)
+	var rawParams string
+	signatureInput, rawParams, err = FormatRequestSignatureInput(label, params)
+	if err != nil {
+		return "", "", "", err
+	}
+	base, err := RequestSignatureBase(method, targetURI, contentDigest, contentType, rawParams)
+	if err != nil {
+		return "", "", "", err
+	}
+	value, err := sign(privateKey, base)
+	if err != nil {
+		return "", "", "", err
+	}
+	signature, err = FormatSignature(label, value)
+	if err != nil {
+		return "", "", "", err
+	}
+	return contentDigest, signatureInput, signature, nil
+}
+
 func parseSignatureInput(field, label string) (string, Parameters, error) {
 	raw, err := dictionaryMember(field, label)
 	if err != nil {
@@ -216,6 +285,56 @@ func parseSignature(field, label string) ([]byte, error) {
 		return nil, ErrMalformed
 	}
 	return decoded, nil
+}
+
+// ParseSignature extracts the raw Ed25519 signature bytes from a Signature header.
+func ParseSignature(field, label string) ([]byte, error) {
+	return parseSignature(field, label)
+}
+
+// ParseRequestSignatureInput parses a request Signature-Input dictionary entry.
+func ParseRequestSignatureInput(field, label string) (string, Parameters, error) {
+	label = defaultString(label, DefaultLabel)
+	raw, err := dictionaryMember(field, label)
+	if err != nil {
+		return "", Parameters{}, err
+	}
+	if !strings.HasPrefix(raw, RequestCoveredComponents) {
+		return "", Parameters{}, ErrUnsupported
+	}
+	params, bare, err := parseParameters(raw[len(RequestCoveredComponents):])
+	if err != nil {
+		return "", Parameters{}, err
+	}
+	if len(bare) != 0 || params.Created <= 0 || params.Expires <= params.Created || params.Nonce == "" || params.KeyID == "" || params.Alg != Algorithm {
+		return "", Parameters{}, ErrUnsupported
+	}
+	return raw, params, nil
+}
+
+// VerifyRequest verifies an RFC 9421 request signature with RFC 9530 Content-Digest.
+func VerifyRequest(publicKey ed25519.PublicKey, label, method, targetURI, contentType string, content []byte, sigInputHeader, sigHeader string) error {
+	rawParams, params, err := ParseRequestSignatureInput(sigInputHeader, label)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if params.Created > now.Add(30*time.Second).Unix() || params.Expires < now.Add(-30*time.Second).Unix() {
+		return ErrExpired
+	}
+	contentDigest := FormatContentDigest(content)
+	base, err := RequestSignatureBase(method, targetURI, contentDigest, contentType, rawParams)
+	if err != nil {
+		return err
+	}
+	sigBytes, err := ParseSignature(sigHeader, label)
+	if err != nil {
+		return err
+	}
+	if !verify(publicKey, base, sigBytes) {
+		return ErrSignature
+	}
+	return nil
 }
 
 func parseParameters(input string) (Parameters, map[string]bool, error) {

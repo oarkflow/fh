@@ -42,3 +42,53 @@ func TestKeyEncodingRoundTrip(t *testing.T) {
 		t.Fatal("public key round trip failed")
 	}
 }
+
+func TestSignRequestRoundTrip(t *testing.T) {
+	publicKey, privateKey, err := GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, err := NewNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"action":"transfer","amount":100}`)
+	params := Parameters{
+		Created: 1_700_000_000,
+		Expires: 1_700_000_090,
+		Nonce:   nonce,
+		KeyID:   "client-device-key-1",
+	}
+	digest, input, sig, err := SignRequest(privateKey, DefaultLabel, params, "POST", "https://api.example.com/v1/transfer", "application/json", body)
+	if err != nil {
+		t.Fatalf("SignRequest failed: %v", err)
+	}
+	if digest == "" || input == "" || sig == "" {
+		t.Fatal("expected non-empty signature fields")
+	}
+	if err := VerifyContentDigest(digest, body); err != nil {
+		t.Fatalf("VerifyContentDigest failed: %v", err)
+	}
+	// Verify raw signature using public key and reconstructed base
+	rawParams, _, err := parseSignatureInput(input, DefaultLabel)
+	if err == nil {
+		t.Fatalf("expected parseSignatureInput to reject response params on request input")
+	}
+	// Extract raw parameter substring
+	prefix := DefaultLabel + "="
+	if !bytes.HasPrefix([]byte(input), []byte(prefix)) {
+		t.Fatalf("malformed input: %s", input)
+	}
+	rawParams = input[len(prefix):]
+	base, err := RequestSignatureBase("POST", "https://api.example.com/v1/transfer", digest, "application/json", rawParams)
+	if err != nil {
+		t.Fatalf("RequestSignatureBase failed: %v", err)
+	}
+	signatureBytes, err := parseSignature(sig, DefaultLabel)
+	if err != nil {
+		t.Fatalf("parseSignature failed: %v", err)
+	}
+	if !verify(publicKey, base, signatureBytes) {
+		t.Fatal("signature verification failed")
+	}
+}

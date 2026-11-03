@@ -316,6 +316,9 @@ export function createClient(fetchImpl: FetchLike, config: FHRequestConfig = {})
     ])) as BodyInit | undefined;
 
     const { retries, retryDelay, retryCondition } = normalizeRetryConfig(cfg.retries);
+    const isStream = typeof ReadableStream !== "undefined" && body instanceof ReadableStream;
+    // ReadableStream bodies cannot be re-read after consumption; disable retries for streams.
+    const effectiveRetries = isStream ? 0 : retries;
 
     const totalBytes =
       typeof body === "string"
@@ -350,7 +353,7 @@ export function createClient(fetchImpl: FetchLike, config: FHRequestConfig = {})
           upload: false,
           synthetic: true,
         });
-        if (attemptResult.error && attempt <= retries && retryCondition(attemptResult.error, attempt)) {
+        if (attemptResult.error && attempt <= effectiveRetries && retryCondition(attemptResult.error, attempt)) {
           await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt, attemptResult.error!)));
           continue;
         }
@@ -368,7 +371,7 @@ export function createClient(fetchImpl: FetchLike, config: FHRequestConfig = {})
           cfg,
           request,
         );
-        if (code !== "ERR_CANCELED" && attempt <= retries && retryCondition(fhError, attempt)) {
+        if (code !== "ERR_CANCELED" && attempt <= effectiveRetries && retryCondition(fhError, attempt)) {
           await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt, fhError)));
           continue;
         }

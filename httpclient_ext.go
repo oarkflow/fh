@@ -421,7 +421,7 @@ func ClientSecurityDialContext(sec ClientSecurity, base *net.Dialer) func(contex
 			host = address
 		}
 		if sec.Enabled() {
-			ips, err := net.LookupIP(host)
+			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 			if err != nil {
 				return nil, err
 			}
@@ -430,14 +430,25 @@ func ClientSecurityDialContext(sec ClientSecurity, base *net.Dialer) func(contex
 			}
 			dialSec := sec
 			dialSec.RequireHTTPS = false
+			var validIPs []net.IP
 			for _, ip := range ips {
 				fake := &url.URL{Scheme: "tcp", Host: net.JoinHostPort(ip.String(), port)}
 				if err := dialSec.Validate(fake); err != nil {
 					return nil, err
 				}
+				validIPs = append(validIPs, ip)
 			}
-			// Connect to resolved IP directly, bypassing hostname re-resolution (TOCTOU fix)
-			address = net.JoinHostPort(ips[0].String(), port)
+			// Attempt to dial each validated IP until one succeeds (fallback)
+			var dialErr error
+			for _, ip := range validIPs {
+				targetAddr := net.JoinHostPort(ip.String(), port)
+				conn, err := base.DialContext(ctx, network, targetAddr)
+				if err == nil {
+					return conn, nil
+				}
+				dialErr = err
+			}
+			return nil, dialErr
 		}
 		return base.DialContext(ctx, network, address)
 	}

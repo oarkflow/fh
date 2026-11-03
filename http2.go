@@ -1810,14 +1810,18 @@ func (h *h2Conn) resetStream(id uint32) {
 }
 
 func (h *h2Conn) connectionError(code uint32) { h.sendGoAway(code); h.markClosed(); _ = h.conn.Close() }
+func (h *h2Conn) sendGoAwayWithLast(lastStream uint32, code uint32) {
+	var p [8]byte
+	binary.BigEndian.PutUint32(p[0:4], lastStream)
+	binary.BigEndian.PutUint32(p[4:8], code)
+	_ = h.writeFrame(h2GoAway, 0, 0, p[:])
+}
+
 func (h *h2Conn) sendGoAway(code uint32) {
 	h.mu.Lock()
 	last := h.lastStream
 	h.mu.Unlock()
-	var p [8]byte
-	binary.BigEndian.PutUint32(p[0:4], last)
-	binary.BigEndian.PutUint32(p[4:8], code)
-	_ = h.writeFrame(h2GoAway, 0, 0, p[:])
+	h.sendGoAwayWithLast(last, code)
 }
 func (h *h2Conn) markClosed() {
 	h.closed.Store(true)
@@ -1829,11 +1833,17 @@ func (h *h2Conn) startDrain() {
 	if !h.draining.CompareAndSwap(false, true) {
 		return
 	}
-	h.sendGoAway(h2NoError)
-	h.mu.Lock()
-	empty := len(h.streams) == 0
-	h.mu.Unlock()
-	if empty {
-		_ = h.conn.Close()
-	}
+	// RFC 9113 §6.8 two-stage graceful drain: advertise max stream ID first
+	// to tell the client not to initiate new streams, then send final lastStream.
+	h.sendGoAwayWithLast(1<<31-1, h2NoError)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		h.sendGoAway(h2NoError)
+		h.mu.Lock()
+		empty := len(h.streams) == 0
+		h.mu.Unlock()
+		if empty {
+			_ = h.conn.Close()
+		}
+	}()
 }

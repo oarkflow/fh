@@ -1342,26 +1342,61 @@ func (a *App) ServeContext(ctx context.Context, ln net.Listener) error {
 	a.logger.Info("listening", "addr", ln.Addr(), "transport", "standard")
 
 	var acceptErr error
+	var tempDelay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if a.closed.Load() {
 				break
 			}
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() {
-				a.logger.Warn("accept timeout", "error", err)
-				continue
+			if isTemporaryAcceptError(err) {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+				if maxDelay := 1 * time.Second; tempDelay > maxDelay {
+					tempDelay = maxDelay
+				}
+				a.logger.Warn("temporary accept error", "error", err, "retry_in", tempDelay)
+				select {
+				case <-time.After(tempDelay):
+					continue
+				case <-ctx.Done():
+					acceptErr = ctx.Err()
+					_ = a.beginShutdown()
+					break
+				}
 			}
 			acceptErr = err
 			_ = a.beginShutdown()
 			break
 		}
+		tempDelay = 0
 		a.acceptConnection(conn)
 	}
 
 	a.finishServing()
 	return normalizeServeError(acceptErr, a.closed.Load())
+}
+
+// isTemporaryAcceptError reports whether err is a transient network or resource
+// exhaustion error (e.g., timeout, EMFILE, ENFILE, ECONNABORTED) that a brief
+// backoff can ride out, avoiding fatal termination of the server listener.
+func isTemporaryAcceptError(e error) bool {
+	if e == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(e, &ne) && ne.Timeout() {
+		return true
+	}
+	return errors.Is(e, syscall.EMFILE) ||
+		errors.Is(e, syscall.ENFILE) ||
+		errors.Is(e, syscall.ECONNABORTED) ||
+		errors.Is(e, syscall.ECONNRESET) ||
+		errors.Is(e, syscall.EINTR) ||
+		errors.Is(e, syscall.ENOBUFS)
 }
 
 // shutdownAfterServeContext turns serving-context cancellation into a fresh

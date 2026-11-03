@@ -8,6 +8,7 @@ import (
 	crypto_rand "crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -75,6 +76,7 @@ type ClientConfig struct {
 	// InsecureSkipVerify can be used. Prefer normal certificate validation;
 	// certificate pinning also requires a verified chain.
 	AllowInsecureTLS  bool
+	CertPinning       *CertPinningConfig
 	Proxy             func(*http.Request) (*url.URL, error)
 	Jar               http.CookieJar
 	Transport         http.RoundTripper
@@ -157,6 +159,23 @@ func NewClient(cfg ...ClientConfig) *Client {
 		c = cfg[0]
 	}
 	c = c.normalize()
+	if c.CertPinning != nil {
+		if c.TLSConfig == nil {
+			c.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		} else {
+			c.TLSConfig = c.TLSConfig.Clone()
+		}
+		verifier := c.CertPinning.Verifier()
+		origVerify := c.TLSConfig.VerifyPeerCertificate
+		c.TLSConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			if origVerify != nil {
+				if err := origVerify(rawCerts, verifiedChains); err != nil {
+					return err
+				}
+			}
+			return verifier(rawCerts, verifiedChains)
+		}
+	}
 	if c.TLSConfig != nil {
 		c.TLSConfig = c.TLSConfig.Clone()
 		if c.TLSConfig.InsecureSkipVerify && !c.AllowInsecureTLS {
@@ -294,6 +313,11 @@ func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
 	}
 	if p.HTTPSOnly && req.URL.Scheme != "https" {
 		return ErrClientRedirectBlocked
+	}
+	if c.cfg.Security.Enabled() {
+		if err := c.cfg.Security.Validate(req.URL); err != nil {
+			return errors.Join(ErrClientRedirectBlocked, err)
+		}
 	}
 	if p.StripSensitiveHeaders && len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
 		stripSensitive(req.Header)
@@ -1158,8 +1182,52 @@ func (s ClientSecurity) Validate(u *url.URL) error {
 	return nil
 }
 func isPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		if v4.IsLoopback() || v4.IsLinkLocalUnicast() || v4.IsLinkLocalMulticast() || v4.IsPrivate() {
+			return true
+		}
+		// Carrier-Grade NAT (CGNAT) 100.64.0.0/10 (RFC 6598)
+		if v4[0] == 100 && (v4[1]&0xc0) == 64 {
+			return true
+		}
+		// Current network 0.0.0.0/8
+		if v4[0] == 0 {
+			return true
+		}
+		// Documentation blocks: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+		if v4[0] == 192 && v4[1] == 0 && v4[2] == 2 {
+			return true
+		}
+		if v4[0] == 198 && v4[1] == 51 && v4[2] == 100 {
+			return true
+		}
+		if v4[0] == 203 && v4[1] == 0 && v4[2] == 113 {
+			return true
+		}
+		// Benchmarking 198.18.0.0/15
+		if v4[0] == 198 && (v4[1]&0xfe) == 18 {
+			return true
+		}
+		// Cloud metadata IPs (e.g. Alibaba 100.100.100.200)
+		if v4[0] == 100 && v4[1] == 100 && v4[2] == 100 && v4[3] == 200 {
+			return true
+		}
+		return false
+	}
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
 		return true
+	}
+	if len(ip) == net.IPv6len {
+		// IPv6 unique local (fc00::/7) or site-local (fec0::/10)
+		if ip[0] == 0xfc || ip[0] == 0xfd {
+			return true
+		}
+		if ip[0] == 0xfe && (ip[1]&0xc0) == 0xc0 {
+			return true
+		}
 	}
 	return false
 }

@@ -10,9 +10,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -82,6 +84,12 @@ type CertPinningConfig struct {
 // Verifier returns a function suitable for tls.Config.VerifyPeerCertificate
 // that enforces certificate pinning. Unpinned hosts fail-closed (rejected).
 func (pc *CertPinningConfig) Verifier() func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	return pc.VerifierForHost("")
+}
+
+// VerifierForHost returns a VerifyPeerCertificate verifier enforcing pins specifically
+// for the given target hostname, preventing SAN cross-domain confusion.
+func (pc *CertPinningConfig) VerifierForHost(targetHost string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	if pc == nil || len(pc.Pins) == 0 {
 		return nil
 	}
@@ -104,13 +112,31 @@ func (pc *CertPinningConfig) Verifier() func(rawCerts [][]byte, verifiedChains [
 			return nil
 		}
 
-		// Check host-specific pins.
-		candidateNames := append([]string{leaf.Subject.CommonName}, leaf.DNSNames...)
-		for _, name := range candidateNames {
-			if pins, ok := pc.Pins[name]; ok {
+		cleanHost := strings.ToLower(targetHost)
+		if h, _, err := net.SplitHostPort(cleanHost); err == nil {
+			cleanHost = h
+		}
+
+		if cleanHost != "" {
+			if pins, ok := pc.Pins[cleanHost]; ok {
 				for _, expected := range pins {
 					if expected == spkiB64 {
 						return nil
+					}
+				}
+				return errors.New("fh: certificate pin mismatch for host " + cleanHost)
+			}
+		}
+
+		// Check host-specific pins from candidate names when targetHost is not specified.
+		if cleanHost == "" {
+			candidateNames := append([]string{leaf.Subject.CommonName}, leaf.DNSNames...)
+			for _, name := range candidateNames {
+				if pins, ok := pc.Pins[name]; ok {
+					for _, expected := range pins {
+						if expected == spkiB64 {
+							return nil
+						}
 					}
 				}
 			}
