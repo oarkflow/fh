@@ -9,8 +9,8 @@ export interface FHProgressEvent {
     total?: number;
     lengthComputable: boolean;
     upload: boolean;
-    /** Always true today: the underlying transport buffers whole bodies, so this is a start/end signal, not real streaming progress. */
-    synthetic: true;
+    /** False when loaded counts bytes actually pulled through a stream. */
+    synthetic: boolean;
 }
 export interface RetryConfig {
     retries?: number;
@@ -35,7 +35,7 @@ export interface FHRequestConfig<TData = unknown> {
     retries?: number | RetryConfig;
     onUploadProgress?: (event: FHProgressEvent) => void;
     onDownloadProgress?: (event: FHProgressEvent) => void;
-    responseType?: "json" | "text" | "blob" | "arraybuffer" | "formdata";
+    responseType?: "json" | "text" | "blob" | "arraybuffer" | "formdata" | "stream";
     meta?: Record<string, unknown>;
 }
 export interface FHResponse<T = unknown, TData = unknown> {

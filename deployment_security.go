@@ -52,6 +52,7 @@ func (a *App) validateDeployment(_ net.Listener, tlsEnabled bool) error {
 	add(c.MaxConnections > 0 && c.MaxInFlightRequests > 0, "bound connections and in-flight requests")
 	add(c.MaxRequestBodySize > 0 && c.MaxHeaderListSize > 0 && c.MaxHeaderCount > 0 && c.MaxRequestLineSize > 0, "bound request body, headers, and request line")
 	add(c.MaxBufferedRequestBytes > 0, "configure MaxBufferedRequestBytes")
+	add(c.MaxBufferedResponseBytes > 0, "configure MaxBufferedResponseBytes")
 	add(c.DisableHTTP2 || c.MaxConcurrentStreams > 0, "bound HTTP/2 concurrent streams")
 	add(c.DisableHTTP2 || c.HTTP2IdleTimeout > 0, "configure HTTP/2 idle timeout")
 	add(c.DisableH2C || c.DisableHTTP2, "disable h2c")

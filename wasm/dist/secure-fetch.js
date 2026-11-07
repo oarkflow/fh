@@ -100,10 +100,15 @@ async function instantiate(url, imports, integrity) {
         throw new Error("FH secure fetch WASM must be served as application/wasm");
     }
     if (integrity) {
+        // Compile a clone while the original is hashed. Instantiation still waits
+        // for successful integrity verification, so unverified code never runs.
+        const compiled = WebAssembly.compileStreaming
+            ? WebAssembly.compileStreaming(response.clone()).catch(() => undefined)
+            : Promise.resolve(undefined);
         const bytes = await response.arrayBuffer();
         await verifySHA256Integrity(bytes, integrity);
-        const result = await WebAssembly.instantiate(bytes, imports);
-        return result.instance;
+        const module = (await compiled) ?? await WebAssembly.compile(bytes);
+        return WebAssembly.instantiate(module, imports);
     }
     if (WebAssembly.instantiateStreaming) {
         try {
@@ -188,36 +193,49 @@ function normalizeInit(init) {
     return { ...init, headers, body: JSON.stringify(init.body) };
 }
 export async function createSecureFetch(config = {}) {
+    const started = performance.now();
     const api = await runtime(config);
     await api.initialize(config);
+    const startupMs = performance.now() - started;
     const secureFetch = async (input, init) => {
-        const request = new Request(input, normalizeInit(init));
+        const normalized = normalizeInit(init);
+        const requestInit = normalized && typeof ReadableStream !== "undefined" && normalized.body instanceof ReadableStream
+            ? { ...normalized, duplex: "half" }
+            : normalized;
+        const request = new Request(input, requestInit);
         const method = request.method.toUpperCase();
         const url = new URL(request.url, config.baseURL ?? location.href);
         const headers = Array.from(request.headers.entries());
-        const body = method === "GET" || method === "HEAD" ? new Uint8Array() : new Uint8Array(await request.arrayBuffer());
+        const streaming = config.streaming === true;
+        if (streaming && (config.requireResponseSignature || config.responseSigningPublicKey)) {
+            throw new Error("FH secure streaming cannot satisfy the configured whole-body response signature policy");
+        }
+        const body = streaming
+            ? undefined
+            : method === "GET" || method === "HEAD" ? new Uint8Array() : new Uint8Array(await request.arrayBuffer());
         const credentials = init?.credentials ??
             (input instanceof Request ? input.credentials : config.credentials ?? request.credentials);
         const mode = init?.mode ?? (input instanceof Request ? input.mode : request.mode);
         if (mode !== "cors" && mode !== "same-origin") {
-            body.fill(0);
+            body?.fill(0);
             throw new Error("FH secure fetch only permits cors or same-origin request modes");
         }
         let result;
         try {
-            result = await api.request({
+            const descriptor = {
                 url: url.toString(),
                 target: exactTarget(url),
                 method,
                 headers,
-                body,
+                ...(streaming ? { bodyStream: method === "GET" || method === "HEAD" ? null : request.body } : { body }),
                 credentials,
                 mode,
                 signal: request.signal,
-            });
+            };
+            result = streaming ? await api.requestStream(descriptor) : await api.request(descriptor);
         }
         finally {
-            body.fill(0);
+            body?.fill(0);
         }
         const responseHeaders = new Headers(result.headers);
         responseHeaders.set("x-fh-request-id", result.requestId);
@@ -234,6 +252,7 @@ export async function createSecureFetch(config = {}) {
     const handle = {
         fetch: secureFetch,
         sessionInfo: () => api.sessionInfo(),
+        metrics: () => ({ startupMs, streamVersion: config.streaming === true ? 2 : 1 }),
         revokeSession: async () => {
             await api.revokeSession();
         },

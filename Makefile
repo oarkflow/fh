@@ -104,7 +104,13 @@ wasm-go:
 	@command -v $(TINYGO) >/dev/null 2>&1 || (echo "tinygo was not found on PATH. Install it (e.g. 'brew install tinygo') -- see wasm/README.md for the required Go/TinyGo version pairing." >&2; exit 1)
 	@command -v wasm-opt >/dev/null 2>&1 || (echo "wasm-opt was not found on PATH. TinyGo's wasm build shells out to it; install binaryen (e.g. 'brew install binaryen')." >&2; exit 1)
 	@mkdir -p $(WASM_DIST)
-	$(TINYGO) build -target wasm -no-debug -ldflags="$(WASM_TRUST_LDFLAGS)" -o $(WASM_BINARY) ./wasm/cmd/securefetch
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+		mkdir -p "$$tmp/wasm/cmd" "$$tmp/pkg"; \
+		sed 's/^go .*/go 1.26.5/' go.mod > "$$tmp/go.mod"; \
+		cp go.sum "$$tmp/go.sum"; \
+		cp -R wasm/cmd/securefetch "$$tmp/wasm/cmd/securefetch"; \
+		cp -R pkg/securetransport pkg/httpsignature "$$tmp/pkg/"; \
+		cd "$$tmp" && $(TINYGO) build -target wasm -no-debug -ldflags="$(WASM_TRUST_LDFLAGS)" -o "$(abspath $(WASM_BINARY))" ./wasm/cmd/securefetch
 	@echo "tinygo build: $$(wc -c < $(WASM_BINARY)) bytes"
 
 wasm-runtime:

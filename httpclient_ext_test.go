@@ -2,12 +2,38 @@ package fh
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestHTTPClientRetryBudgetKeepsReturnedBodyReadable(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("try later"))
+	}))
+	defer ts.Close()
+	req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := doWithRetry(context.Background(), ts.Client(), req, RetryPolicy{
+		MaxAttempts: 2, BaseDelay: time.Second, MaxElapsed: time.Millisecond,
+		RetryStatuses: map[int]bool{http.StatusServiceUnavailable: true},
+		RetryMethods:  map[string]bool{http.MethodGet: true},
+	}, ClientHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil || string(body) != "try later" {
+		t.Fatalf("returned response body = %q, %v", body, err)
+	}
+}
 
 func TestHTTPClientReplayablePostRetry(t *testing.T) {
 	var calls atomic.Int32

@@ -428,12 +428,9 @@ func ClientSecurityDialContext(sec ClientSecurity, base *net.Dialer) func(contex
 			if len(ips) == 0 {
 				return nil, ErrClientHostBlocked
 			}
-			dialSec := sec
-			dialSec.RequireHTTPS = false
 			var validIPs []net.IP
 			for _, ip := range ips {
-				fake := &url.URL{Scheme: "tcp", Host: net.JoinHostPort(ip.String(), port)}
-				if err := dialSec.Validate(fake); err != nil {
+				if err := sec.validateResolvedIP(ip); err != nil {
 					return nil, err
 				}
 				validIPs = append(validIPs, ip)

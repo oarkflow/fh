@@ -64,6 +64,41 @@ func TestProxyRewritePreservesTargetBasePath(t *testing.T) {
 	}
 }
 
+func TestProxyStreamsUploadAndAllResponseChunks(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil || string(body) != "uploaded in chunks" {
+			http.Error(w, "bad upload", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte("first "))
+		w.(http.Flusher).Flush()
+		_, _ = w.Write([]byte("second"))
+	}))
+	defer upstream.Close()
+	app := fh.New(fh.WithStartupBannerDisabled(true), fh.WithStreamRequestBody(true))
+	app.Post("/proxy", New(Config{Target: upstream.URL, DisableSSRFGuard: true}))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = app.Serve(listener) }()
+	defer app.ShutdownWithTimeout(time.Second)
+	req, err := http.NewRequest("POST", "http://"+listener.Addr().String()+"/proxy", io.NopCloser(strings.NewReader("uploaded in chunks")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, err := io.ReadAll(resp.Body)
+	if err != nil || string(got) != "first second" {
+		t.Fatalf("proxy response = %q, err = %v", got, err)
+	}
+}
+
 func TestSSRFGuardBlocksMetadataEndpointByDefault(t *testing.T) {
 	denyNets, err := parseCIDRs(Config{})
 	if err != nil {

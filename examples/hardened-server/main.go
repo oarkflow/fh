@@ -40,6 +40,7 @@ func buildApp(opt serverOptions) (*fh.App, error) {
 		fh.WithSecureByDefault(true),
 		fh.WithAllowedHosts(opt.host),
 		fh.WithMaxBufferedRequestBytes(64<<20),
+		fh.WithMaxBufferedResponseBytes(64<<20),
 		fh.WithDeploymentSecurityGate(fh.DeploymentSecurityConfig{
 			Mode:              opt.mode,
 			ExpectedReplicas:  1,

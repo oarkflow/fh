@@ -34,6 +34,8 @@ export interface SecureFetchConfig {
     clockSkew?: number;
     maxBody?: number;
     maxHeaders?: number;
+    /** Opt in to authenticated chunk streams. Requires a version 2 server. */
+    streaming?: boolean;
     installGlobal?: boolean;
 }
 export interface SecureSessionInfo {
@@ -51,13 +53,14 @@ export interface SecureFetchInit extends Omit<RequestInit, "body"> {
 interface WasmResponse {
     status: number;
     headers: Array<[string, string]>;
-    body: Uint8Array;
+    body: Uint8Array | ReadableStream<Uint8Array>;
     url: string;
     requestId: string;
 }
 interface FHSecureWasmAPI {
     initialize(config: SecureFetchConfig): Promise<SecureSessionInfo>;
     request(request: Record<string, unknown>): Promise<WasmResponse>;
+    requestStream(request: Record<string, unknown>): Promise<WasmResponse>;
     revokeSession(): Promise<WasmResponse>;
     sessionInfo(): SecureSessionInfo;
 }
@@ -83,6 +86,10 @@ declare global {
 export interface SecureFetchHandle {
     fetch(input: RequestInfo | URL, init?: SecureFetchInit): Promise<Response>;
     sessionInfo(): SecureSessionInfo;
+    metrics(): {
+        startupMs: number;
+        streamVersion: 1 | 2;
+    };
     revokeSession(): Promise<void>;
     resetDevice(): Promise<void>;
 }

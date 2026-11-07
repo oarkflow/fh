@@ -161,12 +161,15 @@ type Config struct {
 	// MaxBufferedRequestBytes is an opt-in process-wide ceiling for request
 	// bodies held in memory. Zero disables the ceiling.
 	MaxBufferedRequestBytes int64
-	MaxHeaderListSize       int
-	MaxHeaderCount          int
-	MaxRequestLineSize      int
-	MaxConcurrentStreams    uint32
-	DisableKeepAlive        bool
-	DisableHTTP2            bool
+	// MaxBufferedResponseBytes is an opt-in process-wide ceiling for response
+	// bodies held by transforms and buffered response streams.
+	MaxBufferedResponseBytes int64
+	MaxHeaderListSize        int
+	MaxHeaderCount           int
+	MaxRequestLineSize       int
+	MaxConcurrentStreams     uint32
+	DisableKeepAlive         bool
+	DisableHTTP2             bool
 	// DisableH2C rejects cleartext HTTP/2 prior knowledge and HTTP/1.1 h2c
 	// upgrades while retaining HTTP/2 over TLS/ALPN.
 	DisableH2C bool
@@ -299,6 +302,9 @@ func WithMaxRequestBodySize(n int) Option {
 func WithMaxBufferedRequestBytes(n int64) Option {
 	return func(c *Config) { c.MaxBufferedRequestBytes = n }
 }
+func WithMaxBufferedResponseBytes(n int64) Option {
+	return func(c *Config) { c.MaxBufferedResponseBytes = n }
+}
 func WithMaxHeaderListSize(n int) Option {
 	return func(c *Config) { c.MaxHeaderListSize = n }
 }
@@ -339,6 +345,24 @@ func WithSendKeepAliveHeader(enabled bool) Option {
 // explicitly for those.
 func WithSecureByDefault(enabled bool) Option {
 	return func(c *Config) { c.SecureByDefault = enabled }
+}
+
+// WithHardenedProduction applies a bounded production transport profile and
+// enables the deployment gate. Hosts and deployment topology are supplied by
+// the caller because neither can be inferred safely by the framework.
+func WithHardenedProduction(hosts []string, gate DeploymentSecurityConfig) Option {
+	return func(c *Config) {
+		c.Mode = ModeProduction
+		c.SecureByDefault = true
+		c.DisableH2C = true
+		c.StreamRequestBody = true
+		c.MaxBufferedRequestBytes = 64 << 20
+		c.MaxBufferedResponseBytes = 64 << 20
+		c.AllowedHosts = append([]string(nil), hosts...)
+		copyGate := gate
+		copyGate.TrustedProxyCIDRs = append([]string(nil), gate.TrustedProxyCIDRs...)
+		c.DeploymentSecurityGate = &copyGate
+	}
 }
 func WithDeploymentSecurityGate(gate DeploymentSecurityConfig) Option {
 	return func(c *Config) {
@@ -535,12 +559,14 @@ type App struct {
 	// preforkSupervisor is non-nil only in a ListenPrefork master process,
 	// for the duration of that call, so Reload can reach the running
 	// supervisor without threading it through every call site.
-	preforkSupervisor    atomic.Pointer[preforkSupervisor]
-	metrics              metricsTracker
-	bufferedRequestBytes atomic.Int64
-	trustedEdgeNets      []*net.IPNet // populated by the opt-in deployment gate before serving
-	contextMu            sync.RWMutex
-	baseContext          context.Context
+	preforkSupervisor     atomic.Pointer[preforkSupervisor]
+	metrics               metricsTracker
+	bufferedRequestBytes  atomic.Int64
+	bufferedResponseBytes atomic.Int64
+	bodyBudgetRejections  atomic.Uint64
+	trustedEdgeNets       []*net.IPNet // populated by the opt-in deployment gate before serving
+	contextMu             sync.RWMutex
+	baseContext           context.Context
 }
 
 type connState struct {

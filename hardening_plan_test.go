@@ -152,7 +152,7 @@ func TestDeploymentSecurityGateRejectsLocalReliabilityStores(t *testing.T) {
 }
 
 func TestDeploymentSecurityGateDirectAndTrustedEdge(t *testing.T) {
-	base := []Option{WithSecureByDefault(true), WithAllowedHosts("example.test"), WithMaxBufferedRequestBytes(1 << 20)}
+	base := []Option{WithSecureByDefault(true), WithAllowedHosts("example.test"), WithMaxBufferedRequestBytes(1 << 20), WithMaxBufferedResponseBytes(1 << 20)}
 	direct := New(append(base, WithDeploymentSecurityGate(DeploymentSecurityConfig{Mode: DeploymentDirectOrigin, ExpectedReplicas: 1}))...)
 	if err := direct.validateDeployment(nil, true); err != nil {
 		t.Fatalf("direct TLS gate: %v", err)
@@ -190,7 +190,7 @@ func (c *remoteAddrConn) RemoteAddr() net.Addr { return c.addr }
 
 func TestDeploymentSecurityGateServesDirectTLS(t *testing.T) {
 	cert := testTLSCertificate(t)
-	app := New(WithStartupBannerDisabled(true), WithSecureByDefault(true), WithAllowedHosts("localhost"), WithMaxBufferedRequestBytes(1<<20), WithDeploymentSecurityGate(DeploymentSecurityConfig{Mode: DeploymentDirectOrigin, ExpectedReplicas: 1}))
+	app := New(WithStartupBannerDisabled(true), WithSecureByDefault(true), WithAllowedHosts("localhost"), WithMaxBufferedRequestBytes(1<<20), WithMaxBufferedResponseBytes(1<<20), WithDeploymentSecurityGate(DeploymentSecurityConfig{Mode: DeploymentDirectOrigin, ExpectedReplicas: 1}))
 	app.Get("/", func(c Ctx) error { return c.SendString("secure") })
 	client, server := net.Pipe()
 	ln := newPipeListener(server)

@@ -101,36 +101,38 @@ type ComplianceReport struct {
 
 // SafeConfig is a redacted summary of runtime configuration.
 type SafeConfig struct {
-	SecureByDefault       bool              `json:"secure_by_default"`
-	ReadTimeout           string            `json:"read_timeout,omitempty"`
-	ReadHeaderTimeout     string            `json:"read_header_timeout,omitempty"`
-	RequestBodyTimeout    string            `json:"request_body_timeout,omitempty"`
-	WriteTimeout          string            `json:"write_timeout,omitempty"`
-	HandlerTimeout        string            `json:"handler_timeout,omitempty"`
-	IdleTimeout           string            `json:"idle_timeout,omitempty"`
-	TLSHandshakeTimeout   string            `json:"tls_handshake_timeout,omitempty"`
-	HTTP2IdleTimeout      string            `json:"http2_idle_timeout,omitempty"`
-	MaxConnections        int               `json:"max_connections"`
-	MaxConnectionsPerIP   int               `json:"max_connections_per_ip"`
-	MaxInFlightRequests   int64             `json:"max_in_flight_requests"`
-	MaxGoroutines         int               `json:"max_goroutines"`
-	MaxHeapBytes          uint64            `json:"max_heap_bytes"`
-	H2CEnabled            bool              `json:"h2c_enabled"`
-	MaxRequestBodySize    int               `json:"max_request_body_size"`
-	MaxHeaderListSize     int               `json:"max_header_list_size"`
-	MaxHeaderCount        int               `json:"max_header_count"`
-	MaxRequestLineSize    int               `json:"max_request_line_size"`
-	ReliabilityEnabled    bool              `json:"reliability_enabled"`
-	JournalEnabled        bool              `json:"journal_enabled"`
-	IdempotencyEnabled    bool              `json:"idempotency_enabled"`
-	QueueEnabled          bool              `json:"queue_enabled"`
-	AuditEnabled          bool              `json:"audit_enabled"`
-	RedactionEnabled      bool              `json:"redaction_enabled"`
-	ComplianceEnabled     bool              `json:"compliance_enabled"`
-	ComplianceProfile     ComplianceProfile `json:"compliance_profile,omitempty"`
-	SecurityEventEndpoint bool              `json:"security_event_endpoint"`
-	KernelEnabled         bool              `json:"kernel_enabled"`
-	KernelBackend         KernelBackend     `json:"kernel_backend,omitempty"`
+	SecureByDefault          bool              `json:"secure_by_default"`
+	ReadTimeout              string            `json:"read_timeout,omitempty"`
+	ReadHeaderTimeout        string            `json:"read_header_timeout,omitempty"`
+	RequestBodyTimeout       string            `json:"request_body_timeout,omitempty"`
+	WriteTimeout             string            `json:"write_timeout,omitempty"`
+	HandlerTimeout           string            `json:"handler_timeout,omitempty"`
+	IdleTimeout              string            `json:"idle_timeout,omitempty"`
+	TLSHandshakeTimeout      string            `json:"tls_handshake_timeout,omitempty"`
+	HTTP2IdleTimeout         string            `json:"http2_idle_timeout,omitempty"`
+	MaxConnections           int               `json:"max_connections"`
+	MaxConnectionsPerIP      int               `json:"max_connections_per_ip"`
+	MaxInFlightRequests      int64             `json:"max_in_flight_requests"`
+	MaxGoroutines            int               `json:"max_goroutines"`
+	MaxHeapBytes             uint64            `json:"max_heap_bytes"`
+	H2CEnabled               bool              `json:"h2c_enabled"`
+	MaxRequestBodySize       int               `json:"max_request_body_size"`
+	MaxBufferedRequestBytes  int64             `json:"max_buffered_request_bytes"`
+	MaxBufferedResponseBytes int64             `json:"max_buffered_response_bytes"`
+	MaxHeaderListSize        int               `json:"max_header_list_size"`
+	MaxHeaderCount           int               `json:"max_header_count"`
+	MaxRequestLineSize       int               `json:"max_request_line_size"`
+	ReliabilityEnabled       bool              `json:"reliability_enabled"`
+	JournalEnabled           bool              `json:"journal_enabled"`
+	IdempotencyEnabled       bool              `json:"idempotency_enabled"`
+	QueueEnabled             bool              `json:"queue_enabled"`
+	AuditEnabled             bool              `json:"audit_enabled"`
+	RedactionEnabled         bool              `json:"redaction_enabled"`
+	ComplianceEnabled        bool              `json:"compliance_enabled"`
+	ComplianceProfile        ComplianceProfile `json:"compliance_profile,omitempty"`
+	SecurityEventEndpoint    bool              `json:"security_event_endpoint"`
+	KernelEnabled            bool              `json:"kernel_enabled"`
+	KernelBackend            KernelBackend     `json:"kernel_backend,omitempty"`
 }
 
 func applyComplianceDefaults(cfg *Config) {
@@ -332,36 +334,38 @@ func (a *App) SafeConfig() SafeConfig {
 		return SafeConfig{}
 	}
 	return SafeConfig{
-		SecureByDefault:       a.cfg.SecureByDefault,
-		ReadTimeout:           a.cfg.ReadTimeout.String(),
-		ReadHeaderTimeout:     a.cfg.ReadHeaderTimeout.String(),
-		RequestBodyTimeout:    a.cfg.RequestBodyTimeout.String(),
-		WriteTimeout:          a.cfg.WriteTimeout.String(),
-		HandlerTimeout:        a.cfg.HandlerTimeout.String(),
-		IdleTimeout:           a.cfg.IdleTimeout.String(),
-		TLSHandshakeTimeout:   a.cfg.TLSHandshakeTimeout.String(),
-		HTTP2IdleTimeout:      a.cfg.HTTP2IdleTimeout.String(),
-		MaxConnections:        a.cfg.MaxConnections,
-		MaxConnectionsPerIP:   a.cfg.MaxConnectionsPerIP,
-		MaxInFlightRequests:   a.cfg.MaxInFlightRequests,
-		MaxGoroutines:         a.cfg.MaxGoroutines,
-		MaxHeapBytes:          a.cfg.MaxHeapBytes,
-		H2CEnabled:            !a.cfg.DisableHTTP2 && !a.cfg.DisableH2C,
-		MaxRequestBodySize:    a.cfg.MaxRequestBodySize,
-		MaxHeaderListSize:     a.cfg.MaxHeaderListSize,
-		MaxHeaderCount:        a.cfg.MaxHeaderCount,
-		MaxRequestLineSize:    a.cfg.MaxRequestLineSize,
-		ReliabilityEnabled:    a.cfg.Reliability.Enabled,
-		JournalEnabled:        a.cfg.Reliability.JournalEnabled,
-		IdempotencyEnabled:    a.cfg.Reliability.IdempotencyEnabled,
-		QueueEnabled:          a.cfg.Reliability.QueueEnabled,
-		AuditEnabled:          a.cfg.Audit.Enabled,
-		RedactionEnabled:      a.cfg.Redaction.Enabled,
-		ComplianceEnabled:     a.cfg.Compliance.Enabled,
-		ComplianceProfile:     a.cfg.Compliance.Profile,
-		SecurityEventEndpoint: a.cfg.Compliance.ExposeEndpoints,
-		KernelEnabled:         a.cfg.Kernel.Enabled,
-		KernelBackend:         a.cfg.Kernel.Backend,
+		SecureByDefault:          a.cfg.SecureByDefault,
+		ReadTimeout:              a.cfg.ReadTimeout.String(),
+		ReadHeaderTimeout:        a.cfg.ReadHeaderTimeout.String(),
+		RequestBodyTimeout:       a.cfg.RequestBodyTimeout.String(),
+		WriteTimeout:             a.cfg.WriteTimeout.String(),
+		HandlerTimeout:           a.cfg.HandlerTimeout.String(),
+		IdleTimeout:              a.cfg.IdleTimeout.String(),
+		TLSHandshakeTimeout:      a.cfg.TLSHandshakeTimeout.String(),
+		HTTP2IdleTimeout:         a.cfg.HTTP2IdleTimeout.String(),
+		MaxConnections:           a.cfg.MaxConnections,
+		MaxConnectionsPerIP:      a.cfg.MaxConnectionsPerIP,
+		MaxInFlightRequests:      a.cfg.MaxInFlightRequests,
+		MaxGoroutines:            a.cfg.MaxGoroutines,
+		MaxHeapBytes:             a.cfg.MaxHeapBytes,
+		H2CEnabled:               !a.cfg.DisableHTTP2 && !a.cfg.DisableH2C,
+		MaxRequestBodySize:       a.cfg.MaxRequestBodySize,
+		MaxBufferedRequestBytes:  a.cfg.MaxBufferedRequestBytes,
+		MaxBufferedResponseBytes: a.cfg.MaxBufferedResponseBytes,
+		MaxHeaderListSize:        a.cfg.MaxHeaderListSize,
+		MaxHeaderCount:           a.cfg.MaxHeaderCount,
+		MaxRequestLineSize:       a.cfg.MaxRequestLineSize,
+		ReliabilityEnabled:       a.cfg.Reliability.Enabled,
+		JournalEnabled:           a.cfg.Reliability.JournalEnabled,
+		IdempotencyEnabled:       a.cfg.Reliability.IdempotencyEnabled,
+		QueueEnabled:             a.cfg.Reliability.QueueEnabled,
+		AuditEnabled:             a.cfg.Audit.Enabled,
+		RedactionEnabled:         a.cfg.Redaction.Enabled,
+		ComplianceEnabled:        a.cfg.Compliance.Enabled,
+		ComplianceProfile:        a.cfg.Compliance.Profile,
+		SecurityEventEndpoint:    a.cfg.Compliance.ExposeEndpoints,
+		KernelEnabled:            a.cfg.Kernel.Enabled,
+		KernelBackend:            a.cfg.Kernel.Backend,
 	}
 }
 

@@ -8,6 +8,7 @@ export declare function createDeviceKey(): Promise<{
 }>;
 export declare function saveDevice(device: StoredDevice): Promise<void>;
 export declare function loadDevice(): Promise<StoredDevice | null>;
-export declare function signClientHello(data: Uint8Array): Promise<Uint8Array>;
+export declare function setBridgeAuthToken(token: string): void;
+export declare function signClientHello(data: Uint8Array, token?: string): Promise<Uint8Array>;
 export declare function clearDevice(): Promise<void>;
-export declare function installSecureStorageBridge(): void;
+export declare function installSecureStorageBridge(token?: string): void;

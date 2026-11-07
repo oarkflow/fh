@@ -94,6 +94,8 @@ async function defaultTransformRequest(data, headers) {
 }
 async function defaultTransformResponse(data, _headers, config, _status) {
     const response = data;
+    if (config.responseType === "stream")
+        return response.body;
     if (config.responseType === "text")
         return response.text();
     if (config.responseType === "blob")
@@ -175,6 +177,47 @@ function normalizeRetryConfig(retries) {
         retryCondition: normalized.retryCondition ?? defaultRetryCondition,
     };
 }
+function withDownloadProgress(response, callback) {
+    if (!response.body)
+        return response;
+    const source = response.body.getReader();
+    const rawTotal = Number(response.headers.get("content-length"));
+    const total = Number.isFinite(rawTotal) && rawTotal >= 0 && response.headers.has("content-length") ? rawTotal : undefined;
+    let loaded = 0;
+    callback({ loaded, total, lengthComputable: total !== undefined, upload: false, synthetic: false });
+    const stream = new ReadableStream({
+        async pull(controller) {
+            const { value, done } = await source.read();
+            if (done) {
+                controller.close();
+                return;
+            }
+            loaded += value.byteLength;
+            callback({ loaded, total, lengthComputable: total !== undefined, upload: false, synthetic: false });
+            controller.enqueue(value);
+        },
+        cancel(reason) { return source.cancel(reason); },
+    });
+    return new Response(stream, { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+function withUploadProgress(body, callback) {
+    const source = body.getReader();
+    let loaded = 0;
+    callback({ loaded, lengthComputable: false, upload: true, synthetic: false });
+    return new ReadableStream({
+        async pull(controller) {
+            const { value, done } = await source.read();
+            if (done) {
+                controller.close();
+                return;
+            }
+            loaded += value.byteLength;
+            callback({ loaded, lengthComputable: false, upload: true, synthetic: false });
+            controller.enqueue(value);
+        },
+        cancel(reason) { return source.cancel(reason); },
+    });
+}
 export function createClient(fetchImpl, config = {}) {
     const defaults = { method: "GET", validateStatus: defaultValidateStatus, ...config };
     const requestInterceptors = createInterceptorManager();
@@ -207,6 +250,9 @@ export function createClient(fetchImpl, config = {}) {
             cfg,
         ]));
         const { retries, retryDelay, retryCondition } = normalizeRetryConfig(cfg.retries);
+        const isStream = typeof ReadableStream !== "undefined" && body instanceof ReadableStream;
+        // ReadableStream bodies cannot be re-read after consumption; disable retries for streams.
+        const effectiveRetries = isStream ? 0 : retries;
         const totalBytes = typeof body === "string"
             ? new TextEncoder().encode(body).byteLength
             : body instanceof Blob
@@ -216,7 +262,8 @@ export function createClient(fetchImpl, config = {}) {
                     : ArrayBuffer.isView(body)
                         ? body.byteLength
                         : undefined;
-        cfg.onUploadProgress?.({ loaded: 0, total: totalBytes, lengthComputable: totalBytes !== undefined, upload: true, synthetic: true });
+        if (!isStream)
+            cfg.onUploadProgress?.({ loaded: 0, total: totalBytes, lengthComputable: totalBytes !== undefined, upload: true, synthetic: true });
         let attempt = 0;
         for (;;) {
             attempt += 1;
@@ -225,20 +272,18 @@ export function createClient(fetchImpl, config = {}) {
                 ? setTimeout(() => timeoutController.abort(TIMEOUT_REASON), cfg.timeout)
                 : undefined;
             const { signal, cleanup } = combineSignals(cfg.signal, timeoutController?.signal);
-            const request = new Request(url, { method, headers, body, credentials, signal });
+            const uploadBody = isStream && cfg.onUploadProgress
+                ? withUploadProgress(body, cfg.onUploadProgress)
+                : body;
+            const init = { method, headers, body: uploadBody, credentials, signal, ...(isStream ? { duplex: "half" } : {}) };
+            const request = new Request(url, isStream ? { method, headers, credentials, signal } : init);
             try {
-                const response = await fetchImpl(url, { method, headers, body, credentials, signal });
-                cfg.onUploadProgress?.({ loaded: totalBytes ?? 0, total: totalBytes, lengthComputable: totalBytes !== undefined, upload: true, synthetic: true });
-                cfg.onDownloadProgress?.({ loaded: 0, total: undefined, lengthComputable: false, upload: false, synthetic: true });
+                const fetched = await fetchImpl(url, init);
+                if (!isStream)
+                    cfg.onUploadProgress?.({ loaded: totalBytes ?? 0, total: totalBytes, lengthComputable: totalBytes !== undefined, upload: true, synthetic: true });
+                const response = cfg.onDownloadProgress ? withDownloadProgress(fetched, cfg.onDownloadProgress) : fetched;
                 const attemptResult = await buildAttemptResult(response, request, cfg);
-                cfg.onDownloadProgress?.({
-                    loaded: Number(response.headers.get("content-length") ?? 0),
-                    total: response.headers.get("content-length") ? Number(response.headers.get("content-length")) : undefined,
-                    lengthComputable: response.headers.has("content-length"),
-                    upload: false,
-                    synthetic: true,
-                });
-                if (attemptResult.error && attempt <= retries && retryCondition(attemptResult.error, attempt)) {
+                if (attemptResult.error && attempt <= effectiveRetries && retryCondition(attemptResult.error, attempt)) {
                     await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt, attemptResult.error)));
                     continue;
                 }
@@ -252,7 +297,7 @@ export function createClient(fetchImpl, config = {}) {
                         ? "ECONNABORTED"
                         : "ERR_CANCELED";
                 const fhError = new FHError(aborted ? (code === "ECONNABORTED" ? "Request timed out" : "Request canceled") : "Network error", code, cfg, request);
-                if (code !== "ERR_CANCELED" && attempt <= retries && retryCondition(fhError, attempt)) {
+                if (code !== "ERR_CANCELED" && attempt <= effectiveRetries && retryCondition(fhError, attempt)) {
                     await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt, fhError)));
                     continue;
                 }

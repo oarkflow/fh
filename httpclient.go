@@ -1061,13 +1061,13 @@ func doWithRetry(ctx context.Context, hc *http.Client, req *http.Request, p Retr
 		if !shouldRetry(req, res, lastErr, p) || attempt == p.MaxAttempts || (req.Body != nil && req.Body != http.NoBody && req.GetBody == nil) {
 			return res, lastErr
 		}
-		if res != nil && res.Body != nil {
-			_, _ = io.CopyN(io.Discard, res.Body, 64<<10)
-			_ = res.Body.Close()
-		}
 		delay := retryDelay(res, attempt, p)
 		if p.MaxElapsed > 0 && time.Since(started)+delay > p.MaxElapsed {
 			return res, lastErr
+		}
+		if res != nil && res.Body != nil {
+			_, _ = io.CopyN(io.Discard, res.Body, 64<<10)
+			_ = res.Body.Close()
 		}
 		callClientHook(hooks.OnRetry, ClientEvent{At: time.Now(), Method: req.Method, URL: safeURL(req.URL), Attempt: attempt, Err: lastErr, StatusCode: statusOf(res), Duration: delay})
 		t := time.NewTimer(delay)
@@ -1172,12 +1172,19 @@ func (s ClientSecurity) Validate(u *url.URL) error {
 		return err
 	}
 	for _, ip := range ips {
-		if s.Strict && !s.AllowLocalhost && ip.IsLoopback() {
-			return ErrClientHostBlocked
+		if err := s.validateResolvedIP(ip); err != nil {
+			return err
 		}
-		if s.Strict && !s.AllowPrivateIPs && isPrivateIP(ip) {
-			return ErrClientHostBlocked
-		}
+	}
+	return nil
+}
+
+func (s ClientSecurity) validateResolvedIP(ip net.IP) error {
+	if s.Strict && !s.AllowLocalhost && ip.IsLoopback() {
+		return ErrClientHostBlocked
+	}
+	if s.Strict && !s.AllowPrivateIPs && isPrivateIP(ip) {
+		return ErrClientHostBlocked
 	}
 	return nil
 }

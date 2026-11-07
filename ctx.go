@@ -291,24 +291,26 @@ type DefaultCtx struct {
 
 	params []Param
 
-	status           int
-	customHeaders    [16]Header
-	extraHeaders     []Header
-	chCount          int
-	body             []byte
-	responseBody     []byte
-	contentType      []byte
-	responded        bool
-	forceClose       bool
-	upgraded         bool
-	upgradeBuffered  []byte
-	trailers         []Header
-	responseTrailers []Header
-	requestContext   context.Context
-	originalURI      []byte
-	bodyTransform    func([]byte) ([]byte, error)
-	h2               *h2Response
-	cachedIP         string
+	status                   int
+	customHeaders            [16]Header
+	extraHeaders             []Header
+	chCount                  int
+	body                     []byte
+	responseBody             []byte
+	contentType              []byte
+	responded                bool
+	forceClose               bool
+	upgraded                 bool
+	upgradeBuffered          []byte
+	trailers                 []Header
+	responseTrailers         []Header
+	requestContext           context.Context
+	originalURI              []byte
+	bodyTransform            func([]byte) ([]byte, error)
+	streamTransform          func(io.Writer) (io.WriteCloser, error)
+	bufferedResponseReserved int64
+	h2                       *h2Response
+	cachedIP                 string
 
 	handlers     []HandlerFunc
 	handlerIndex int
@@ -343,6 +345,7 @@ type DefaultCtx struct {
 	requestBodyStream    *requestBodyStream
 	requestBodyStreamErr error
 	requestBodyReader    io.Reader
+	requestBodyOverride  io.Reader
 	requestBodyLimit     *boundedRequestReader
 	flags                uint32
 }
@@ -403,6 +406,7 @@ func acquireHTTP1Ctx(conn net.Conn, app *App, state *connState) *DefaultCtx {
 }
 
 func releaseCtx(c *DefaultCtx) {
+	c.releaseResponseBody()
 	if c.writeBuf != nil {
 		if c.writeBufPooled {
 			putBytes(c.writeBuf)
@@ -416,6 +420,7 @@ func releaseCtx(c *DefaultCtx) {
 }
 
 func (c *DefaultCtx) reset() {
+	c.releaseResponseBody()
 	retainConnectionRefs := c.connectionOwned && c.server != nil && c.server.fastHTTP1
 	if retainConnectionRefs {
 		c.Header.resetRetained()
@@ -441,6 +446,7 @@ func (c *DefaultCtx) reset() {
 	c.requestContext = context.Background()
 	c.originalURI = c.originalURI[:0]
 	c.bodyTransform = nil
+	c.streamTransform = nil
 	c.h2 = nil
 	if c.lcount > 0 && !retainConnectionRefs {
 		clear(c.locals[:c.lcount])
@@ -472,6 +478,7 @@ func (c *DefaultCtx) reset() {
 	c.requestBodyStream = nil
 	c.requestBodyStreamErr = nil
 	c.requestBodyReader = nil
+	c.requestBodyOverride = nil
 	c.requestBodyLimit = nil
 }
 
@@ -783,6 +790,15 @@ func (c *DefaultCtx) StreamBody(fn func(io.Reader) error) error {
 	if err := c.ensureRequestBodyReader(); err != nil {
 		return err
 	}
+	if c.body != nil {
+		return fn(bytes.NewReader(c.body))
+	}
+	if c.requestBodyOverride != nil {
+		if c.requestBodyLimit != nil {
+			return fn(c.requestBodyLimit)
+		}
+		return fn(c.requestBodyOverride)
+	}
 	if c.requestBodyStream != nil {
 		reader := io.Reader(c.requestBodyStream)
 		if c.requestBodyLimit != nil {
@@ -814,6 +830,23 @@ func (c *DefaultCtx) ensureRequestBodyReader() error {
 }
 
 func (c *DefaultCtx) ensureRequestBody() error {
+	if c.body != nil {
+		return c.requestBodyStreamErr
+	}
+	if c.requestBodyOverride != nil {
+		reader := c.requestBodyOverride
+		if c.requestBodyLimit != nil {
+			reader = c.requestBodyLimit
+		}
+		body, err := io.ReadAll(reader)
+		c.body = body
+		c.requestBodyStreamErr = err
+		c.requestBodyOverride = bytes.NewReader(body)
+		if err == nil {
+			c.requestBodyLimit = nil
+		}
+		return err
+	}
 	if c.requestBodyStream == nil {
 		if c.requestBodyReader == nil {
 			return c.requestBodyStreamErr
@@ -2042,9 +2075,16 @@ func (c *DefaultCtx) writeResponse(body []byte) error {
 		}
 	}
 	if c.bodyTransform != nil {
+		if err := c.reserveResponseBody(int64(len(body))); err != nil {
+			return err
+		}
+		defer c.releaseResponseBody()
 		var err error
 		body, err = c.bodyTransform(body)
 		if err != nil {
+			return err
+		}
+		if err := c.reserveResponseBody(int64(len(body))); err != nil {
 			return err
 		}
 	}

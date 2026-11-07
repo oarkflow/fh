@@ -1,5 +1,5 @@
 {
-  "protocol": "fh-secure-transport-v1",
+  "protocol": "fh-secure-transport-v1+v2",
   "assets": {
     "body.js": {
       "sha256": "38550789d72233070bd51dd12c6c7e6c1df4af5fd18bfe92772eb842d1c769c3",
@@ -7,9 +7,9 @@
       "size": 782
     },
     "client.js": {
-      "sha256": "1252b2549009cb0347b81aa1fefe9ffdb18a6477a824cff38cdff982f5fab39e",
-      "integrity": "sha256-ElKyVJAJywNHuBqh/v6f/bGKZHeoJM/zjN/5gvX6s54=",
-      "size": 14137
+      "sha256": "6ff1d36920422e179bdb563c61324ad58465f4e693bdb3aac9523c4403ab3a32",
+      "integrity": "sha256-b/HTaSBCLheb21Y8YTJK1YRl9OaTvbOqyVI8RAOrOjI=",
+      "size": 16104
     },
     "errors.js": {
       "sha256": "1ab25a302529ad2684b72a3d2e61757cb3188d9eeffa32e1887574826da87186",
@@ -22,19 +22,19 @@
       "size": 137
     },
     "secure-fetch.js": {
-      "sha256": "cc3b7a065394fd1e996b67ba4ccc7d11158e8d6618eb383850971b30dc6e6dc1",
-      "integrity": "sha256-zDt6BlOU/R6Za2e6TMx9ERWOjWYY6zg4UJcbMNxubcE=",
-      "size": 10329
+      "sha256": "68aa4b3aebbf24c6c677121197e2b471cad0856878a2241d842ef4f5c55d7ea6",
+      "integrity": "sha256-aKpLOuu/JMbGdxIRl+K0ccrQhWh4oiQdhC709cVdfqY=",
+      "size": 11645
     },
     "securefetch.wasm": {
-      "sha256": "d18bad795707bb6e1a59372fb86a5e299f70924a0a90ecd09af0f5b5b2eea12f",
-      "integrity": "sha256-0YuteVcHu24aWTcvuGpeKZ9wkkoKkOzQmvD1tbLuoS8=",
-      "size": 614035
+      "sha256": "af78d6000c1575926b915abdfc8a2f136559701a25bfaa4dbe5622c12c4c8cf9",
+      "integrity": "sha256-r3jWAAwVdZJrkVq9/IovE2VZcBolv6pNvlYiwSxMjPk=",
+      "size": 692354
     },
     "storage.js": {
-      "sha256": "a7adf86c7f40b3e57ca2ef0eb4e807aa1e3ccfdfa3317d403c4b25608d3ee94b",
-      "integrity": "sha256-p634bH9As+V8ou8OtOgHqh48z9+jMX1APEslYI0+6Us=",
-      "size": 7779
+      "sha256": "716d3e3ee9bb7b68d90c69c031590091c3d0a8be0e3e960521ee91cc1ef80065",
+      "integrity": "sha256-cW0+Pum7e2jZDGnAMVkAkcPQqL4OPpYFIe6RzB74AGU=",
+      "size": 8139
     },
     "wasm_exec.js": {
       "sha256": "d70bcd551ea8169e84bf6953d45e6aa0765f9c682c2cb71fec8e700489143299",

@@ -32,6 +32,44 @@ test("get/post build request and parse JSON response", async () => {
   assert.equal(new Headers(postInit.headers).get("content-type"), "application/json");
 });
 
+test("stream bodies report real upload and download byte progress", async () => {
+  const uploaded: number[] = [];
+  const downloaded: number[] = [];
+  const fetchImpl: FetchLike = async (_input, init) => {
+    const upload = await new Response(init?.body).text();
+    assert.equal(upload, "abcdef");
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("reply"));
+        controller.enqueue(new TextEncoder().encode(" body"));
+        controller.close();
+      },
+    }));
+  };
+  const client = createClient(fetchImpl);
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("abc"));
+      controller.enqueue(new TextEncoder().encode("def"));
+      controller.close();
+    },
+  });
+  const response = await client.post<ReadableStream<Uint8Array>, ReadableStream<Uint8Array>>("https://api.example.test/upload", body, {
+    responseType: "stream",
+    onUploadProgress(event) {
+      assert.equal(event.synthetic, false);
+      uploaded.push(event.loaded);
+    },
+    onDownloadProgress(event) {
+      assert.equal(event.synthetic, false);
+      downloaded.push(event.loaded);
+    },
+  });
+  assert.equal(await new Response(response.data).text(), "reply body");
+  assert.deepEqual(uploaded, [0, 3, 6]);
+  assert.deepEqual(downloaded, [0, 5, 10]);
+});
+
 test("request interceptors mutate config, response interceptors transform response", async () => {
   const fetchImpl: FetchLike = async () => jsonResponse({ value: 1 });
   const client = createClient(fetchImpl, { baseURL: "https://api.example.com" });

@@ -83,6 +83,7 @@ func main() {
 	api := js.Global().Get("Object").New()
 	register(api, "initialize", client.initializeJS)
 	register(api, "request", client.requestJS)
+	register(api, "requestStream", client.requestStreamJS)
 	register(api, "revokeSession", client.revokeSessionJS)
 	register(api, "sessionInfo", client.sessionInfoJS)
 	js.Global().Set("FHSecureWasm", api)

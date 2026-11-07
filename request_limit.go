@@ -57,7 +57,7 @@ func (c *DefaultCtx) limitRequestBody(limit int64) error {
 	if c.Header.HasContentLength && int64(c.Header.ContentLength) > limit {
 		return PayloadTooLarge("request body exceeds configured limit")
 	}
-	if c.requestBodyStream == nil && c.requestBodyReader == nil {
+	if c.requestBodyOverride == nil && c.requestBodyStream == nil && c.requestBodyReader == nil {
 		if int64(len(c.body)) > limit {
 			return PayloadTooLarge("request body exceeds configured limit")
 		}
@@ -66,6 +66,8 @@ func (c *DefaultCtx) limitRequestBody(limit int64) error {
 	var reader io.Reader
 	if c.requestBodyLimit != nil {
 		reader = c.requestBodyLimit
+	} else if c.requestBodyOverride != nil {
+		reader = c.requestBodyOverride
 	} else if c.requestBodyStream != nil {
 		reader = c.requestBodyStream
 	} else {

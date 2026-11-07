@@ -460,8 +460,15 @@ func TestHTTP2GracefulGoAway(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if goAway.typ != h2GoAway || binary.BigEndian.Uint32(goAway.payload[0:4]) != 1<<31-1 || binary.BigEndian.Uint32(goAway.payload[4:8]) != h2NoError {
+		t.Fatalf("unexpected initial GOAWAY: %#v", goAway)
+	}
+	goAway, err = readTestH2Frame(client)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if goAway.typ != h2GoAway || binary.BigEndian.Uint32(goAway.payload[0:4]) != 1 || binary.BigEndian.Uint32(goAway.payload[4:8]) != h2NoError {
-		t.Fatalf("unexpected GOAWAY: %#v", goAway)
+		t.Fatalf("unexpected final GOAWAY: %#v", goAway)
 	}
 	select {
 	case <-done:

@@ -7,15 +7,18 @@ import (
 )
 
 type RuntimeInfo struct {
-	Time       time.Time           `json:"time"`
-	GoVersion  string              `json:"go_version"`
-	Goroutines int                 `json:"goroutines"`
-	Draining   bool                `json:"draining"`
-	Routes     int                 `json:"routes"`
-	Queue      QueueStats          `json:"queue,omitempty"`
-	Config     SafeConfig          `json:"config"`
-	Health     []HealthCheckResult `json:"health,omitempty"`
-	Kernel     KernelRuntimeInfo   `json:"kernel"`
+	Time                  time.Time           `json:"time"`
+	GoVersion             string              `json:"go_version"`
+	Goroutines            int                 `json:"goroutines"`
+	Draining              bool                `json:"draining"`
+	Routes                int                 `json:"routes"`
+	Queue                 QueueStats          `json:"queue,omitempty"`
+	Config                SafeConfig          `json:"config"`
+	Health                []HealthCheckResult `json:"health,omitempty"`
+	Kernel                KernelRuntimeInfo   `json:"kernel"`
+	BufferedRequestBytes  int64               `json:"buffered_request_bytes"`
+	BufferedResponseBytes int64               `json:"buffered_response_bytes"`
+	BodyBudgetRejections  uint64              `json:"body_budget_rejections"`
 }
 
 func (a *App) RuntimeInfo() RuntimeInfo {
@@ -28,7 +31,7 @@ func (a *App) RuntimeInfo() RuntimeInfo {
 		}
 	}
 	_, checks := a.HealthStatus(context.Background())
-	return RuntimeInfo{Time: time.Now().UTC(), GoVersion: runtime.Version(), Goroutines: runtime.NumGoroutine(), Draining: a != nil && a.IsDraining(), Routes: len(a.Routes()), Queue: q, Config: a.SafeConfig(), Health: checks, Kernel: a.KernelRuntimeInfo()}
+	return RuntimeInfo{Time: time.Now().UTC(), GoVersion: runtime.Version(), Goroutines: runtime.NumGoroutine(), Draining: a != nil && a.IsDraining(), Routes: len(a.Routes()), Queue: q, Config: a.SafeConfig(), Health: checks, Kernel: a.KernelRuntimeInfo(), BufferedRequestBytes: a.bufferedRequestBytes.Load(), BufferedResponseBytes: a.bufferedResponseBytes.Load(), BodyBudgetRejections: a.bodyBudgetRejections.Load()}
 }
 
 func (a *App) IsDraining() bool { return a != nil && a.draining.Load() }

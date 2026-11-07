@@ -221,7 +221,8 @@ func (t *Transport) Middleware() fh.HandlerFunc {
 		if t.isControlPath(c.Path()) || (t.cfg.Skip != nil && t.cfg.Skip(c)) {
 			return c.Next()
 		}
-		secureRequested := c.Get(protocol.HeaderSecure) == "1" || strings.EqualFold(c.Get(fh.HeaderContentTypeStr), protocol.MediaTypeRequest)
+		streamRequested := c.Get(protocol.HeaderSecure) == "2" || strings.EqualFold(c.Get(fh.HeaderContentTypeStr), protocol.MediaTypeStream)
+		secureRequested := streamRequested || c.Get(protocol.HeaderSecure) == "1" || strings.EqualFold(c.Get(fh.HeaderContentTypeStr), protocol.MediaTypeRequest)
 		// Browser CORS preflights are plaintext OPTIONS requests. An explicit
 		// secure OPTIONS request still goes through the protocol.
 		if c.Method() == fh.MethodOPTIONSStr && !secureRequested {
@@ -238,6 +239,9 @@ func (t *Transport) Middleware() fh.HandlerFunc {
 		if err := t.validateBrowserContext(c); err != nil {
 			t.event(c, "browser_context_rejected", "", "", "", err.Error())
 			return err
+		}
+		if streamRequested {
+			return t.handleSecureStream(c)
 		}
 		return t.handleSecure(c)
 	}
@@ -421,7 +425,7 @@ func (t *Transport) collectResponseHeaders(c fh.Ctx) ([]protocol.Header, error) 
 	out := make([]protocol.Header, 0, len(all))
 	for name, values := range all {
 		lower := strings.ToLower(name)
-		if lower == "content-type" || lower == "set-cookie" || isHopByHop(lower) || lower == strings.ToLower(protocol.HeaderResponse) || lower == strings.ToLower(protocol.HeaderSecure) {
+		if lower == "content-type" || lower == "set-cookie" || isHopByHop(lower) || lower == strings.ToLower(protocol.HeaderResponse) || lower == strings.ToLower(protocol.HeaderSecure) || lower == strings.ToLower(protocol.HeaderStream) {
 			continue
 		}
 		for _, value := range values {

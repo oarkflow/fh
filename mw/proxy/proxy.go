@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -57,7 +56,9 @@ func New(cfg Config) fh.HandlerFunc {
 	proxy := &httputil.ReverseProxy{}
 	dialer := &net.Dialer{Timeout: cfg.Timeout, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
-		Proxy:       http.ProxyFromEnvironment,
+		// The destination guard must validate the actual upstream address, not
+		// an implicit proxy selected from the process environment.
+		Proxy:       nil,
 		DialContext: guardedDialContext(dialer, denyNets),
 	}
 	if cfg.Timeout > 0 {
@@ -92,19 +93,69 @@ func New(cfg Config) fh.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		writer := &responseWriter{ctx: c, header: http.Header{}, status: fh.StatusOK}
-		proxy.ServeHTTP(writer, req)
-		if writer.err != nil && cfg.ErrorHandler != nil {
-			return cfg.ErrorHandler(c, writer.err)
+		out := req.Clone(c.Context())
+		proxy.Rewrite(&httputil.ProxyRequest{In: req, Out: out})
+		reader, writer := io.Pipe()
+		out.Body = reader
+		out.ContentLength = -1
+		if h := c.RequestHeader(); h.HasContentLength {
+			out.ContentLength = int64(h.ContentLength)
 		}
-		if writer.err != nil {
-			return fh.DependencyFailure(fmt.Sprintf("upstream error: %v", writer.err)).WithCause(writer.err)
+		go func() {
+			err := c.StreamBody(func(body io.Reader) error {
+				_, err := io.Copy(writer, body)
+				return err
+			})
+			_ = writer.CloseWithError(err)
+		}()
+		defer reader.Close()
+		response, err := transport.RoundTrip(out)
+		if err != nil {
+			if cfg.ErrorHandler != nil {
+				return cfg.ErrorHandler(c, err)
+			}
+			return fh.DependencyFailure(fmt.Sprintf("upstream error: %v", err)).WithCause(err)
 		}
-		if writer.wroteHeader && !c.Responded() {
-			return c.SendStatus(writer.status)
+		defer response.Body.Close()
+		connectionHeaders := connectionTokens(response.Header.Values("Connection"))
+		for key, values := range response.Header {
+			if hopByHopHeader(key) || strings.EqualFold(key, "Content-Length") || connectionHeaders[http.CanonicalHeaderKey(key)] {
+				continue
+			}
+			for i, value := range values {
+				if i == 0 {
+					c.Set(key, value)
+				} else {
+					c.Append(key, value)
+				}
+			}
 		}
-		return nil
+		c.Status(response.StatusCode)
+		if response.ContentLength >= 0 {
+			return c.SendStreamLength(response.Body, response.ContentLength)
+		}
+		return c.SendStream(response.Body)
 	}
+}
+
+func hopByHopHeader(name string) bool {
+	switch http.CanonicalHeaderKey(name) {
+	case "Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade":
+		return true
+	}
+	return false
+}
+
+func connectionTokens(values []string) map[string]bool {
+	out := make(map[string]bool)
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			if token = strings.TrimSpace(token); token != "" {
+				out[http.CanonicalHeaderKey(token)] = true
+			}
+		}
+	}
+	return out
 }
 
 func parseCIDRs(cfg Config) ([]*net.IPNet, error) {
@@ -185,7 +236,7 @@ func Gateway(routes map[string]Config) fh.HandlerFunc {
 }
 
 func request(c fh.Ctx) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(c.Context(), c.Method(), c.OriginalURL(), io.NopCloser(bytes.NewReader(c.Body())))
+	req, err := http.NewRequestWithContext(c.Context(), c.Method(), c.OriginalURL(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -193,11 +244,14 @@ func request(c fh.Ctx) (*http.Request, error) {
 		"Authorization":   true,
 		"Cookie":          true,
 		"X-Forwarded-For": true,
-		"X-Real-IP":       true,
+		"X-Real-Ip":       true,
 		"X-Internal-Auth": true,
 	}
+	for name := range connectionTokens(c.GetReqHeaders()["Connection"]) {
+		skipHeaders[name] = true
+	}
 	for key, values := range c.GetReqHeaders() {
-		if skipHeaders[key] {
+		if skipHeaders[http.CanonicalHeaderKey(key)] || hopByHopHeader(key) {
 			continue
 		}
 		for _, value := range values {
@@ -205,33 +259,6 @@ func request(c fh.Ctx) (*http.Request, error) {
 		}
 	}
 	req.Host = c.Get(fh.HeaderHostStr)
-	req.RemoteAddr = c.IP()
+	req.RemoteAddr = net.JoinHostPort(c.IP(), "0")
 	return req, nil
-}
-
-type responseWriter struct {
-	ctx         fh.Ctx
-	header      http.Header
-	status      int
-	err         error
-	wroteHeader bool
-}
-
-func (w *responseWriter) Header() http.Header { return w.header }
-func (w *responseWriter) WriteHeader(status int) {
-	w.wroteHeader = true
-	w.status = status
-	for key, values := range w.header {
-		for _, value := range values {
-			w.ctx.Set(key, value)
-		}
-	}
-	w.ctx.Status(status)
-}
-func (w *responseWriter) Write(body []byte) (int, error) {
-	w.err = w.ctx.SendBytes(body)
-	if w.err != nil {
-		return 0, w.err
-	}
-	return len(body), nil
 }

@@ -714,7 +714,7 @@ func ValidProtectedHeader(name, value string) bool {
 	}
 	switch name {
 	case "host", "content-length", "transfer-encoding", "connection", "upgrade", "proxy-connection", "keep-alive", "te", "trailer",
-		strings.ToLower(HeaderSecure), strings.ToLower(HeaderEnvelope), strings.ToLower(HeaderResponse), strings.ToLower(HeaderDeviceRegistration), "sec-websocket-key", "sec-websocket-version":
+		strings.ToLower(HeaderSecure), strings.ToLower(HeaderEnvelope), strings.ToLower(HeaderResponse), strings.ToLower(HeaderStream), strings.ToLower(HeaderDeviceRegistration), "sec-websocket-key", "sec-websocket-version":
 		return false
 	default:
 		return true

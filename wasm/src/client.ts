@@ -24,8 +24,8 @@ export interface FHProgressEvent {
   total?: number;
   lengthComputable: boolean;
   upload: boolean;
-  /** Always true today: the underlying transport buffers whole bodies, so this is a start/end signal, not real streaming progress. */
-  synthetic: true;
+  /** False when loaded counts bytes actually pulled through a stream. */
+  synthetic: boolean;
 }
 
 export interface RetryConfig {
@@ -52,7 +52,7 @@ export interface FHRequestConfig<TData = unknown> {
   retries?: number | RetryConfig;
   onUploadProgress?: (event: FHProgressEvent) => void;
   onDownloadProgress?: (event: FHProgressEvent) => void;
-  responseType?: "json" | "text" | "blob" | "arraybuffer" | "formdata";
+  responseType?: "json" | "text" | "blob" | "arraybuffer" | "formdata" | "stream";
   meta?: Record<string, unknown>;
 }
 
@@ -183,6 +183,7 @@ async function defaultTransformResponse(
   _status: number,
 ): Promise<unknown> {
   const response = data as Response;
+  if (config.responseType === "stream") return response.body;
   if (config.responseType === "text") return response.text();
   if (config.responseType === "blob") return response.blob();
   if (config.responseType === "arraybuffer") return response.arrayBuffer();
@@ -265,6 +266,48 @@ function normalizeRetryConfig(retries: FHRequestConfig["retries"]): Required<Ret
   };
 }
 
+function withDownloadProgress(response: Response, callback: (event: FHProgressEvent) => void): Response {
+  if (!response.body) return response;
+  const source = response.body.getReader();
+  const rawTotal = Number(response.headers.get("content-length"));
+  const total = Number.isFinite(rawTotal) && rawTotal >= 0 && response.headers.has("content-length") ? rawTotal : undefined;
+  let loaded = 0;
+  callback({ loaded, total, lengthComputable: total !== undefined, upload: false, synthetic: false });
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { value, done } = await source.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      loaded += value.byteLength;
+      callback({ loaded, total, lengthComputable: total !== undefined, upload: false, synthetic: false });
+      controller.enqueue(value);
+    },
+    cancel(reason) { return source.cancel(reason); },
+  });
+  return new Response(stream, { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+
+function withUploadProgress(body: ReadableStream<Uint8Array>, callback: (event: FHProgressEvent) => void): ReadableStream<Uint8Array> {
+  const source = body.getReader();
+  let loaded = 0;
+  callback({ loaded, lengthComputable: false, upload: true, synthetic: false });
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { value, done } = await source.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      loaded += value.byteLength;
+      callback({ loaded, lengthComputable: false, upload: true, synthetic: false });
+      controller.enqueue(value);
+    },
+    cancel(reason) { return source.cancel(reason); },
+  });
+}
+
 export interface FHClient {
   defaults: FHRequestConfig;
   interceptors: {
@@ -330,7 +373,7 @@ export function createClient(fetchImpl: FetchLike, config: FHRequestConfig = {})
             : ArrayBuffer.isView(body)
               ? body.byteLength
               : undefined;
-    cfg.onUploadProgress?.({ loaded: 0, total: totalBytes, lengthComputable: totalBytes !== undefined, upload: true, synthetic: true });
+    if (!isStream) cfg.onUploadProgress?.({ loaded: 0, total: totalBytes, lengthComputable: totalBytes !== undefined, upload: true, synthetic: true });
 
     let attempt = 0;
     for (;;) {
@@ -340,19 +383,16 @@ export function createClient(fetchImpl: FetchLike, config: FHRequestConfig = {})
         ? setTimeout(() => timeoutController.abort(TIMEOUT_REASON), cfg.timeout)
         : undefined;
       const { signal, cleanup } = combineSignals(cfg.signal, timeoutController?.signal);
-      const request = new Request(url, { method, headers, body, credentials, signal });
+      const uploadBody = isStream && cfg.onUploadProgress
+        ? withUploadProgress(body as ReadableStream<Uint8Array>, cfg.onUploadProgress)
+        : body;
+      const init = { method, headers, body: uploadBody, credentials, signal, ...(isStream ? { duplex: "half" } : {}) } as RequestInit;
+      const request = new Request(url, isStream ? { method, headers, credentials, signal } : init);
       try {
-        const response = await fetchImpl(url, { method, headers, body, credentials, signal });
-        cfg.onUploadProgress?.({ loaded: totalBytes ?? 0, total: totalBytes, lengthComputable: totalBytes !== undefined, upload: true, synthetic: true });
-        cfg.onDownloadProgress?.({ loaded: 0, total: undefined, lengthComputable: false, upload: false, synthetic: true });
+        const fetched = await fetchImpl(url, init);
+        if (!isStream) cfg.onUploadProgress?.({ loaded: totalBytes ?? 0, total: totalBytes, lengthComputable: totalBytes !== undefined, upload: true, synthetic: true });
+        const response = cfg.onDownloadProgress ? withDownloadProgress(fetched, cfg.onDownloadProgress) : fetched;
         const attemptResult = await buildAttemptResult<T, D>(response, request, cfg);
-        cfg.onDownloadProgress?.({
-          loaded: Number(response.headers.get("content-length") ?? 0),
-          total: response.headers.get("content-length") ? Number(response.headers.get("content-length")) : undefined,
-          lengthComputable: response.headers.has("content-length"),
-          upload: false,
-          synthetic: true,
-        });
         if (attemptResult.error && attempt <= effectiveRetries && retryCondition(attemptResult.error, attempt)) {
           await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt, attemptResult.error!)));
           continue;

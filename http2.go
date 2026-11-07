@@ -853,6 +853,12 @@ func (h *h2Conn) handleData(f h2Frame) error {
 		// buffering cap is needed on top of it.
 		connectPayload = append([]byte(nil), p...)
 	} else if streaming {
+		if !h.app.reserveBufferedBody(int64(len(p))) {
+			h.mu.Unlock()
+			h.sendRST(f.streamID, h2EnhanceYourCalm)
+			return nil
+		}
+		s.bodyReserved.Add(int64(len(p)))
 		chunk := append([]byte(nil), p...)
 		s.bodyMu.Lock()
 		s.bodyChunks = append(s.bodyChunks, chunk)
@@ -1048,6 +1054,14 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 		h.app.dispatch(ctx)
 		if !ctx.responded && !s.reset.Load() {
 			_ = ctx.SendStatus(200)
+		}
+		if h.app.cfg.StreamRequestBody && s.connectConn == nil {
+			h.mu.Lock()
+			unfinished := !s.ended && !s.reset.Load()
+			h.mu.Unlock()
+			if unfinished {
+				h.sendRST(s.id, h2Cancel)
+			}
 		}
 		s.cancel()
 		releaseCtx(ctx)
@@ -1370,7 +1384,11 @@ func lowerHeaderName(b []byte) string {
 }
 
 func (r *h2Response) writeResponse(c *DefaultCtx, body []byte) error {
-	c.responseBody = append(c.responseBody[:0], body...)
+	if c.captureResponseBody {
+		c.responseBody = append(c.responseBody[:0], body...)
+	} else {
+		c.responseBody = c.responseBody[:0]
+	}
 	if c.responded || r.ended.Load() {
 		return nil
 	}
@@ -1378,9 +1396,16 @@ func (r *h2Response) writeResponse(c *DefaultCtx, body []byte) error {
 		return err
 	}
 	if c.bodyTransform != nil {
+		if err := c.reserveResponseBody(int64(len(body))); err != nil {
+			return err
+		}
+		defer c.releaseResponseBody()
 		var err error
 		body, err = c.bodyTransform(body)
 		if err != nil {
+			return err
+		}
+		if err := c.reserveResponseBody(int64(len(body))); err != nil {
 			return err
 		}
 	}

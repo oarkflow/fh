@@ -262,6 +262,8 @@ func (r *h2RequestBodyReader) Read(p []byte) (int, error) {
 			}
 		}
 		s.bodyMu.Unlock()
+		s.bodyReserved.Add(-int64(n))
+		r.conn.app.releaseBufferedBody(int64(n))
 		r.conn.consumeH2Body(s, n)
 		return n, nil
 	}

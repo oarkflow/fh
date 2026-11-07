@@ -12,19 +12,42 @@ import (
 // StreamWriter writes an HTTP response incrementally. HTTP/1.1 uses chunked
 // transfer encoding; HTTP/1.0 falls back to a close-delimited body.
 type StreamWriter struct {
-	ctx      *DefaultCtx
-	chunked  bool
-	discard  bool
-	closed   bool
-	h2       bool
-	buffered *[]byte
-	expected int64
-	written  int64
-	bounded  bool
+	ctx       *DefaultCtx
+	chunked   bool
+	discard   bool
+	closed    bool
+	h2        bool
+	buffered  *[]byte
+	expected  int64
+	written   int64
+	bounded   bool
+	raw       *StreamWriter
+	transform io.WriteCloser
 }
 
-// Stream starts a streaming response and invokes fn synchronously. The final
-// chunk is always written, including when fn returns an error.
+// SetResponseStreamTransform installs a streaming response transform for
+// middleware. It is applied after response headers are prepared and must
+// write complete framed output to the supplied writer.
+func SetResponseStreamTransform(c Ctx, fn func(io.Writer) (io.WriteCloser, error)) bool {
+	if c == nil || fn == nil {
+		return false
+	}
+	setter, ok := c.(interface {
+		SetResponseStreamTransform(func(io.Writer) (io.WriteCloser, error))
+	})
+	if !ok {
+		return false
+	}
+	setter.SetResponseStreamTransform(fn)
+	return true
+}
+
+func (c *DefaultCtx) SetResponseStreamTransform(fn func(io.Writer) (io.WriteCloser, error)) {
+	c.streamTransform = fn
+}
+
+// Stream starts a streaming response and invokes fn synchronously. A callback
+// error aborts the response so a partial body is never marked complete.
 func (c *DefaultCtx) Stream(fn func(*StreamWriter) error) error {
 	return c.stream(-1, fn)
 }
@@ -46,7 +69,8 @@ func (c *DefaultCtx) stream(size int64, fn func(*StreamWriter) error) error {
 	if fn == nil {
 		return errors.New("fh: nil stream callback")
 	}
-	if c.bodyTransform != nil {
+	if c.bodyTransform != nil && c.streamTransform == nil {
+		defer c.releaseResponseBody()
 		body := make([]byte, 0, 4096)
 		w := &StreamWriter{ctx: c, buffered: &body, expected: size, bounded: size >= 0}
 		if err := fn(w); err != nil {
@@ -57,16 +81,48 @@ func (c *DefaultCtx) stream(size int64, fn func(*StreamWriter) error) error {
 		}
 		return c.writeResponse(body)
 	}
-	w, err := c.beginStream(size)
+	wireSize := size
+	if c.streamTransform != nil {
+		wireSize = -1 // ciphertext framing changes the content length
+	}
+	w, err := c.beginStream(wireSize)
 	if err != nil {
 		return err
 	}
+	if c.streamTransform != nil {
+		transformed, err := c.streamTransform(w)
+		if err != nil {
+			w.abort()
+			return err
+		}
+		w = &StreamWriter{ctx: c, raw: w, transform: transformed, expected: size, bounded: size >= 0}
+	}
 	callErr := fn(w)
-	closeErr := w.Close()
 	if callErr != nil {
+		w.abort()
 		return callErr
 	}
-	return closeErr
+	return w.Close()
+}
+
+func (w *StreamWriter) abort() {
+	if w.closed {
+		return
+	}
+	w.closed = true
+	if w.raw != nil {
+		w.raw.abort()
+		return
+	}
+	if w.buffered != nil || w.discard {
+		return
+	}
+	if w.h2 {
+		w.ctx.h2.abort(h2InternalError)
+		return
+	}
+	w.ctx.forceClose = true
+	_ = w.ctx.conn.Close()
 }
 
 // SendStream copies r to a streamed response using a fixed scratch buffer.
@@ -196,6 +252,18 @@ func (w *StreamWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if w.transform != nil {
+		if w.bounded && int64(len(p)) > w.expected-w.written {
+			w.abort()
+			return 0, io.ErrShortWrite
+		}
+		n, err := w.transform.Write(p)
+		w.written += int64(n)
+		if err != nil {
+			w.abort()
+		}
+		return n, err
+	}
 	if w.discard {
 		return len(p), nil
 	}
@@ -208,6 +276,9 @@ func (w *StreamWriter) Write(p []byte) (int, error) {
 		defer func() { w.ctx.forceClose = true }()
 	}
 	if w.buffered != nil {
+		if err := w.ctx.reserveResponseBody(int64(len(*w.buffered) + len(p))); err != nil {
+			return 0, err
+		}
 		*w.buffered = append(*w.buffered, p...)
 		w.written += int64(len(p))
 		return len(p), nil
@@ -243,6 +314,9 @@ func (w *StreamWriter) Write(p []byte) (int, error) {
 }
 
 func (w *StreamWriter) Flush() error {
+	if w.raw != nil {
+		return w.raw.Flush()
+	}
 	if w.closed || w.discard || w.buffered != nil {
 		return nil
 	}
@@ -263,6 +337,17 @@ func (w *StreamWriter) Close() error {
 		return nil
 	}
 	w.closed = true
+	if w.transform != nil {
+		if w.bounded && w.written != w.expected {
+			w.raw.abort()
+			return io.ErrUnexpectedEOF
+		}
+		if err := w.transform.Close(); err != nil {
+			w.raw.abort()
+			return err
+		}
+		return w.raw.Close()
+	}
 	if w.discard {
 		return nil
 	}
@@ -275,6 +360,7 @@ func (w *StreamWriter) Close() error {
 	if w.h2 {
 		if w.bounded && w.written != w.expected {
 			w.ctx.forceClose = true
+			w.ctx.h2.abort(h2InternalError)
 			return io.ErrUnexpectedEOF
 		}
 		return w.ctx.h2.writeData(nil, true)
