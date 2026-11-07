@@ -44,10 +44,9 @@ frontend: check-secure-fetch
 TINYGO ?= tinygo
 wasm:
 	@mkdir -p web/wasm
-	@test -n "$(WASM_TRUSTED_ORIGIN)" -a -n "$(WASM_TRUSTED_TRANSPORT_KEY)" -a -n "$(WASM_TRUSTED_TRANSPORT_KEY_ID)" -a -n "$(WASM_TRUSTED_RESPONSE_KEY)" -a -n "$(WASM_TRUSTED_RESPONSE_KEY_ID)" || (echo "all five WASM_TRUSTED_* values are required" >&2; exit 1)
 	@command -v $(TINYGO) >/dev/null 2>&1 || (echo "tinygo was not found on PATH. Install it (e.g. 'brew install tinygo')." >&2; exit 1)
 	@command -v wasm-opt >/dev/null 2>&1 || (echo "wasm-opt was not found on PATH. TinyGo's wasm build shells out to it; install binaryen (e.g. 'brew install binaryen')." >&2; exit 1)
-	$(TINYGO) build -target wasm -no-debug -ldflags="-X main.embeddedTrustedOrigin=$(WASM_TRUSTED_ORIGIN) -X main.embeddedTransportPublicKey=$(WASM_TRUSTED_TRANSPORT_KEY) -X main.embeddedTransportKeyID=$(WASM_TRUSTED_TRANSPORT_KEY_ID) -X main.embeddedResponseSigningPublicKey=$(WASM_TRUSTED_RESPONSE_KEY) -X main.embeddedResponseSigningKeyID=$(WASM_TRUSTED_RESPONSE_KEY_ID)" -o web/wasm/securefetch.wasm github.com/oarkflow/fh/wasm/cmd/securefetch
+	$(TINYGO) build -target wasm -no-debug -o web/wasm/securefetch.wasm github.com/oarkflow/fh/wasm/cmd/securefetch
 	@echo "tinygo build: $$(wc -c < web/wasm/securefetch.wasm) bytes"
 	cp "$$($(GO) list -m -f '{{.Dir}}' github.com/oarkflow/fh)/wasm/cmd/securefetch/wasm_exec.js" web/wasm/wasm_exec.js
 	$(GO) run github.com/oarkflow/fh/wasm/cmd/manifest -dir web/wasm

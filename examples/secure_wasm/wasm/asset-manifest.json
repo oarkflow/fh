@@ -27,9 +27,9 @@
       "size": 11645
     },
     "securefetch.wasm": {
-      "sha256": "af78d6000c1575926b915abdfc8a2f136559701a25bfaa4dbe5622c12c4c8cf9",
-      "integrity": "sha256-r3jWAAwVdZJrkVq9/IovE2VZcBolv6pNvlYiwSxMjPk=",
-      "size": 692354
+      "sha256": "5a44db1eac8ab0947c05b11793f710e72e028852ef32f0166a8bc4b5a53444d3",
+      "integrity": "sha256-WkTbHqyKsJR8BbEXk/cQ5y4CiFLvMvAWaovEtaU0RNM=",
+      "size": 677462
     },
     "storage.js": {
       "sha256": "716d3e3ee9bb7b68d90c69c031590091c3d0a8be0e3e960521ee91cc1ef80065",

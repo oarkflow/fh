@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oarkflow/authz"
+	"github.com/oarkflow/fh"
 	appauth "github.com/oarkflow/fh/examples/production-app/internal/auth"
 	appconfig "github.com/oarkflow/fh/examples/production-app/internal/config"
 	appdb "github.com/oarkflow/fh/examples/production-app/internal/database"
 	appsecurity "github.com/oarkflow/fh/examples/production-app/internal/security"
-	"github.com/oarkflow/authz"
-	"github.com/oarkflow/fh"
 	"github.com/oarkflow/fh/mw/contract"
 	"github.com/oarkflow/fh/mw/securetransport"
 	"github.com/oarkflow/fh/mw/session"
@@ -98,8 +98,8 @@ func Register(app *fh.App, cfg appconfig.Config, sessions *session.SessionManage
 		return c.JSON(fh.Map{
 			"baseURL": requestOrigin(c, cfg.Origin), "pinnedServerKey": transport.PublicKeyBase64(), "pinnedServerKeyID": transport.KeyID(),
 			"responseSigningPublicKey": responsePublicKey, "responseSigningKeyID": cfg.ResponseSigningKeyID,
-			"requireResponseSignature": true, "requireEmbeddedTrust": cfg.Production,
-			"registrationToken": grant, "wasmURL": "/wasm/securefetch.wasm", "wasmExecURL": "/wasm/wasm_exec.js",
+			"requireResponseSignature": true,
+			"registrationToken":        grant, "wasmURL": "/wasm/securefetch.wasm", "wasmExecURL": "/wasm/wasm_exec.js",
 			"wasmIntegrity": manifest.Assets["securefetch.wasm"].Integrity, "wasmExecIntegrity": manifest.Assets["wasm_exec.js"].Integrity,
 			"requireAssetIntegrity": true,
 		})

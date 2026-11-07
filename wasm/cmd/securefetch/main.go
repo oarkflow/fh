@@ -46,7 +46,7 @@ type clientConfig struct {
 	PinnedServerKeyID     string
 	ResponseSigningKeyID  string
 	ResponseSigningPublic ed25519.PublicKey
-	EmbeddedTrust         bool
+	TrustMode             string
 	HandshakeTTL          time.Duration
 	ClockSkew             time.Duration
 	RequestTTL            time.Duration
@@ -69,14 +69,6 @@ type secureClient struct {
 var (
 	client = &secureClient{}
 	kept   []js.Func
-
-	// These public trust anchors are injected with -ldflags -X by `make wasm`.
-	// Production origins reject builds where the complete bundle is absent.
-	embeddedTrustedOrigin            string
-	embeddedTransportPublicKey       string
-	embeddedTransportKeyID           string
-	embeddedResponseSigningPublicKey string
-	embeddedResponseSigningKeyID     string
 )
 
 func main() {
@@ -240,7 +232,7 @@ func (c *secureClient) configure(v js.Value) error {
 		}
 		cfg.ResponseSigningPublic = key
 	}
-	if err := applyEmbeddedTrust(&cfg, boolValue(v.Get("requireEmbeddedTrust"))); err != nil {
+	if err := validateRuntimeTrust(&cfg); err != nil {
 		return err
 	}
 	if !cfg.HasPinnedKey {
@@ -281,46 +273,22 @@ func (c *secureClient) configure(v js.Value) error {
 	return nil
 }
 
-func applyEmbeddedTrust(cfg *clientConfig, explicitlyRequired bool) error {
-	bundle, err := protocol.ParseTrustBundle(
-		embeddedTrustedOrigin,
-		embeddedTransportPublicKey,
-		embeddedTransportKeyID,
-		embeddedResponseSigningPublicKey,
-		embeddedResponseSigningKeyID,
-	)
-	if err != nil {
-		if errors.Is(err, protocol.ErrTrustUnavailable) {
-			location := js.Global().Get("location")
-			browserLoopback := !location.IsUndefined() && !location.IsNull() && isLoopbackHost(location.Get("hostname").String())
-			if explicitlyRequired || !browserLoopback {
-				return errors.New("fh secure fetch: this build has no embedded root of trust")
-			}
-			return nil
+func validateRuntimeTrust(cfg *clientConfig) error {
+	base, err := url.Parse(cfg.BaseURL)
+	if err != nil || base.Hostname() == "" {
+		return errors.New("fh secure fetch: cannot determine trust origin")
+	}
+	if cfg.HasPinnedKey {
+		if cfg.PinnedServerKeyID == "" {
+			return errors.New("fh secure fetch: pinnedServerKeyID is required with pinnedServerKey")
 		}
-		return fmt.Errorf("fh secure fetch: invalid embedded root of trust: %w", err)
+		cfg.TrustMode = "runtime-pinned"
+		return nil
 	}
-	if cfg.BaseURL != bundle.Origin {
-		return errors.New("fh secure fetch: configured origin does not match the embedded trusted origin")
+	if !isLoopbackHost(base.Hostname()) {
+		return errors.New("fh secure fetch: non-loopback origins require a runtime pinnedServerKey and pinnedServerKeyID")
 	}
-	if cfg.HasPinnedKey && subtle.ConstantTimeCompare(cfg.PinnedServer[:], bundle.TransportPublicKey[:]) != 1 {
-		return errors.New("fh secure fetch: runtime transport key conflicts with embedded trust")
-	}
-	if cfg.PinnedServerKeyID != "" && subtle.ConstantTimeCompare([]byte(cfg.PinnedServerKeyID), []byte(bundle.TransportKeyID)) != 1 {
-		return errors.New("fh secure fetch: runtime transport key ID conflicts with embedded trust")
-	}
-	if len(cfg.ResponseSigningPublic) != 0 && subtle.ConstantTimeCompare(cfg.ResponseSigningPublic, bundle.ResponseSigningPublicKey[:]) != 1 {
-		return errors.New("fh secure fetch: runtime response key conflicts with embedded trust")
-	}
-	if cfg.ResponseSigningKeyID != "" && subtle.ConstantTimeCompare([]byte(cfg.ResponseSigningKeyID), []byte(bundle.ResponseSigningKeyID)) != 1 {
-		return errors.New("fh secure fetch: runtime response key ID conflicts with embedded trust")
-	}
-	copy(cfg.PinnedServer[:], bundle.TransportPublicKey[:])
-	cfg.HasPinnedKey = true
-	cfg.PinnedServerKeyID = bundle.TransportKeyID
-	cfg.ResponseSigningPublic = append(ed25519.PublicKey(nil), bundle.ResponseSigningPublicKey[:]...)
-	cfg.ResponseSigningKeyID = bundle.ResponseSigningKeyID
-	cfg.EmbeddedTrust = true
+	cfg.TrustMode = "loopback-development"
 	return nil
 }
 
@@ -846,11 +814,7 @@ func (c *secureClient) infoObject() js.Value {
 	result := js.Global().Get("Object").New()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.cfg.EmbeddedTrust {
-		result.Set("trustMode", "embedded")
-	} else {
-		result.Set("trustMode", "loopback-development")
-	}
+	result.Set("trustMode", c.cfg.TrustMode)
 	if c.device != nil {
 		result.Set("deviceId", protocol.EncodeID(c.device.ID))
 		result.Set("deviceName", c.device.Name)

@@ -21,15 +21,30 @@ neither will instantiate this specific binary.
 
 TinyGo also pins a maximum supported Go version below what this module's
 go.mod requires (0.41.x supports Go 1.19-1.26; go.mod requires >= 1.26.5), so
-`go` on PATH usually needs to be a matching 1.26.x for this build specifically
--- not whatever newer toolchain `go build`/`go test` use elsewhere in this
-repo. If `tinygo build` reports "requires go version 1.19 through 1.26",
-install one side by side and put it first on PATH:
+put a matching Go 1.26.x toolchain on `PATH` for this build. The Makefile
+builds in a temporary module copy with the Go version lowered for TinyGo; it
+does not change the repository's `go.mod`:
 
 ```bash
 go install golang.org/dl/go1.26.5@latest && go1.26.5 download
 PATH="$(go1.26.5 env GOROOT)/bin:$PATH" make wasm
 ```
+
+## Summary
+
+The browser wrapper starts the Go/WASM client, verifies pinned assets and
+runtime server trust, loads or registers a device key through WebCrypto,
+and establishes a device-bound encrypted session. Requests then use v1
+whole-body encryption by default or opt-in v2 authenticated streaming. FH
+middleware authenticates and decrypts the request before calling the handler,
+then protects the response for the browser to verify and restore as a normal
+Fetch `Response`. V2 streams bounded chunks with backpressure and supports
+real byte progress. The optional whole-body RFC 9421 response signature is
+currently available only with v1.
+
+See [`WASM.md`](WASM.md) for the full browser, handshake, request/response,
+streaming, server middleware, security, and build flow. The threat model and
+deployment checklist remain in [`docs/secure-wasm-transport.md`](../docs/secure-wasm-transport.md).
 
 Import the generated ES module:
 
@@ -43,7 +58,6 @@ const secure = await createSecureFetch({
   responseSigningPublicKey: "<base64url-ed25519-public-key>",
   responseSigningKeyID: "api-response-2026-01",
   requireResponseSignature: true,
-  requireEmbeddedTrust: true,
   wasmURL: "/wasm/securefetch.wasm",
   wasmExecURL: "/wasm/wasm_exec.js",
   wasmIntegrity: "sha256-<from-asset-manifest>",
@@ -55,11 +69,11 @@ const response = await secure.fetch("/api/profile");
 console.log(await response.json());
 ```
 
-The package requires WebAssembly, WebCrypto, IndexedDB, a browser Window, and a secure context. Loopback HTTP is accepted for local development. Every non-loopback execution requires a complete origin/X25519/Ed25519 trust bundle embedded by the Makefile; runtime configuration cannot substitute those pins. When `requireResponseSignature` is enabled it generates signature nonces inside WASM, verifies signed ciphertext before decryption, and fails closed on downgrade or tampering. It intentionally rejects redirects, `no-cors`/navigation requests, non-canonical base URLs and prefixes, and destinations outside `baseURL`.
+The package requires WebAssembly, WebCrypto, IndexedDB, a browser Window, and a secure context. Loopback HTTP is accepted for local development. Every non-loopback execution requires a runtime X25519 public key and key ID. The build contains no server public or private key. Supply runtime pins from a trusted host application configuration; do not trust a key bootstrap fetched from the same untrusted channel as the WASM itself. When `requireResponseSignature` is enabled the client generates signature nonces inside WASM, verifies signed ciphertext before decryption, and fails closed on downgrade or tampering. It intentionally rejects redirects, `no-cors`/navigation requests, non-canonical base URLs and prefixes, and destinations outside `baseURL`.
 
 `make wasm` emits `dist/asset-manifest.json` with SHA-256 SRI values for the WASM binary and runtime.
 
-See `docs/secure-wasm-transport.md` for the protocol, server setup, threat model, and production checklist.
+See `WASM.md` for the protocol and server setup, and `docs/secure-wasm-transport.md` for the threat model and production checklist.
 
 ## Axios-style client
 
@@ -100,9 +114,10 @@ import { createClient } from "/wasm/index.js";
 const plain = createClient(fetch, { baseURL: "https://api.example.com" });
 ```
 
-`onUploadProgress`/`onDownloadProgress` callbacks are supported for shape
-parity with axios, but every event they emit is a synthetic 0%/100%
-start/end pair (`event.synthetic === true`) -- the underlying transport
-buffers whole request/response bodies rather than streaming them (see
-`docs/secure-wasm-transport.md`), so true incremental progress isn't
-available yet.
+For buffered v1 requests, progress callbacks emit synthetic 0%/100% start/end
+events (`event.synthetic === true`). With `streaming: true`, streamed uploads
+and downloads report bytes actually consumed (`event.synthetic === false`).
+Set `responseType: "stream"` to receive a `ReadableStream` without consuming
+the response in the client wrapper. Streaming v2 cannot be combined with the
+whole-body response-signature policy; it fails closed when that policy is
+configured.

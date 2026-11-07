@@ -669,13 +669,13 @@ Includes fluent request building, typed helpers (`GetJSON[T]`, `PostJSON[Req,Res
 
 ## Secure WASM Transport
 
-`mw/securetransport`, the shared `pkg/securetransport` protocol, and a TypeScript/JavaScript TinyGo/WASM Fetch client under `wasm/` provide device-signed session establishment, X25519 key agreement, AES-256-GCM encrypted bodies/headers, replay prevention, and pluggable stores. The secure WASM example additionally negotiates RFC 9421/RFC 9530 Ed25519 signatures over ciphertext and verifies them before decryption.
+`mw/securetransport`, the shared `pkg/securetransport` protocol, and a TypeScript/JavaScript TinyGo/WASM Fetch client under `wasm/` provide device-signed session establishment, X25519 key agreement, AES-256-GCM encrypted bodies/headers, replay prevention, and pluggable stores. Protocol v1 buffers complete bodies and can verify RFC 9421/RFC 9530 response signatures. Opt-in protocol v2 streams authenticated records with backpressure and real byte progress; it currently cannot use the whole-body signature policy.
 
 ```bash
 make wasm
 ```
 
-See [Secure WASM Transport](docs/secure-wasm-transport.md) and [`examples/secure_wasm`](examples/secure_wasm).
+See the [WASM request/response flow](wasm/WASM.md), [Secure WASM deployment guide](docs/secure-wasm-transport.md), and [`examples/secure_wasm`](examples/secure_wasm).
 
 ## Signed HTTP Responses
 

@@ -15,7 +15,6 @@ export interface SecureBootstrapConfig {
   responseSigningPublicKey: string;
   responseSigningKeyID: string;
   requireResponseSignature: boolean;
-  requireEmbeddedTrust: boolean;
   registrationToken: string;
   wasmURL: string;
   wasmExecURL: string;
@@ -106,7 +105,6 @@ export const isSecureBootstrapConfig: Validator<SecureBootstrapConfig> = (value)
   typeof value.responseSigningPublicKey === 'string' &&
   typeof value.responseSigningKeyID === 'string' &&
   typeof value.requireResponseSignature === 'boolean' &&
-  typeof value.requireEmbeddedTrust === 'boolean' &&
   typeof value.registrationToken === 'string' &&
   typeof value.wasmURL === 'string' &&
   typeof value.wasmExecURL === 'string' &&

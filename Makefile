@@ -18,28 +18,7 @@ XDP_MODE ?= native
 XDP_PORTS ?= 80,443
 XDP_PIN ?= /sys/fs/bpf/fh/$(XDP_INTERFACE)
 
-WASM_TRUST_VALUES := $(strip $(WASM_TRUSTED_ORIGIN)$(WASM_TRUSTED_TRANSPORT_KEY)$(WASM_TRUSTED_TRANSPORT_KEY_ID)$(WASM_TRUSTED_RESPONSE_KEY)$(WASM_TRUSTED_RESPONSE_KEY_ID))
-WASM_TRUST_LDFLAGS :=
-ifneq ($(WASM_TRUST_VALUES),)
-ifeq ($(strip $(WASM_TRUSTED_ORIGIN)),)
-$(error WASM_TRUSTED_ORIGIN is required when building a trusted WASM artifact)
-endif
-ifeq ($(strip $(WASM_TRUSTED_TRANSPORT_KEY)),)
-$(error WASM_TRUSTED_TRANSPORT_KEY is required when building a trusted WASM artifact)
-endif
-ifeq ($(strip $(WASM_TRUSTED_TRANSPORT_KEY_ID)),)
-$(error WASM_TRUSTED_TRANSPORT_KEY_ID is required when building a trusted WASM artifact)
-endif
-ifeq ($(strip $(WASM_TRUSTED_RESPONSE_KEY)),)
-$(error WASM_TRUSTED_RESPONSE_KEY is required when building a trusted WASM artifact)
-endif
-ifeq ($(strip $(WASM_TRUSTED_RESPONSE_KEY_ID)),)
-$(error WASM_TRUSTED_RESPONSE_KEY_ID is required when building a trusted WASM artifact)
-endif
-WASM_TRUST_LDFLAGS := -X main.embeddedTrustedOrigin=$(WASM_TRUSTED_ORIGIN) -X main.embeddedTransportPublicKey=$(WASM_TRUSTED_TRANSPORT_KEY) -X main.embeddedTransportKeyID=$(WASM_TRUSTED_TRANSPORT_KEY_ID) -X main.embeddedResponseSigningPublicKey=$(WASM_TRUSTED_RESPONSE_KEY) -X main.embeddedResponseSigningKeyID=$(WASM_TRUSTED_RESPONSE_KEY_ID)
-endif
-
-.PHONY: all test check api-check template-check production-app-check production-app-update secure-test kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-trusted wasm-require-trust wasm-clean clean
+.PHONY: all test check api-check template-check production-app-check production-app-update secure-test kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-clean clean
 
 all: test wasm
 
@@ -110,7 +89,7 @@ wasm-go:
 		cp go.sum "$$tmp/go.sum"; \
 		cp -R wasm/cmd/securefetch "$$tmp/wasm/cmd/securefetch"; \
 		cp -R pkg/securetransport pkg/httpsignature "$$tmp/pkg/"; \
-		cd "$$tmp" && $(TINYGO) build -target wasm -no-debug -ldflags="$(WASM_TRUST_LDFLAGS)" -o "$(abspath $(WASM_BINARY))" ./wasm/cmd/securefetch
+		cd "$$tmp" && $(TINYGO) build -target wasm -no-debug -o "$(abspath $(WASM_BINARY))" ./wasm/cmd/securefetch
 	@echo "tinygo build: $$(wc -c < $(WASM_BINARY)) bytes"
 
 wasm-runtime:
@@ -142,26 +121,6 @@ wasm-example: wasm-check
 	@mkdir -p $(WASM_EXAMPLE_DIR)
 	cp $(WASM_DIST)/securefetch.wasm $(WASM_DIST)/wasm_exec.js $(WASM_DIST)/secure-fetch.js $(WASM_DIST)/storage.js $(WASM_DIST)/client.js $(WASM_DIST)/errors.js $(WASM_DIST)/body.js $(WASM_DIST)/index.js $(WASM_DIST)/secure-fetch.d.ts $(WASM_DIST)/storage.d.ts $(WASM_DIST)/client.d.ts $(WASM_DIST)/errors.d.ts $(WASM_DIST)/body.d.ts $(WASM_DIST)/index.d.ts $(WASM_DIST)/asset-manifest.json $(WASM_DIST)/SHA256SUMS $(WASM_EXAMPLE_DIR)/
 	@echo "Synchronized complete WASM bundle to $(WASM_EXAMPLE_DIR)"
-
-# `make wasm`/`make all` build an UNTRUSTED artifact by default (no embedded
-# root of trust) - intentional, since examples/secure_wasm and CI build
-# without real production keys on hand. wasm-trusted is the target that
-# actually enforces WASM_TRUSTED_*: it fails loudly instead of silently
-# producing a binary with no embedded trust. Use this (not `make wasm`) to
-# build the artifact meant to ship in a real deployment, and to regenerate
-# fh-template's checked-in web/wasm/securefetch.wasm - see
-# wasm/cmd/securefetch/main.go's applyEmbeddedTrust and
-# docs/secure-wasm-transport.md. Do not run with `make -j`: the trust check
-# must complete before wasm-go links the (possibly-empty) ldflags in.
-wasm-require-trust:
-	@test -n "$(WASM_TRUSTED_ORIGIN)" || (echo "WASM_TRUSTED_ORIGIN is required for wasm-trusted" >&2; exit 1)
-	@test -n "$(WASM_TRUSTED_TRANSPORT_KEY)" || (echo "WASM_TRUSTED_TRANSPORT_KEY is required for wasm-trusted" >&2; exit 1)
-	@test -n "$(WASM_TRUSTED_TRANSPORT_KEY_ID)" || (echo "WASM_TRUSTED_TRANSPORT_KEY_ID is required for wasm-trusted" >&2; exit 1)
-	@test -n "$(WASM_TRUSTED_RESPONSE_KEY)" || (echo "WASM_TRUSTED_RESPONSE_KEY is required for wasm-trusted" >&2; exit 1)
-	@test -n "$(WASM_TRUSTED_RESPONSE_KEY_ID)" || (echo "WASM_TRUSTED_RESPONSE_KEY_ID is required for wasm-trusted" >&2; exit 1)
-
-wasm-trusted: wasm-require-trust wasm-example
-	@echo "Built a trusted WASM artifact (embedded root of trust baked in) at $(WASM_BINARY)"
 
 wasm-clean:
 	rm -f $(WASM_DIST)/securefetch.wasm $(WASM_DIST)/wasm_exec.js $(WASM_DIST)/SHA256SUMS $(WASM_DIST)/asset-manifest.json

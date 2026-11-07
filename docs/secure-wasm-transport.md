@@ -2,6 +2,8 @@
 
 `mw/securetransport` and `wasm/` implement an application-layer encrypted Fetch transport for FH. It is additional protection on top of HTTPS/TLS 1.3, not a TLS replacement.
 
+For the full current browser/WASM startup, handshake, v1 request/response, and v2 streaming walkthrough, see [`wasm/WASM.md`](../wasm/WASM.md). This page focuses on deployment and threat-model guidance.
+
 ## Security properties
 
 - A persistent pinned X25519 server key authenticates the FH secure-transport endpoint.
@@ -27,13 +29,13 @@ WASM is tamper-resistant, not tamperproof. A compromised page, malicious extensi
 
 Do not embed server private keys, permanent API secrets, database credentials, or token-signing secrets in JavaScript or WASM.
 
-## Embedded production root of trust
+## Runtime trust and asset integrity
 
-A non-loopback WASM client fails closed unless its build contains a complete immutable trust bundle: expected origin, X25519 transport public key and key ID, plus Ed25519 response-signing public key and key ID. Runtime bootstrap configuration may repeat these public values, but it cannot replace them. Partial bundles, origin changes, key substitution, and key-ID substitution are rejected before device registration or session establishment.
+A non-loopback WASM client requires a runtime X25519 transport public key and key ID. The WASM artifact contains no server key. The host application supplies those public pins during initialization. If RFC 9421 response signatures are required, the host also supplies the response verification public key and key ID.
 
-Build with all five `WASM_TRUSTED_*` variables documented in [`examples/secure_wasm`](../examples/secure_wasm). The Makefile injects public values into non-exported Go variables using linker build values. No private key is embedded.
+The public key is not a secret; its source and the WASM artifact's integrity establish trust. A key fetched over an unauthenticated channel from the API it is supposed to authenticate is not an independent pin. HTTPS authenticates the application/configuration origin. If that origin is outside the trust boundary, deliver the runtime pins and WASM integrity manifest through a separately authenticated channel such as a signed release, native wrapper, or managed browser policy. A compromised application page can replace its WASM, configuration, and integrity reference together.
 
-The WASM artifact is the final trust anchor. Publish its generated SHA-256/SRI value through a separately authenticated release system, signed native application, managed extension policy, TUF/Sigstore metadata, or another channel the network attacker cannot rewrite. A normal website's first load ultimately trusts browser PKI; no JavaScript/WASM protocol can defeat a hostile installed root CA that can replace the page, loader, artifact, and pins together.
+The browser trusts the application page through browser PKI and uses the runtime X25519 pin to authenticate the secure transport server handshake. SRI checks that loaded JS/WASM matches the hash supplied by the page; it does not authenticate a compromised page or a manifest and artifact delivered through the same compromised channel. For stronger separation, publish the asset manifest and runtime pins through a separately authenticated release system, signed native application, managed extension policy, TUF/Sigstore metadata, or another channel the attacker cannot rewrite. No JavaScript/WASM protocol can defeat a hostile installed root CA that can replace the page, loader, artifact, and pins together.
 
 ## Build
 
@@ -164,7 +166,6 @@ const secure = await createSecureFetch({
   responseSigningPublicKey: "<base64url-ed25519-public-key>",
   responseSigningKeyID: "api-response-2026-01",
   requireResponseSignature: true,
-  requireEmbeddedTrust: true,
   wasmURL: "/wasm/securefetch.wasm",
   wasmExecURL: "/wasm/wasm_exec.js",
   wasmIntegrity: "sha256-<from-asset-manifest>",
@@ -191,7 +192,7 @@ console.log(response.status, await response.json());
 
 With `requireResponseSignature: true`, `responseSigningPublicKey` and `responseSigningKeyID` are also mandatory. WASM generates a fresh RFC 9421 nonce, puts the negotiation inside the encrypted request, verifies the RFC 9530 digest and Ed25519 signature over the ciphertext response, and only then decrypts it. For cross-origin use, CORS must expose `Content-Digest`, `Signature-Input`, and `Signature`.
 
-`requireEmbeddedTrust: true` explicitly requires build-time pins even on loopback. Independently of this setting, every non-loopback browser execution requires embedded trust and cannot be downgraded by runtime configuration. Inspect `secure.sessionInfo().trustMode`; production must report `embedded`.
+Every non-loopback execution requires runtime transport pins and reports `runtime-pinned` from `secure.sessionInfo().trustMode`. Unpinned loopback development reports `loopback-development`.
 
 Set `requireAssetIntegrity: true` in production and provide the SHA-256 SRI values generated in `wasm/dist/asset-manifest.json`. The loader verifies the WASM bytes before instantiation and lets the browser enforce SRI on `wasm_exec.js`.
 
@@ -247,12 +248,11 @@ Put cookie/session middleware before FH secure transport when device registratio
 - Rotate server keys with an overlap window and explicit key IDs. This implementation currently supports one active transport key per `Transport`; deploy parallel versions during rotation.
 - Set bounded body/header limits.
 - Export `OnSecurityEvent` to the audit/SIEM pipeline.
-- Revoke a device with `transport.RevokeDevice(id)`; this also removes its active sessions.
 - Use `SessionFromContext`, `DeviceIDFromContext`, and `RequestIDFromContext` in authorization and audit records.
 
 ## Current limitations
 
-- Request and response bodies are buffered; streaming encryption is not yet implemented. The axios-style client (`createClient`/`createSecureClient` in `wasm/README.md`) therefore only emits synthetic 0%/100% `onUploadProgress`/`onDownloadProgress` events, not true incremental progress.
+- Protocol v1 buffers whole request and response bodies. Protocol v2 (`streaming: true`) encrypts/decrypts bounded records incrementally and reports real byte progress. The optional RFC 9421/RFC 9530 whole-body response signature is supported only by v1; v2 rejects that configuration until a streaming signature profile is defined.
 - GET/HEAD encrypted request metadata must fit within the server/browser header limit.
 - Native Fetch redirect behavior is deliberately set to `error`; redirects would otherwise break exact target binding or risk credential/envelope forwarding.
 - Browser certificate pinning is unavailable through normal Fetch. The application-level server key pin protects this protocol but does not replace PKI/TLS validation.

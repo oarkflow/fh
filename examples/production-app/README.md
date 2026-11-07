@@ -289,15 +289,16 @@ Docker, or systemd credentials. Never commit `.env`; it is ignored by Git.
 
 ## Key generation
 
-Generate the X25519 transport key, Ed25519 signing seed, and corresponding
-public WASM pins:
+Generate the X25519 transport key, Ed25519 signing seed, and their public
+values:
 
 ```sh
 make keys
 ```
 
 The output contains private material. Put the `APP_*` private values in your
-secret manager and retain the `WASM_TRUSTED_*` public values for the WASM build.
+secret manager. The public values are served to the authenticated browser by
+`/secure-config.json`; they are not compiled into WASM.
 Generate independent session and operations secrets, for example:
 
 ```sh
@@ -310,28 +311,18 @@ explicit key IDs and a controlled deployment overlap.
 ## Secure WASM production build
 
 WASM encryption is additional application-layer protection; it does not replace
-TLS, authentication, authorization, validation, or endpoint policy. For a
-production build, provide the complete immutable public trust bundle:
+TLS, authentication, authorization, validation, or endpoint policy. Build the
+WASM bundle with `make wasm`; no server key is linked into the binary. After
+login, `/secure-config.json` supplies the runtime X25519 transport pin, response
+signing public key, asset SRI values, and a one-use device-registration grant.
+The browser verifies the WASM and runtime SRI before use. The application page
+and configuration endpoint are trusted through HTTPS/Web PKI. If those are not
+an adequate trust anchor, supply pins and asset integrity through a separately
+authenticated channel. A compromised page can replace both its WASM and the
+configuration it gives to that WASM.
 
-```sh
-export WASM_TRUSTED_ORIGIN='https://app.example.com'
-export WASM_TRUSTED_TRANSPORT_KEY='<X25519 public value from make keys>'
-export WASM_TRUSTED_TRANSPORT_KEY_ID='app-transport-v1'
-export WASM_TRUSTED_RESPONSE_KEY='<Ed25519 public value from make keys>'
-export WASM_TRUSTED_RESPONSE_KEY_ID='app-response-v1'
-make wasm
-```
-
-This embeds the origin and both public keys/key IDs in `securefetch.wasm` and
-regenerates `asset-manifest.json`. The server validates the manifest at startup;
-the browser verifies WASM and runtime SRI before use. Publish the artifact hash
-through an independently authenticated release channel. Never embed private
-keys, session secrets, passwords, database credentials, or bearer tokens in
-JavaScript or WASM.
-
-The checked-in WASM bundle is for loopback development. Production refuses a
-runtime-only trust configuration: the trust anchors must be compiled into the
-artifact.
+Never embed private keys, session secrets, passwords, database credentials, or
+bearer tokens in JavaScript or WASM.
 
 ## Database
 
@@ -358,7 +349,7 @@ runtime data, readiness errors, and metrics reveal operational details.
 - Set `APP_ENV=production` and an HTTPS `APP_ORIGIN`.
 - Store all private values in a secret manager and expose them with `_FILE`.
 - Use persistent transport/signing keys; ephemeral keys are development-only.
-- Build the WASM artifact with all five matching `WASM_TRUSTED_*` values.
+- Build the WASM artifact without server keys; serve runtime pins from the authenticated configuration endpoint.
 - Terminate TLS 1.3 at FH or a correctly configured trusted reverse proxy.
 - Replace the demonstration password login with OIDC/WebAuthn or your identity
   system, and implement application-specific roles and authorization rules.
@@ -387,7 +378,7 @@ go vet ./...
 The included grant test verifies that registration grants are one-shot and
 session-bound. Add tests for every business authorization rule, request schema,
 database transaction, and failure path. Browser integration tests should verify
-SRI loading, embedded trust, device registration, encrypted requests, signed
+SRI loading, runtime trust pins, device registration, encrypted requests, signed
 responses, logout/revocation, replay rejection, and key rotation.
 
 ## Security boundaries

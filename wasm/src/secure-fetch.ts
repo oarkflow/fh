@@ -21,8 +21,6 @@ export interface SecureFetchConfig {
   responseSigningKeyID?: string;
   /** Fail closed during initialization unless response-signing pins are set. */
   requireResponseSignature?: boolean;
-  /** Require the origin and both public keys to be embedded in the WASM build. */
-  requireEmbeddedTrust?: boolean;
   /** Development-only escape hatch. Production clients should always pin. */
   allowUnpinnedServerKey?: boolean;
   clientBuild?: string;
@@ -48,7 +46,7 @@ export interface SecureSessionInfo {
   sessionId?: string;
   expiresAt?: number;
   sequence?: number;
-  trustMode?: "embedded" | "loopback-development";
+  trustMode?: "runtime-pinned" | "loopback-development";
 }
 
 export type SecureFetchBody =

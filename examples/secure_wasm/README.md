@@ -43,36 +43,11 @@ export FH_EXAMPLE_PASSWORD_FILE='/run/secrets/fh-bootstrap-password'
 
 Terminate TLS 1.3 at a correctly configured reverse proxy or replace `Listen` with `ListenTLS`. Store the transport key and session secret in a secret manager or KMS; never commit either value. Replace the demonstration login, in-memory stores, and transfer handler with real authentication, distributed atomic replay storage, encrypted session-key storage, authorization, idempotency, and transactional persistence.
 
-For a real application, pin both the X25519 transport public key and Ed25519 response-signing public key in a trusted client build or separately signed configuration. The example obtains them from `/secure-config.json` to remain runnable; pins obtained over the same potentially intercepted connection are not independent trust anchors.
+The WASM binary contains no server public key or private key. The example supplies the public X25519 transport pin and response-signing key at runtime from `/secure-config.json` after login. This is appropriate when the browser trusts the HTTPS application origin that serves both the config and the WASM. If the app and API have separate trust domains, deliver the API pins through an independently authenticated application configuration channel. A key returned by the API being pinned is not independent proof of that API's identity.
 
-## Trusted production build
+The runtime pin authenticates the server handshake; it does not authenticate the WASM bytes. Protect the application page, JS loader, and WASM artifact with HTTPS, a restrictive CSP, immutable asset names and SRI values. Where the application origin itself is not a sufficient trust anchor, authenticate the asset manifest through a separately signed release, native wrapper, managed browser extension, or equivalent channel. A compromised page can replace the WASM, its runtime configuration, and the SRI reference together; browser WASM cannot defend itself from that.
 
-Production WASM refuses to initialize without a complete build-time trust bundle. After configuring the two private keys and production origin, print the corresponding public build variables:
-
-```sh
-export FH_EXAMPLE_ORIGIN='https://app.example.com'
-export FH_SECURE_SERVER_KEY_FILE='/run/secrets/fh-transport-key'
-export FH_SECURE_SERVER_KEY_ID='secure-wasm-example-v1'
-export FH_RESPONSE_SIGNING_PRIVATE_KEY_FILE='/run/secrets/fh-response-signing-key'
-export FH_RESPONSE_SIGNING_KEY_ID='secure-wasm-response-2026-01'
-
-go run ./examples/secure_wasm -print-wasm-trust
-```
-
-Supply all five printed public values to the build:
-
-```sh
-make wasm \
-  WASM_TRUSTED_ORIGIN='https://app.example.com' \
-  WASM_TRUSTED_TRANSPORT_KEY='<printed X25519 public key>' \
-  WASM_TRUSTED_TRANSPORT_KEY_ID='secure-wasm-example-v1' \
-  WASM_TRUSTED_RESPONSE_KEY='<printed Ed25519 public key>' \
-  WASM_TRUSTED_RESPONSE_KEY_ID='secure-wasm-response-2026-01'
-```
-
-The production client rejects an absent or partial embedded bundle, a different runtime origin, substituted keys or key IDs, missing signatures, altered ciphertext, and negotiation downgrade. `secure.sessionInfo().trustMode` must report `embedded`.
-
-Sign the generated release and pin `examples/secure_wasm/wasm/securefetch.wasm` using the generated SRI value from an independently trusted application release, native wrapper, managed browser extension, TUF/Sigstore metadata, or equivalent deployment channel. Serving the WASM hash and WASM bytes through the same intercepted first connection does not establish trust.
+Check `secure.sessionInfo().trustMode`: production with runtime supplied pins reports `runtime-pinned`; unpinned loopback development reports `loopback-development`.
 
 ## Security flow
 

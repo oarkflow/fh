@@ -100,7 +100,6 @@ func (s *grantStore) consume(raw, principal, sessionID string) bool {
 func main() {
 	generateKey := flag.Bool("generate-key", false, "print a base64url X25519 server private key and exit")
 	generateSigningKey := flag.Bool("generate-signing-key", false, "print an RFC 9421 Ed25519 private seed and public key and exit")
-	printWASMTrust := flag.Bool("print-wasm-trust", false, "print public build-time WASM trust variables from configured private keys and exit")
 	flag.Parse()
 	if *generateKey {
 		key, err := securetransport.GenerateServerPrivateKey()
@@ -122,10 +121,6 @@ func main() {
 		privateValue, _ := responseprotocol.EncodePrivateKey(privateKey)
 		publicValue, _ := responseprotocol.EncodePublicKey(publicKey)
 		fmt.Printf("FH_RESPONSE_SIGNING_PRIVATE_KEY=%s\nFH_RESPONSE_SIGNING_PUBLIC_KEY=%s\n", privateValue, publicValue)
-		return
-	}
-	if *printWASMTrust {
-		printWASMTrustConfiguration()
 		return
 	}
 
@@ -303,7 +298,6 @@ func main() {
 			"responseSigningPublicKey": responsePublicValue,
 			"responseSigningKeyID":     responseKeyID,
 			"requireResponseSignature": true,
-			"requireEmbeddedTrust":     productionTLS,
 			"registrationToken":        grant,
 			"wasmURL":                  "/wasm/securefetch.wasm",
 			"wasmExecURL":              "/wasm/wasm_exec.js",
@@ -390,39 +384,6 @@ func loadResponseSigningKey(production bool) (ed25519.PublicKey, ed25519.Private
 	}
 	publicKey, privateKey, err := responseprotocol.GenerateKey()
 	return publicKey, privateKey, true, err
-}
-
-func printWASMTrustConfiguration() {
-	origin := strings.TrimRight(strings.TrimSpace(os.Getenv("FH_EXAMPLE_ORIGIN")), "/")
-	if origin == "" {
-		log.Fatal("FH_EXAMPLE_ORIGIN is required")
-	}
-	serverPrivateValue, err := appconfig.RequireSecretString("FH_SECURE_SERVER_KEY", "FH_SECURE_SERVER_KEY_FILE")
-	if err != nil {
-		log.Fatal(err)
-	}
-	serverPrivate, err := securetransport.DecodeServerPrivateKey(serverPrivateValue)
-	if err != nil {
-		log.Fatal(err)
-	}
-	serverPublic, err := securetransport.ServerPublicKey(serverPrivate)
-	if err != nil {
-		log.Fatal(err)
-	}
-	responsePrivateValue, err := appconfig.RequireSecretString("FH_RESPONSE_SIGNING_PRIVATE_KEY", "FH_RESPONSE_SIGNING_PRIVATE_KEY_FILE")
-	if err != nil {
-		log.Fatal(err)
-	}
-	responsePrivate, err := responseprotocol.DecodePrivateKey(responsePrivateValue)
-	if err != nil {
-		log.Fatal(err)
-	}
-	responsePublic, _ := responseprotocol.EncodePublicKey(responsePrivate.Public().(ed25519.PublicKey))
-	fmt.Printf("WASM_TRUSTED_ORIGIN=%s\n", origin)
-	fmt.Printf("WASM_TRUSTED_TRANSPORT_KEY=%s\n", base64.RawURLEncoding.EncodeToString(serverPublic[:]))
-	fmt.Printf("WASM_TRUSTED_TRANSPORT_KEY_ID=%s\n", env("FH_SECURE_SERVER_KEY_ID", "secure-wasm-example-v1"))
-	fmt.Printf("WASM_TRUSTED_RESPONSE_KEY=%s\n", responsePublic)
-	fmt.Printf("WASM_TRUSTED_RESPONSE_KEY_ID=%s\n", env("FH_RESPONSE_SIGNING_KEY_ID", "secure-wasm-response-2026-01"))
 }
 
 func loadSessionSecret(production bool) ([]byte, error) {

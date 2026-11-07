@@ -50,6 +50,7 @@ options rather than a `Config` value.
 | [Shared State](shared-state.md) | Namespaced provider/store interfaces, lifecycle, built-in providers and distributed adapter contract |
 | [Security](security.md) | TLS/mTLS, read budgets, trusted-proxy identity, message integrity, HTTP QUERY |
 | [Secure WASM Transport](secure-wasm-transport.md) | Device-bound encrypted Fetch transport for browser/WASM clients |
+| [WASM Request/Response Flow](../wasm/WASM.md) | End-to-end browser startup, device/session handshake, v1 envelopes, v2 streaming, and FH middleware flow |
 | [RFC 9421 Response Signatures](rfc9421-response-signatures.md) | Nonce-bound Ed25519 response integrity for Go and browser clients |
 | [Merkle Audit](merkle_audit.md) | Tamper-evident audit checkpoints via Merkle tree |
 | [SLO Tracking](slo.md) | Route-level availability/latency SLOs and burn-rate alerts |
