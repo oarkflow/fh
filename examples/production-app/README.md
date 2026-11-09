@@ -47,7 +47,7 @@ values:
 
 | Setting | Default |
 |---|---|
-| Application URL | `http://localhost:8080` |
+| Application URL | `http://localhost:8080` (bound to loopback) |
 | Username | `admin` |
 | Password | `change-me-in-development` |
 | Operations bearer token | `change-me-ops-token` |
@@ -56,7 +56,9 @@ values:
 | Response-signing key | Ephemeral; regenerated whenever the server starts |
 
 These values are public development conveniences, not production secrets.
-Change them in `.env` before sharing the server or binding it beyond loopback.
+The server binds to `127.0.0.1` by default. To share it on a trusted LAN,
+set `APP_ADDR` to the intended interface and set `APP_ORIGIN` to an explicit
+development origin; avoid wildcard interfaces on untrusted networks.
 
 ### Start and sign in
 
@@ -193,6 +195,78 @@ make frontend  # build web/public/app.js + app.css from web/frontend/src (requir
 └── run.sh                          optional convenience wrapper for `go run ./cmd/server`
 ```
 
+## Feature and source guide
+
+### What the starter provides
+
+- **Browser control center:** sign-in, session restore, profile loading, secure
+  API console, notes list/create/update/delete, activity log, and session status.
+- **Authentication:** one configured starter account, rotating server-side
+  session IDs at login, HttpOnly/SameSite cookies, logout, and session expiry.
+- **Authorization:** route-level RBAC from `policy.authz` plus per-note owner
+  checks, so users can only change their own records unless policy grants an
+  administrative role.
+- **Encrypted API transport:** `/api/*` requires the WASM client, registered
+  device, authenticated session, replay protection, and a signed response.
+- **Abuse detection:** TCPGuard evaluates requests, failed logins, and note
+  creation velocity against `security/policy/tcpguard.bcl`.
+- **Operations:** public liveness and bearer-protected readiness, health,
+  runtime, route, and metrics endpoints.
+- **Persistence:** SQLite-backed users and notes with connection pool limits,
+  foreign keys, and database readiness checks.
+- **Deployment controls:** strict origin/host checks, CSP and browser security
+  headers, rate/body/time limits, TLS early-data rejection, audit logging,
+  graceful shutdown, production secret requirements, and pinned WASM trust.
+
+The starter login is a demonstration credential flow. Replace it with your
+identity provider, add application-specific validation and authorization, and
+review deployment settings before handling real user data.
+
+### Application function map
+
+| File | Functions and responsibility |
+|---|---|
+| `cmd/server/main.go` | `main` assembles config, database, policies, FH middleware, secure transport, response signing, routes, and shutdown. `transportKey` and `signingKey` load or generate development keys. `operationAuth` protects operations routes. `skipStaticAndOps` excludes non-business paths from TCPGuard. `constantEqual` compares credentials/tokens in constant time. `hstsAge` selects production HSTS duration. `generateTransportKey` and `generateSigningKey` print key material for setup. |
+| `internal/config/config.go` | `Load` validates environment and secrets, resolves origin/host policy, and applies safe defaults. `positiveInt` validates numeric limits; `env` reads a value or fallback; `parseOriginPolicy` validates origins and derives allowed hosts/origins; `developmentLANHosts` discovers LAN names for explicit `:port` development opt-in; `uniqueStrings` normalizes and deduplicates policy values. |
+| `internal/config/dotenv.go` | `loadDotEnv` loads local development settings without overriding real environment variables. |
+| `internal/auth/auth.go` | `Login` validates the starter credential, loads/seeds the role, and regenerates the session. `Principal` restores the authenticated FH principal; `Require` rejects anonymous calls. `PolicyMiddleware` applies route RBAC. `AuthorizeOwned` applies row-level owner policy. `DecodeLogin` validates login JSON; `rolesFromSession` normalizes decoded session roles; `secretEqual` compares secrets in constant time. |
+| `internal/auth/grants.go` | `NewGrantStore` creates the in-memory grant store. `Issue` creates a short-lived one-use grant bound to principal and session. `Consume` validates and burns a grant to prevent replay. |
+| `internal/httpapi/routes.go` | `Register` registers assets, auth, secure bootstrap, API routes, and health. `registerNoteRoutes` implements paginated, owner-scoped CRUD and anomaly checks. `notesPageLimit` and `notesPage` clamp pagination input. `newID` creates random IDs. `renderIndex` securely renders the page and appends the fixed app loader. `loadManifest` validates WASM integrity metadata. `sameOrigin` validates browser request origin; `requestOrigin` resolves the request origin with a configured fallback. |
+| `internal/database/database.go` | `DefaultPoolConfig` sets bounded pool defaults. `Open` opens with defaults; `OpenWithPool` opens and migrates with explicit limits. `migrate` creates tables/indexes. `ensureSQLiteDirectory` creates the local database directory. `Close` releases the DB; `Ping` checks readiness. `EnsureUser` creates/loads the account role; `RoleForUser` reads the role. |
+| `internal/security/guard.go` | `New` loads TCPGuard policies and configures in-memory detection. `Middleware` evaluates requests. `EmitAuthEvent` reports login outcomes. `EmitBusinessEvent` reports business actions. `setDecisionHeaders` exposes decision metadata; `log` forwards structured decisions; `toHTTPRequest` adapts FH request context for TCPGuard. |
+
+### Generated file guide
+
+| Path | Purpose |
+|---|---|
+| `go.mod`, `go.sum` | Go module identity and pinned server dependencies. |
+| `.env.example`, `.env` | Documented defaults and private local settings; `.env` is created with mode `0600` and ignored by Git. |
+| `.gitignore` | Excludes secrets, database files, frontend build output, and local binaries. |
+| `Makefile` | `run`, `test`/`check`, key generation, frontend build, secure-fetch lint, and production WASM build tasks. |
+| `run.sh` | Loads no extra configuration; changes to project root and runs the server. |
+| `cmd/server/main.go` | Executable entry point and middleware/lifecycle assembly. |
+| `internal/auth/` | Session login, principal extraction, authorization bridges, and one-use bootstrap grants. |
+| `internal/config/` | Environment, dotenv, secrets, and origin policy validation. |
+| `internal/database/` | SQLite schema, bounded connection pool, and typed user/note repository. |
+| `internal/httpapi/routes.go` | HTTP route handlers, browser bootstrap, API examples, and asset manifest checks. |
+| `internal/security/guard.go` | TCPGuard integration for request and business-event abuse detection. |
+| `policy.authz` | Declarative role and note-owner authorization policy. |
+| `security/policy/tcpguard.bcl` | Declarative credential abuse, scanning, and business-velocity detection rules. |
+| `templates/index.html`, `web/templates/index.html` | SPL source for the browser shell (kept in both compatibility locations). |
+| `index.html` | Static frontend entrypoint used by Lithe during development/build. |
+| `web/frontend/` | Separately maintained Lithe frontend cloned by `fh-init`; consult its README for component, state, and frontend-function details. The security check ensures protected requests use `src/lib/secure-client.ts`. |
+| `web/wasm/secure-fetch.js` | Browser API for trust-checked WASM secure transport. |
+| `web/wasm/client.js` | Optional Axios-style request client and interceptors over a supplied transport. |
+| `web/wasm/index.js`, `body.js`, `errors.js`, `storage.js` | WASM package exports, body handling, typed protocol errors, and device-key storage. |
+| `web/wasm/securefetch.wasm`, `wasm_exec.js` | Secure protocol implementation and its matching TinyGo runtime glue. |
+| `web/wasm/asset-manifest.json` | SHA-256 integrity values checked before browser loading. |
+| `web/wasm/README.md` | Browser transport API, build, key, rotation, and troubleshooting guide. |
+| `internal/auth/grants_test.go`, `internal/config/origin_test.go` | Tests for one-shot grant binding and origin-policy boundaries. |
+| `web/public/`, `web/frontend/node_modules/`, `data/` | Generated/local output; created as needed and not committed. |
+
+The `.tmpl` suffix belongs to the source repository. `fh-init` removes that
+suffix, substitutes `github.com/oarkflow/fh/examples/production-app`, and writes the rendered project files.
+
 ## Security stack and ordering
 
 The server enables the following layers in deliberate order:
@@ -238,6 +312,10 @@ that tag, and CSP restricts scripts to the application origin.
 | `POST` | `/__fh/secure/v1/session` | Registered device | Establish encrypted transport session |
 | `GET` | `/api/me` | Encrypted + authenticated + RBAC | Return bound principal information |
 | `POST` | `/api/echo` | Encrypted + authenticated + RBAC | Validated JSON example |
+| `GET` | `/api/notes?page=&limit=` | Encrypted + authenticated + RBAC | List the caller's notes with pagination |
+| `POST` | `/api/notes` | Encrypted + authenticated + RBAC | Create a note owned by the caller |
+| `PUT` | `/api/notes/:id` | Encrypted + authenticated + owner policy | Update an owned note (or one allowed by admin policy) |
+| `DELETE` | `/api/notes/:id` | Encrypted + authenticated + owner policy | Delete an owned note (or one allowed by admin policy) |
 | `GET` | `/_ops/metrics` | Operations bearer token | JSON/Prometheus request metrics |
 | `GET` | `/_ops/health`, `/_ops/live`, `/_ops/ready` | Operations bearer token | Detailed health/readiness |
 | `GET` | `/_ops/runtime`, `/_ops/routes` | Operations bearer token | Runtime and route diagnostics |
@@ -256,8 +334,8 @@ binary unchanged.
 | Variable | Development default | Description |
 |---|---|---|
 | `APP_ENV` | `development` | Only this exact value enables development concessions; every other value is production |
-| `APP_ADDR` | `:8080` | Listen address; the development default accepts local and LAN connections |
-| `APP_ORIGIN` | `:8080` | Browser-origin policy; production requires one explicit absolute HTTPS origin |
+| `APP_ADDR` | `127.0.0.1:8080` | Listen address; loopback by default |
+| `APP_ORIGIN` | `http://localhost:8080` | Browser-origin policy; production requires one explicit absolute HTTPS origin |
 | `APP_DATABASE_URL` | `file:data/app.db?...` | SQLite DSN |
 | `APP_SESSION_SECRET` / `_FILE` | development value | Base64url value decoding to at least 32 random bytes |
 | `APP_LOGIN_USER` | `admin` | Starter login identity |
@@ -271,9 +349,11 @@ binary unchanged.
 | `APP_MAX_BODY_BYTES` | `1048576` | Global request body limit |
 | `APP_RATE_LIMIT` | `120` | Requests per client IP per minute |
 
-Development origin shorthand is intentionally constrained by port:
+Development origin policy is intentionally explicit:
 
-- `APP_ORIGIN=:8080` accepts `localhost`, `127.0.0.1`, IPv6 loopback, the
+- `APP_ORIGIN=http://localhost:8080` accepts `localhost`, `127.0.0.1`, and
+  IPv6 loopback only.
+- `APP_ORIGIN=:8080` is an opt-in convenience that accepts loopback, the
   machine hostname, and assigned LAN IP addresses on port 8080.
 - `APP_ORIGIN=localhost:8080` and `APP_ORIGIN=127.0.0.1:8080` accept both
   loopback spellings (and IPv6 loopback), but do not enable LAN hosts.
@@ -289,16 +369,15 @@ Docker, or systemd credentials. Never commit `.env`; it is ignored by Git.
 
 ## Key generation
 
-Generate the X25519 transport key, Ed25519 signing seed, and their public
-values:
+Generate the X25519 transport key, Ed25519 signing seed, and corresponding
+public WASM pins:
 
 ```sh
 make keys
 ```
 
 The output contains private material. Put the `APP_*` private values in your
-secret manager. The public values are served to the authenticated browser by
-`/secure-config.json`; they are not compiled into WASM.
+secret manager and retain the `WASM_TRUSTED_*` public values for the WASM build.
 Generate independent session and operations secrets, for example:
 
 ```sh
@@ -311,18 +390,28 @@ explicit key IDs and a controlled deployment overlap.
 ## Secure WASM production build
 
 WASM encryption is additional application-layer protection; it does not replace
-TLS, authentication, authorization, validation, or endpoint policy. Build the
-WASM bundle with `make wasm`; no server key is linked into the binary. After
-login, `/secure-config.json` supplies the runtime X25519 transport pin, response
-signing public key, asset SRI values, and a one-use device-registration grant.
-The browser verifies the WASM and runtime SRI before use. The application page
-and configuration endpoint are trusted through HTTPS/Web PKI. If those are not
-an adequate trust anchor, supply pins and asset integrity through a separately
-authenticated channel. A compromised page can replace both its WASM and the
-configuration it gives to that WASM.
+TLS, authentication, authorization, validation, or endpoint policy. For a
+production build, provide the complete immutable public trust bundle:
 
-Never embed private keys, session secrets, passwords, database credentials, or
-bearer tokens in JavaScript or WASM.
+```sh
+export WASM_TRUSTED_ORIGIN='https://app.example.com'
+export WASM_TRUSTED_TRANSPORT_KEY='<X25519 public value from make keys>'
+export WASM_TRUSTED_TRANSPORT_KEY_ID='app-transport-v1'
+export WASM_TRUSTED_RESPONSE_KEY='<Ed25519 public value from make keys>'
+export WASM_TRUSTED_RESPONSE_KEY_ID='app-response-v1'
+make wasm
+```
+
+This embeds the origin and both public keys/key IDs in `securefetch.wasm` and
+regenerates `asset-manifest.json`. The server validates the manifest at startup;
+the browser verifies WASM and runtime SRI before use. Publish the artifact hash
+through an independently authenticated release channel. Never embed private
+keys, session secrets, passwords, database credentials, or bearer tokens in
+JavaScript or WASM.
+
+The checked-in WASM bundle is for loopback development. Production refuses a
+runtime-only trust configuration: the trust anchors must be compiled into the
+artifact.
 
 ## Database
 
@@ -349,7 +438,7 @@ runtime data, readiness errors, and metrics reveal operational details.
 - Set `APP_ENV=production` and an HTTPS `APP_ORIGIN`.
 - Store all private values in a secret manager and expose them with `_FILE`.
 - Use persistent transport/signing keys; ephemeral keys are development-only.
-- Build the WASM artifact without server keys; serve runtime pins from the authenticated configuration endpoint.
+- Build the WASM artifact with all five matching `WASM_TRUSTED_*` values.
 - Terminate TLS 1.3 at FH or a correctly configured trusted reverse proxy.
 - Replace the demonstration password login with OIDC/WebAuthn or your identity
   system, and implement application-specific roles and authorization rules.
@@ -378,7 +467,7 @@ go vet ./...
 The included grant test verifies that registration grants are one-shot and
 session-bound. Add tests for every business authorization rule, request schema,
 database transaction, and failure path. Browser integration tests should verify
-SRI loading, runtime trust pins, device registration, encrypted requests, signed
+SRI loading, embedded trust, device registration, encrypted requests, signed
 responses, logout/revocation, replay rejection, and key rotation.
 
 ## Security boundaries

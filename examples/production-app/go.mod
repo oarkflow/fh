@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/oarkflow/authz v0.0.6
 	github.com/oarkflow/config v0.0.1
-	github.com/oarkflow/fh v0.0.24
+	github.com/oarkflow/fh v0.0.29
 	github.com/oarkflow/fh-contrib v0.0.4
 	github.com/oarkflow/squealx v0.0.78
 	github.com/oarkflow/tcpguard v0.0.16

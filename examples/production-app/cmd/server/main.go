@@ -12,14 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oarkflow/fh"
-	contriblogger "github.com/oarkflow/fh-contrib/logger"
-	authzmw "github.com/oarkflow/fh-contrib/mw/authz"
 	appauth "github.com/oarkflow/fh/examples/production-app/internal/auth"
 	appconfig "github.com/oarkflow/fh/examples/production-app/internal/config"
 	appdb "github.com/oarkflow/fh/examples/production-app/internal/database"
 	apphttp "github.com/oarkflow/fh/examples/production-app/internal/httpapi"
 	appsecurity "github.com/oarkflow/fh/examples/production-app/internal/security"
+	"github.com/oarkflow/fh"
+	contriblogger "github.com/oarkflow/fh-contrib/logger"
+	authzmw "github.com/oarkflow/fh-contrib/mw/authz"
 	"github.com/oarkflow/fh/mw/auditlog"
 	"github.com/oarkflow/fh/mw/bodylimit"
 	"github.com/oarkflow/fh/mw/cors"
@@ -261,7 +261,7 @@ func generateTransportKey() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("APP_SECURE_TRANSPORT_KEY=%s\nAPP_SECURE_TRANSPORT_PUBLIC_KEY=%s\n", value, base64.RawURLEncoding.EncodeToString(public[:]))
+	fmt.Printf("APP_SECURE_TRANSPORT_KEY=%s\nWASM_TRUSTED_TRANSPORT_KEY=%s\n", value, base64.RawURLEncoding.EncodeToString(public[:]))
 }
 func generateSigningKey() {
 	public, private, err := responseprotocol.GenerateKey()
@@ -270,5 +270,5 @@ func generateSigningKey() {
 	}
 	privateValue, _ := responseprotocol.EncodePrivateKey(private)
 	publicValue, _ := responseprotocol.EncodePublicKey(public)
-	fmt.Printf("APP_RESPONSE_SIGNING_PRIVATE_KEY=%s\nAPP_RESPONSE_SIGNING_PUBLIC_KEY=%s\n", privateValue, publicValue)
+	fmt.Printf("APP_RESPONSE_SIGNING_PRIVATE_KEY=%s\nWASM_TRUSTED_RESPONSE_KEY=%s\n", privateValue, publicValue)
 }

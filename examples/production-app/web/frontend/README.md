@@ -55,6 +55,57 @@ src/
   supports nested/parallel routes, typed loaders, and lazy route components;
   see the package README's "Complete router example".
 
+## Frontend function guide
+
+### App flow and state
+
+| Function or state | File | Responsibility |
+|---|---|---|
+| `App` | `src/app.tsx` | Starts session restoration and renders checking, sign-in, or authenticated dashboard phases. |
+| `restoreSession` | `src/state/session.ts` | Reads the web session, establishes secure transport when logged in, and records restore status. |
+| `signIn` | `src/state/session.ts` | Authenticates through the same-origin login API, then creates the secure device session. |
+| `signOut` | `src/state/session.ts` | Revokes secure transport, destroys the web session, and clears local profile state. |
+| `loadProfile` | `src/state/session.ts` | Loads `/api/me` through the encrypted client. |
+| `sendEcho` | `src/state/session.ts` | Sends the typed sample payload through encrypted `POST /api/echo`. |
+| `selectPanel` | `src/state/session.ts` | Changes the active dashboard panel. |
+| `record` | `src/state/session.ts` | Adds a bounded activity entry for user-visible actions and errors. |
+| `phase`, `userID`, `profile`, `lastEcho`, `secureInfo`, `activity`, `formError`, `busy`, `activePanel` | `src/state/session.ts` | Reactive application state; components subscribe to these signals. `isAuthenticated` and `isChecking` are derived computed values. |
+
+### HTTP and secure transport
+
+| Function or API | File | Responsibility |
+|---|---|---|
+| `requestJSON` | `src/lib/http.ts` | Performs same-origin JSON calls for login/session/bootstrap endpoints. |
+| `parseJSONResponse` | `src/lib/http.ts` | Parses responses, returns validated data, and turns HTTP or shape errors into `ApiError`. |
+| `authApi.session`, `authApi.login`, `authApi.logout`, `authApi.secureConfig` | `src/lib/secure-client.ts` | Plain same-origin authentication and secure-bootstrap requests. |
+| `ensureSecureSession` | `src/lib/secure-client.ts` | Loads the trusted WASM bridge, registers the device, and opens an encrypted session. |
+| `secureSessionInfo`, `hasSecureSession` | `src/lib/secure-client.ts` | Expose safe session status to the UI. |
+| `revokeSecureSession` | `src/lib/secure-client.ts` | Revokes the active secure transport session during logout. |
+| `secureApi.me`, `secureApi.echo` | `src/lib/secure-client.ts` | Typed encrypted API calls; protected calls must be added here rather than using plain Fetch. |
+| `deviceLabel` | `src/lib/secure-client.ts` | Produces a non-secret browser label for device registration. |
+| `loadWasmBridge` | `src/lib/wasm-bridge.ts` | Dynamically imports the unbundled, integrity-checked `/wasm/index.js` API. |
+| `resolve` | `src/lib/reactive.ts` | Normalizes a signal, getter, or plain value passed to a reusable component. |
+| `describeError`, `isRecord`, `isStringArray`, `isSessionStatus`, `isSecureBootstrapConfig`, `isProfileResponse`, `isEchoResponse`, `isLoginResponse`, `isEmptyResponse` | `src/lib/types.ts` | Formats errors and validates untrusted JSON shapes before data reaches application state. |
+
+### Components and event handlers
+
+| Function | File | Responsibility |
+|---|---|---|
+| `LoginPanel`, `handleSubmit` | `src/features/auth/LoginPanel.tsx` | Presents the sign-in form and submits credentials to `signIn`. |
+| `DashboardPanels` | `src/features/dashboard/DashboardPanels.tsx` | Selects the overview, secure API, or activity panel. |
+| `ProfileCard` | `src/features/dashboard/ProfileCard.tsx` | Shows the authenticated profile and triggers profile loading. |
+| `SessionCard` | `src/features/dashboard/SessionCard.tsx` | Shows secure-session status and transport details safe for display. |
+| `ApiConsole`, `submit` | `src/features/dashboard/ApiConsole.tsx` | Sends the sample encrypted request and displays its response. |
+| `ActivityLog`, `timeLabel` | `src/features/dashboard/ActivityLog.tsx` | Displays recent actions and formats their timestamps. |
+| `AppShell`, `Sidebar`, `Topbar` | `src/components/layout/` | Composes the signed-in page frame, panel navigation, and session controls. |
+| `Button`, `Card`, `Badge`, `Alert`, `Spinner`, `StatTile`, `CodeBlock` | `src/components/ui/` | Reusable presentation components with typed props. |
+| `ThemeEffect`, `ThemeToggle`, `preferredTheme`, `toggle` | `src/components/ui/ThemeToggle.tsx` | Loads and persists the light/dark preference and toggles the theme. |
+
+Response validators are deliberate: secure transport authenticates response
+origin and integrity, while the frontend validators separately enforce each
+JSON shape before the UI trusts it. Activity entries are diagnostic UI state;
+security audit records belong on the server.
+
 ## Commands
 
 ```sh

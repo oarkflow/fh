@@ -154,14 +154,7 @@ export async function loadDevice() {
     }
     return { id: id.slice(), publicKey: publicKey.slice(), name: record.name };
 }
-let bridgeAuthToken;
-export function setBridgeAuthToken(token) {
-    bridgeAuthToken = token;
-}
-export async function signClientHello(data, token) {
-    if (bridgeAuthToken !== undefined && token !== bridgeAuthToken) {
-        throw new Error("FH secure storage signing: unauthorized token");
-    }
+export async function signClientHello(data) {
     if (!validClientHello(data))
         throw new Error("FH secure signing accepts only a versioned ClientHello transcript");
     const record = await signingKeyRecord();
@@ -183,11 +176,7 @@ export async function clearDevice() {
         deleteStore(KEY_STORE, LEGACY_WRAP_KEY_ID),
     ]);
 }
-export function installSecureStorageBridge(token) {
-    if (token)
-        bridgeAuthToken = token;
-    if (globalThis.__fhSecureStorage)
-        return;
+export function installSecureStorageBridge() {
     Object.defineProperty(globalThis, "__fhSecureStorage", {
         configurable: false,
         enumerable: false,
