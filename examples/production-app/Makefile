@@ -31,7 +31,7 @@ keys:
 # web/frontend/src. Requires Node.js 22.6+.
 frontend: check-secure-fetch
 	@command -v $(NPM) >/dev/null 2>&1 || (echo "npm was not found on PATH. Install Node.js 22.6+." >&2; exit 1)
-	cd web/frontend && $(NPM) install && $(NPM) run build
+	cd web/frontend && $(NPM) ci && $(NPM) run build
 
 # TinyGo pins a maximum supported Go version below what this project's
 # go.mod requires (0.41.x supports Go 1.19-1.26), so `go` on PATH usually

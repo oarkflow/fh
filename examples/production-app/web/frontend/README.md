@@ -7,7 +7,7 @@ renders into the `#app` element of `web/templates/index.html`, which the Go
 server owns; this directory only produces `web/public/app.js` and
 `web/public/app.css`.
 
-Neither file is checked in - `web/public/` is build output. Run `npm install
+Neither file is checked in - `web/public/` is build output. Run `npm ci
 && npm run build` here (or `make frontend` from the project root) before the
 server has anything to serve at `/assets/*`, and again after changing
 anything under `src/`.
@@ -109,7 +109,7 @@ security audit records belong on the server.
 ## Commands
 
 ```sh
-npm install        # fetches @oarkflow/lithe from the registry (needs network)
+npm ci             # installs the locked @oarkflow/lithe version (needs network)
 npm run dev         # lithe dev . - local dev server with HMR
 npm run build       # lithe build . --bundle=single --out=../public
 npm run check        # structural lint (islands, a11y, reachability, ...)

@@ -125,7 +125,7 @@ temporarily-running instance of the generated app:
 fh-init -module github.com/oarkflow/fh/examples/production-app -dir . -force -verify
 ```
 
-It builds the frontend (`npm install && npm run build`, producing
+It builds the frontend (`npm ci && npm run build`, producing
 `web/public/app.js` + `app.css`) and the server, boots the server on a free
 loopback port using the credentials in `.env`, works through the same
 checklist below (plus the static assets and WASM transport bundle every page
@@ -200,7 +200,8 @@ make frontend  # build web/public/app.js + app.css from web/frontend/src (requir
 ### What the starter provides
 
 - **Browser control center:** sign-in, session restore, profile loading, secure
-  API console, notes list/create/update/delete, activity log, and session status.
+  API console, activity log, and session status. The API includes note CRUD
+  endpoints for callers built on the secure client.
 - **Authentication:** one configured starter account, rotating server-side
   session IDs at login, HttpOnly/SameSite cookies, logout, and session expiry.
 - **Authorization:** route-level RBAC from `policy.authz` plus per-note owner
@@ -222,18 +223,290 @@ The starter login is a demonstration credential flow. Replace it with your
 identity provider, add application-specific validation and authorization, and
 review deployment settings before handling real user data.
 
-### Application function map
+### Change guide: where should I make a change?
 
-| File | Functions and responsibility |
+Use this section as the task-oriented entry point. Most changes cross more than
+one layer: route behavior belongs in `internal/httpapi/routes.go.tmpl`, policy
+belongs in `policy.authz.tmpl` or `security/policy/tcpguard.bcl.tmpl`, persisted
+state belongs in `internal/database/database.go.tmpl`, and browser behavior
+belongs in the separately versioned `web/frontend` project. Update all layers
+that enforce the same rule; hiding a button in the browser is never access
+control.
+
+#### 1. How do I change authentication or add an identity provider?
+
+For the demonstration username/password flow, start at
+`internal/httpapi/routes.go.tmpl` (`POST /auth/login`) and
+`internal/auth/auth.go.tmpl` (`DecodeLogin`, `Login`, `Principal`). `DecodeLogin`
+owns the request shape; `Login` compares the configured demo credential,
+loads the account's role, stores the identity/role in the session, and rotates
+the session ID. `Principal` reconstructs the FH principal from that session.
+`internal/config/config.go.tmpl` loads the demo credentials and session secret.
+
+For OIDC, WebAuthn, or another real identity provider, replace the credential
+validation in `Login` with provider callback/token validation, but keep the
+same downstream contract: establish a server-side session only after provider
+validation, rotate its ID, store a stable internal subject ID and roles, and
+derive `fh.Principal` server-side. Add CSRF/state/nonce and callback-origin
+checks appropriate to the provider. Do not accept roles, user IDs, or an
+“authenticated” flag supplied by the browser. Update the frontend auth calls
+and add tests for valid, invalid, expired, replayed, and cross-site flows.
+
+For login/session/logout behavior, edit the matching handlers in
+`Register`: `/auth/session` reports current server session state, `/auth/login`
+validates same origin and credentials, `/auth/logout` destroys the session,
+and `/secure-config.json` issues the secure transport bootstrap grant. Preserve
+cookie flags, no-store behavior, grant binding, and secure-session revocation
+when changing logout or bootstrap.
+
+#### 2. How do I add or change application functionality?
+
+Add the HTTP endpoint and request contract in `Register` or a focused helper
+near `registerNoteRoutes` in `internal/httpapi/routes.go.tmpl`. Decide the
+method, path, accepted content type, maximum body size, validation rules,
+response shape, and error codes first. Business endpoints should normally be
+under `/api/*`, so secure transport, authentication, and route authorization
+apply. Add database calls through a repository in `internal/database`, and
+add abuse signals through `Guard.EmitBusinessEvent` when the operation can be
+automated or has a meaningful rate/volume risk.
+
+Update `policy.authz.tmpl` for the route permission, then add row-level checks
+inside the handler when authorization depends on a database record's owner or
+state. Update `web/frontend` API types/client/state/panel if the browser uses
+the new capability. Document the route in the Routes table, and add handler,
+authorization, validation, persistence, and browser integration tests.
+
+For notes specifically, `registerNoteRoutes` is the CRUD example: it scopes
+list reads by user, bounds pagination, checks owner policy after loading a row,
+validates titles, and emits a creation-velocity event. Reuse its patterns, not
+its note-specific schema or policy names.
+
+#### 3. How do I change the database, schema, or persistence engine?
+
+Edit `internal/database/database.go.tmpl`: add or change model structs and
+repositories, then update `migrate` and indexes in the same change. `Open` and
+`OpenWithPool` own connection setup; `ensureSQLiteDirectory` handles local
+SQLite file paths; `Ping` feeds readiness. Add a versioned migration system
+before evolving deployed schemas: the starter's `CREATE TABLE IF NOT EXISTS`
+statements only create the initial tables and do not migrate existing columns.
+
+When adding a table, define primary/foreign keys, nullability, uniqueness,
+indexes, ownership boundaries, and deletion behavior. Use parameterized
+repository operations, pass request contexts through queries, bound connection
+pools, and avoid automatic retries for non-idempotent writes. Update
+`APP_DATABASE_URL` handling/documentation and the deployment backup/restore
+instructions if the backend changes. Add migration, transaction, constraint,
+concurrency, and readiness tests. A database schema change often also needs
+updates to authz resource attributes and API response types.
+
+#### 4. How do I add monitoring, metrics, logs, tracing, or health checks?
+
+The middleware stack is assembled in `cmd/server/main.go.tmpl`. Request IDs,
+structured access logs, metrics, and audit logging are installed there. The
+operations routes are registered there too: `/_ops/*` routes are protected by
+`operationAuth`, while `/_ops/metrics` uses the FH metrics handler. Add a
+dependency/readiness probe with `app.AddHealthCheck` after the dependency is
+initialized. Keep liveness cheap and independent from downstream dependencies;
+readiness should report whether the instance can safely receive traffic.
+
+Configure output in the relevant adapter/config rather than logging secrets
+from handlers. Use request IDs for correlation, emit actionable errors without
+credentials or bodies, and keep metrics labels low-cardinality (never label by
+raw user ID, URL query, or token). Protect operational routes at both the
+bearer-token and network layers. If exporting traces or metrics to a vendor,
+add explicit configuration, shutdown/flush behavior, and tests for exporter
+failure so observability outages do not take down business requests.
+
+#### 5. How do I change roles, permissions, or resource ownership?
+
+Route-level permissions live in `policy.authz.tmpl`. `PolicyMiddleware` in
+`internal/auth/auth.go.tmpl` adapts each protected `/api` request into an authz
+subject/action/resource decision. `internal/httpapi/routes.go.tmpl` attaches
+that middleware to the `/api` group. Add a policy rule for each new action and
+resource; default to deny and verify that unrelated roles remain denied.
+
+Object ownership is checked after loading the record with `AuthorizeOwned`.
+Use this for update/delete/read-by-ID where a caller may only access their own
+row. Do not trust an owner ID from request JSON; compare against the persisted
+owner. Role assignment comes from `Store.EnsureUser` and the role stored in the
+server session. For real multi-user provisioning, define who can grant roles,
+how changes invalidate active sessions, and how administrator actions are
+audited. Add positive and negative tests for every role/action/ownership
+combination; frontend navigation is only presentation.
+
+#### 6. How do I change security headers, CORS, host/origin checks, or cookies?
+
+The FH security/CORS/fetch-metadata/early-data/session middleware and cookie
+options are in `cmd/server/main.go.tmpl`. Allowed hosts and origins are
+computed in `internal/config/config.go.tmpl` by `parseOriginPolicy` and shared
+with CORS, secure transport, and response signing. Login, logout, and bootstrap
+also call `sameOrigin` in `internal/httpapi/routes.go.tmpl`. Change these
+together when adding a hostname or deployment origin. Review CSP whenever
+adding a script, style, image, API, or third-party origin; do not loosen it to
+`*` or inline scripts just to make a frontend build work.
+
+Session cookie name, Secure, HttpOnly, SameSite, Path, and lifetime are set
+when the session manager is created in `main`. Production uses a `__Host-`
+cookie and HTTPS origin. Preserve the production requirements in `Load`; do
+not make unsafe development defaults apply outside explicit development.
+
+#### 7. How do I change encrypted API transport or browser trust?
+
+The secure transport is installed in `main`, and `/api/*` is selected by its
+`Protect` callback. Registration and session binding callbacks require the
+one-use grant, authenticated principal, and matching web session. Response
+signing is installed after secure transport so the outer ciphertext is
+signed. `/secure-config.json` in `Register` returns public pins and integrity
+values; `loadManifest` checks the checked-in WASM manifest at startup.
+
+Change the protocol only together with the matching FH WASM client/runtime,
+its API docs, generated artifact, manifest hashes, key IDs, rotation plan, and
+browser integration tests. Never put a private key in the frontend. Production
+must use persistent server private keys and a WASM artifact built with matching
+embedded public trust anchors. TLS remains required.
+
+#### 8. How do I tune abuse prevention or add a detection rule?
+
+Detection policy is in `security/policy/tcpguard.bcl.tmpl`; engine setup and
+event adapters are in `internal/security/guard.go.tmpl`. The global middleware
+uses `skipStaticAndOps` to omit static/framework paths. Failed and successful
+login events are emitted by the login route, while business actions call
+`EmitBusinessEvent`. Add facts/rules in the policy file and emit the matching
+event at the point where the server has trusted context. Decide whether a
+decision blocks the action, how clients see the response, and which structured
+event fields operators need. Keep anomaly detection separate from
+authorization: a low-risk score must never grant permission.
+
+#### 9. How do I change environment variables, secrets, or deployment behavior?
+
+Add fields/defaults/validation to `Config` and `Load` in
+`internal/config/config.go.tmpl`, add the documented value to
+`.env.example.tmpl`, and update the Configuration table here. Secret values
+should use the framework secret provider's `_FILE` option where supported;
+the loader gives process environment values precedence over `.env`. Keep
+production validation fail-closed and test malformed, missing, and boundary
+values. `loadDotEnv` is only a local convenience and must not override
+orchestrator-injected environment variables.
+
+For deployment changes, update the Production deployment checklist and
+Multi-instance deployments sections too. The in-memory session, rate limit,
+secure session, replay, nonce, and grant stores are single-process; horizontal
+scaling requires shared atomic stores and a durable device registry.
+
+#### 10. How do I change the browser interface?
+
+The frontend is a separate `lithe-boilerplate` checkout cloned by `fh-init`
+into generated projects; it is not authored by these `.tmpl` files. Follow
+`web/frontend/README.md` for component, state, API-client, and function details.
+Protected calls must go through `src/lib/secure-client.ts`; do not use plain
+Fetch for `/api/*`. After a frontend change, rebuild the single-file assets,
+run its secure-fetch check, and use `fh-init -verify` or browser integration
+tests to verify login, secure bootstrap, API behavior, and logout.
+
+#### 11. What should I update for every change?
+
+Update the implementation, its configuration/policy/docs, and tests together.
+Run `gofmt`, `go test ./...`, `go vet ./...`, the frontend secure-fetch check,
+and the runnable `fh-init -verify` workflow when the relevant toolchains are
+available. Check both allowed and denied behavior. If a change modifies
+generated template files, regenerate `examples/production-app`, review the
+diff, and verify the generated example before publishing the template.
+
+### Function-by-function reference
+
+This index covers every declared function in the Go template files, including
+the small policy-boundary tests. It describes what each function does and
+where to extend it; the source remains authoritative for exact signatures.
+
+#### `cmd/server/main.go.tmpl`
+
+| Function | Behavior and when to change it |
 |---|---|
-| `cmd/server/main.go` | `main` assembles config, database, policies, FH middleware, secure transport, response signing, routes, and shutdown. `transportKey` and `signingKey` load or generate development keys. `operationAuth` protects operations routes. `skipStaticAndOps` excludes non-business paths from TCPGuard. `constantEqual` compares credentials/tokens in constant time. `hstsAge` selects production HSTS duration. `generateTransportKey` and `generateSigningKey` print key material for setup. |
-| `internal/config/config.go` | `Load` validates environment and secrets, resolves origin/host policy, and applies safe defaults. `positiveInt` validates numeric limits; `env` reads a value or fallback; `parseOriginPolicy` validates origins and derives allowed hosts/origins; `developmentLANHosts` discovers LAN names for explicit `:port` development opt-in; `uniqueStrings` normalizes and deduplicates policy values. |
-| `internal/config/dotenv.go` | `loadDotEnv` loads local development settings without overriding real environment variables. |
-| `internal/auth/auth.go` | `Login` validates the starter credential, loads/seeds the role, and regenerates the session. `Principal` restores the authenticated FH principal; `Require` rejects anonymous calls. `PolicyMiddleware` applies route RBAC. `AuthorizeOwned` applies row-level owner policy. `DecodeLogin` validates login JSON; `rolesFromSession` normalizes decoded session roles; `secretEqual` compares secrets in constant time. |
-| `internal/auth/grants.go` | `NewGrantStore` creates the in-memory grant store. `Issue` creates a short-lived one-use grant bound to principal and session. `Consume` validates and burns a grant to prevent replay. |
-| `internal/httpapi/routes.go` | `Register` registers assets, auth, secure bootstrap, API routes, and health. `registerNoteRoutes` implements paginated, owner-scoped CRUD and anomaly checks. `notesPageLimit` and `notesPage` clamp pagination input. `newID` creates random IDs. `renderIndex` securely renders the page and appends the fixed app loader. `loadManifest` validates WASM integrity metadata. `sameOrigin` validates browser request origin; `requestOrigin` resolves the request origin with a configured fallback. |
-| `internal/database/database.go` | `DefaultPoolConfig` sets bounded pool defaults. `Open` opens with defaults; `OpenWithPool` opens and migrates with explicit limits. `migrate` creates tables/indexes. `ensureSQLiteDirectory` creates the local database directory. `Close` releases the DB; `Ping` checks readiness. `EnsureUser` creates/loads the account role; `RoleForUser` reads the role. |
-| `internal/security/guard.go` | `New` loads TCPGuard policies and configures in-memory detection. `Middleware` evaluates requests. `EmitAuthEvent` reports login outcomes. `EmitBusinessEvent` reports business actions. `setDecisionHeaders` exposes decision metadata; `log` forwards structured decisions; `toHTTPRequest` adapts FH request context for TCPGuard. |
+| `main` | Parses the two key-generation flags, loads validated configuration, initializes logging/database/authz/TCPGuard/SPL, configures FH limits and middleware, creates sessions, installs secure transport and response signing, registers application and operations routes, then starts graceful listening. Add global middleware and dependencies here in deliberate order. |
+| `transportKey` | Decodes the configured X25519 private key; permits an ephemeral key only in development and rejects its absence in production. Change only with secure transport key format/rotation changes. |
+| `signingKey` | Decodes the configured Ed25519 private seed or creates an ephemeral development signing pair; returns the public/private pair and whether it is ephemeral. |
+| `operationAuth` | Returns middleware that accepts only a matching non-empty bearer token using constant-time comparison; otherwise returns 401. Keep every operations route behind it. |
+| `skipStaticAndOps` | Excludes home, liveness, static assets, WASM, and operations paths from TCPGuard business-request analysis. Add exclusions only for framework/static paths, not business endpoints. |
+| `constantEqual` | Hashes both strings with SHA-256 and compares fixed-size digests in constant time. Used for token/principal binding comparisons. |
+| `hstsAge` | Returns one-year HSTS in production and zero in development. |
+| `generateTransportKey` | Generates and prints the encoded private X25519 key and its public WASM trust value. Treat the private output as a secret. |
+| `generateSigningKey` | Generates and prints the encoded Ed25519 private seed and public WASM pin. Treat the private output as a secret. |
+
+#### `internal/config/config.go.tmpl` and `internal/config/dotenv.go.tmpl`
+
+| Function | Behavior and when to change it |
+|---|---|
+| `Load` | Loads `.env`, determines production mode, resolves origin/host policy, loads direct or file-backed secrets, enforces production-only key/password/token requirements, validates time/body/rate limits, and assembles `Config`. Add every new setting here and document/test it. |
+| `positiveInt` | Parses a positive integer from the environment or uses its fallback; rejects invalid and non-positive values with a variable-specific error. |
+| `env` | Returns a trimmed non-empty process environment value or the supplied fallback. |
+| `parseOriginPolicy` | Parses `:port`, host:port, or absolute origins; enforces HTTPS outside loopback development and always in production; derives canonical origin, allowed hosts, and allowed origins. Change alongside CORS, host validation, secure transport, and frontend deployment settings. |
+| `developmentLANHosts` | Collects the machine hostname and assigned unicast IPs, plus the wildcard bind address, for explicit `:port` LAN development mode. It is not used for production. |
+| `uniqueStrings` | Trims, lowercases, removes empty/duplicate values, and sorts origin/host policy entries deterministically. |
+| `loadDotEnv` | Loads local variables through the config env provider, leaving already-set process variables untouched and tolerating a missing file. Keep this precedence for container/orchestrator deployments. |
+
+#### `internal/auth/auth.go.tmpl` and `internal/auth/grants.go.tmpl`
+
+| Function | Behavior and when to change it |
+|---|---|
+| `Login` | Constant-time compares the configured demo username/password, upserts/loads the account role through `RoleStore`, stores identity and role in the session, then regenerates the session ID. Replace the credential check for a real identity provider while preserving session rotation and server-derived roles. |
+| `Principal` | Reads the user ID and roles from the session, normalizes decoded role values, defaults missing roles to least-privileged `viewer`, constructs and sets an FH principal. |
+| `Require` | Rejects requests without a principal with 401; otherwise continues middleware. |
+| `PolicyMiddleware` | Builds FH authz middleware that derives subject from the principal, action from HTTP method, resource from route, and environment from request context; uses default deny/error handlers. |
+| `AuthorizeOwned` | Evaluates an authz decision with the loaded resource ID and trusted database owner ID, returning 500 on engine error or 403 on denial. Call after loading a row for per-object authorization. |
+| `DecodeLogin` | Parses login JSON and requires non-empty username/password; returns a typed 400 error for malformed or incomplete input. |
+| `rolesFromSession` | Converts either `[]string` or JSON-restored `[]any` to non-empty role strings; returns nil for unsupported session data. |
+| `secretEqual` | Compares two secrets using fixed-size SHA-256 digests and constant-time comparison. |
+| `NewGrantStore` | Allocates the in-memory registration grant map and returns the store. Replace storage for multi-instance deployment with a shared atomic TTL store. |
+| `Issue` | Generates a 256-bit random grant, stores only its SHA-256 hash bound to principal and session for 90 seconds, expires stale entries, and enforces a 10,000-entry cap. |
+| `Consume` | Decodes a grant, hashes and clears its raw bytes, atomically removes the stored entry, then checks expiry/principal/session. Any attempt burns the token, including invalid binding attempts. |
+
+#### `internal/httpapi/routes.go.tmpl`
+
+| Function | Behavior and when to change it |
+|---|---|
+| `Register` | Validates the WASM manifest, mounts static assets, installs home/health/auth/login/logout/bootstrap handlers, creates the authenticated RBAC API group, registers `/me`, `/echo`, and note routes. Add endpoints and request contracts here or split them into focused route files. |
+| `registerNoteRoutes` | Implements owner-scoped paginated list, validated create, owner/admin update, and owner/admin delete. It demonstrates repository access, route policy, ABAC ownership, bounded inputs, and TCPGuard business events. |
+| `notesPageLimit` | Parses `limit`, defaults to 25, and caps at 100 to bound database work. |
+| `notesPage` | Parses `page` and defaults malformed or non-positive values to page 1. |
+| `newID` | Generates a random 128-bit identifier and hex-encodes it for note records. |
+| `renderIndex` | Adds a response transform that requires `</body>` and inserts one fixed same-origin module script after secure SPL rendering; caller/request input cannot alter the loader. |
+| `loadManifest` | Reads and decodes the WASM asset manifest; fails startup if securefetch or wasm_exec integrity values are missing. |
+| `sameOrigin` | Requires an Origin header, rejects Fetch Metadata cross-site requests, requires Origin host to match Host, and matches the configured allow-list. Used by state-changing browser endpoints. |
+| `requestOrigin` | Returns a normalized request Origin when present or the configured canonical origin as fallback for secure bootstrap. |
+
+#### `internal/database/database.go.tmpl`
+
+| Function | Behavior and when to change it |
+|---|---|
+| `DefaultPoolConfig` | Returns conservative pool bounds and connection lifetimes suitable for one SQLite-backed process. Tune with the production database and measured concurrency. |
+| `Open` | Opens the configured DSN using the default pool settings. |
+| `OpenWithPool` | Ensures a local SQLite parent directory exists, opens the SQLite driver, applies pool limits, runs initial schema creation, and returns typed user/note repositories; closes the DB on setup errors. |
+| `migrate` | Creates the starter users/notes tables and owner/time index if absent. Add versioned migrations before changing a deployed schema. |
+| `ensureSQLiteDirectory` | Creates parent directories for relative file-backed SQLite DSNs; leaves memory and absolute paths alone. |
+| `(*Store).Close` | Closes the underlying SQL database and returns any close error. |
+| `(*Store).Ping` | Performs a context-aware database ping for health/readiness checks. |
+| `(*Store).EnsureUser` | Retries a transient user lookup, returns an existing row if found, otherwise inserts the initial user/role and returns it. It is starter account provisioning, not a complete user-management flow. |
+| `(*Store).RoleForUser` | Retries the user lookup and returns the current stored role, wrapping lookup errors with the user ID. |
+
+#### `internal/security/guard.go.tmpl`
+
+| Function | Behavior and when to change it |
+|---|---|
+| `New` | Loads the BCL policy bundle, selects development/production response policy, creates in-memory TCPGuard state/metrics, disables unused GeoIP enrichment, and returns the adapter. |
+| `(*Guard).Middleware` | Optionally skips a request, adapts FH context, evaluates request policies, adds decision headers/logs, continues allowed traffic, or writes the configured enforcement response. |
+| `(*Guard).EmitAuthEvent` | Builds identity context for a login event, evaluates and logs it, and reports whether a deny/block decision should stop the login response. |
+| `(*Guard).EmitBusinessEvent` | Builds business action/amount context, evaluates a `function.invoked` event, logs it, and reports whether the business operation should be blocked. |
+| `(*Guard).setDecisionHeaders` | Adds decision effect and, when present, severity and trace ID headers to the response. |
+| `(*Guard).log` | No-ops without a callback; otherwise forwards event name, request ID, decision effect/severity, and risk score to the configured structured logger. |
+| `toHTTPRequest` | Adapts FH method, URL, body, host, remote IP, and headers into a synthetic `net/http` request expected by TCPGuard's context builder. |
+
+#### Template test functions
+
+| Function | Behavior |
+|---|---|
+| `TestGrantIsOneShotAndSessionBound` | Verifies wrong-session use burns a grant, correct-session use succeeds once, and replay fails. Extend it for expiry, capacity, and malformed token cases when grant behavior changes. |
+| `TestLoopbackOriginPolicyAcceptsBothBrowserNames` | Verifies localhost, IPv4 loopback, and IPv6 loopback hosts/origins are admitted for loopback development origins. |
+| `TestPortOnlyOriginPolicyEnablesLANDevelopment` | Verifies explicit `:port` mode includes development LAN hosts, canonicalizes to localhost, and is rejected in production. |
 
 ### Generated file guide
 
