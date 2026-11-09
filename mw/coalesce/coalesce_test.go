@@ -169,3 +169,122 @@ func TestConcurrentIdenticalUnauthenticatedRequestsAreCoalesced(t *testing.T) {
 		t.Fatalf("expected exactly one handler execution for coalesced identical requests, got %d", calls.Load())
 	}
 }
+
+func TestCompletedResponsesAreNotReused(t *testing.T) {
+	var calls atomic.Int32
+	app := fh.New()
+	app.Use(New())
+	app.Get("/fresh", func(c fh.Ctx) error {
+		return c.SendString(fmt.Sprintf("call:%d", calls.Add(1)))
+	})
+	addr := testServer(t, app)
+
+	_, first := doRequest(t, addr, "GET", "/fresh", nil)
+	_, second := doRequest(t, addr, "GET", "/fresh", nil)
+	if first != "call:1" || second != "call:2" {
+		t.Fatalf("completed response was reused: first=%q second=%q", first, second)
+	}
+}
+
+func TestCustomKeyPartitionsCookieRequests(t *testing.T) {
+	var calls atomic.Int32
+	var wg sync.WaitGroup
+	release := make(chan struct{})
+	app := fh.New()
+	app.Use(New(Config{KeyFunc: func(c fh.Ctx) string { return c.Get("X-Identity") + c.OriginalURL() }}))
+	app.Get("/profile", func(c fh.Ctx) error {
+		calls.Add(1)
+		<-release
+		return c.SendString("profile:" + c.Get("X-Identity"))
+	})
+	addr := testServer(t, app)
+
+	results := make([]string, 3)
+	identities := []string{"alice", "alice", "bob"}
+	wg.Add(len(identities))
+	for i, identity := range identities {
+		i, identity := i, identity
+		go func() {
+			defer wg.Done()
+			_, results[i] = doRequest(t, addr, "GET", "/profile", map[string]string{"Cookie": "session=x", "X-Identity": identity})
+		}()
+	}
+	time.Sleep(30 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if calls.Load() != 2 {
+		t.Fatalf("handler calls = %d, want one per identity", calls.Load())
+	}
+	if results[0] != "profile:alice" || results[1] != "profile:alice" || results[2] != "profile:bob" {
+		t.Fatalf("unexpected identity responses: %v", results)
+	}
+}
+
+func TestLargeResponsesAreNotShared(t *testing.T) {
+	var calls atomic.Int32
+	var wg sync.WaitGroup
+	release := make(chan struct{})
+	app := fh.New()
+	app.Use(New(Config{MaxBodySize: 4}))
+	app.Get("/large", func(c fh.Ctx) error {
+		calls.Add(1)
+		<-release
+		return c.SendString("large-response")
+	})
+	addr := testServer(t, app)
+
+	results := make([]string, 2)
+	wg.Add(2)
+	for i := range results {
+		i := i
+		go func() {
+			defer wg.Done()
+			_, results[i] = doRequest(t, addr, "GET", "/large", nil)
+		}()
+	}
+	time.Sleep(30 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if calls.Load() != 2 {
+		t.Fatalf("large response handler calls = %d, want 2", calls.Load())
+	}
+	for _, result := range results {
+		if result != "large-response" {
+			t.Fatalf("large response = %q, want full response", result)
+		}
+	}
+}
+
+func TestConfiguredVaryHeadersPartitionRequests(t *testing.T) {
+	var calls atomic.Int32
+	var wg sync.WaitGroup
+	release := make(chan struct{})
+	app := fh.New()
+	app.Use(New(Config{VaryHeaders: []string{"Accept-Language"}}))
+	app.Get("/localized", func(c fh.Ctx) error {
+		calls.Add(1)
+		<-release
+		return c.SendString(c.Get("Accept-Language"))
+	})
+	addr := testServer(t, app)
+
+	results := make([]string, 2)
+	languages := []string{"en", "fr"}
+	wg.Add(len(languages))
+	for i, language := range languages {
+		i, language := i, language
+		go func() {
+			defer wg.Done()
+			_, results[i] = doRequest(t, addr, "GET", "/localized", map[string]string{"Accept-Language": language})
+		}()
+	}
+	time.Sleep(30 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if calls.Load() != 2 || results[0] != "en" || results[1] != "fr" {
+		t.Fatalf("vary results = %v; calls = %d, want independent locale responses", results, calls.Load())
+	}
+}
