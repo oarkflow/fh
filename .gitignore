@@ -15,6 +15,11 @@ dagflow/data/*
 *.pfx
 examples/basic/public/gasapp-v1.0.0-universal.apk
 benchmarks/results
+/build/mobile/
+/examples/mira/browser/dist/
 *.out
 *.test
 .data
+.deploy-bin
+*.hex
+*.pyc

@@ -1,0 +1,38 @@
+name: MIRA-T source release and GitHub provenance
+on:
+  push:
+    tags: ['mira-v7.*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python conformance dependency
+        run: python -m pip install 'cryptography>=44,<47'
+      - name: Verify
+        run: |
+          npm install --no-save typescript@5.9.3
+          bash scripts/verify-v7.sh
+      - name: Create deterministic source ZIP
+        run: python scripts/package-source.py "$RUNNER_TEMP/mira-t-v7-source.zip"
+      - name: Attach GitHub build provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ runner.temp }}/mira-t-v7-source.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mira-t-v7-source
+          path: ${{ runner.temp }}/mira-t-v7-source.zip

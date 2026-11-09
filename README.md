@@ -31,6 +31,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 - **Prefork & zero-downtime restarts** — multi-process `SO_REUSEPORT` supervisor with `SIGHUP` rolling worker handoff and zero dropped connections.
 - **Outbound HTTP client** — fluent HTTP/1.1 + HTTP/2 client (`fh.NewClient`) with connection pooling, retries, jitter backoff, circuit breaker, and SSRF protection.
 - **Linux kernel-assisted transport** — raw nonblocking sockets, sharded epoll or io_uring, SO_REUSEPORT CPU steering, and optional XDP packet admission.
+- **MIRA-T/1 native UDP (staging-grade)** — opt-in encrypted UDP sessions, multiplexed channels, delivery receipts, resumable durable application replay, browser gateway, mobile facade, and fenced clustering. This custom protocol is separate from HTTP/WebSocket and is not QUIC or independently production-certified.
 
 ## Installation
 
@@ -677,6 +678,24 @@ make wasm
 
 See the [WASM request/response flow](wasm/WASM.md), [Secure WASM deployment guide](docs/secure-wasm-transport.md), and [`examples/secure_wasm`](examples/secure_wasm).
 
+## MIRA-T/1 Native UDP
+
+`mira/` provides an opt-in native UDP transport with a TLS 1.3 mTLS bootstrap.
+Its wire version 4, sessions, and multiplexed channels are separate from the
+existing `pkg/securetransport` browser Fetch envelope, which remains wire v1.
+Native clients connect directly to MIRA; browser clients use the HTTPS gateway
+in `gateway/` and `browser/client.ts`. The gateway terminates the transport, so
+it does not provide browser-to-backend end-to-end transport confidentiality.
+
+The implementation also includes durable application journaling and replay,
+gateway identity delegation, fenced cluster components, a gomobile facade,
+commands, and cross-language conformance fixtures. Treat MIRA as staging-grade:
+local verification does not establish an independent cryptographic audit,
+Internet congestion fairness, complete PLPMTUD behavior, production failover,
+or mobile lifecycle readiness. Read [MIRA integration and deployment
+guidance](docs/mira/transport.md) and [the v7 status](V7_IMPLEMENTATION_STATUS.md)
+before enabling it.
+
 ## Signed HTTP Responses
 
 `mw/httpsignature` and `pkg/httpsignature` implement a strict RFC 9421 Ed25519 response-signature profile. A fresh client nonce and the originating method and target URI bind each signed response to its request; RFC 9530 `Content-Digest` binds the exact response bytes.
@@ -690,6 +709,7 @@ Full working examples in [`examples/`](examples/):
 | Example | Description |
 |---|---|
 | `basic` | Minimal "Hello World" |
+| [`mira`](examples/mira/README.md) | Native MIRA mTLS echo, browser gateway, durable replay, cluster, and mobile integration guide |
 | [`bounded-download`](examples/bounded-download) | Client response limits with atomic, writer, and reader download modes |
 | `flash-messages` | Session-backed one-time flash messages and redirects |
 | `hardened-server` | Pre-configured production security baseline with audit logging, rate limiting, and graceful drain |
@@ -714,7 +734,7 @@ See [`benchmarks/`](benchmarks/README.md) for cross-framework comparisons agains
 
 ## Documentation
 
-Full reference documentation is in [`docs/README.md`](docs/README.md), covering configuration, routing, codecs, middleware, the reliability layer, HTTP/2, WebSocket, native features (typed endpoints, OpenAPI, SSE), security, and performance.
+Full reference documentation is in [`docs/README.md`](docs/README.md), covering configuration, routing, codecs, middleware, the reliability layer, HTTP/2, WebSocket, MIRA-T/1, native features (typed endpoints, OpenAPI, SSE), security, and performance.
 
 ## Known Limitations
 

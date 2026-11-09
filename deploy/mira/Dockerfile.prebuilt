@@ -1,0 +1,9 @@
+# Image from binaries cross-compiled on a build machine, for hosts that should
+# not spend CPU/RAM compiling. Expects ./bin/{mira-tls-server,mira-healthcheck,
+# mira-bench,mira-dev-certs} (linux, static). Secrets are mounted, never baked.
+FROM scratch
+COPY bin/ /
+USER 65532:65532
+EXPOSE 7447/udp 7448/tcp
+HEALTHCHECK --interval=15s --timeout=4s --start-period=5s --retries=3 CMD ["/mira-healthcheck"]
+ENTRYPOINT ["/mira-tls-server"]

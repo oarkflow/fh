@@ -1,0 +1,32 @@
+[Unit]
+Description=MIRA-T/1 mutually authenticated custom UDP transport
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=mira
+Group=mira
+WorkingDirectory=/var/lib/mira
+ExecStart=/usr/local/bin/mira-tls-server -udp 0.0.0.0:7447 -tcp 0.0.0.0:7448 -cert /etc/mira/server.pem -key /etc/mira/server.key -ca /etc/mira/client-ca.pem -allow-file /etc/mira/allow.txt -metrics 127.0.0.1:9109
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+LimitNOFILE=65535
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/mira
+ReadWritePaths=/var/lib/mira
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

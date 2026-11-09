@@ -18,7 +18,7 @@ XDP_MODE ?= native
 XDP_PORTS ?= 80,443
 XDP_PIN ?= /sys/fs/bpf/fh/$(XDP_INTERFACE)
 
-.PHONY: all test check api-check template-check production-app-check production-app-update secure-test kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-clean clean
+.PHONY: all test check api-check template-check production-app-check production-app-update secure-test mira-test mira-race mira-check mira-mobile-android mira-mobile-ios kernel-test kernel-probe xdp-build xdp-attach xdp-detach wasm wasm-go wasm-ts wasm-runtime wasm-manifest wasm-check wasm-example wasm-clean clean
 
 all: test wasm
 
@@ -55,6 +55,23 @@ production-app-update:
 
 secure-test:
 	$(GO) test ./pkg/securetransport ./mw/securetransport
+
+# MIRA is a separate, staging-grade native UDP protocol. Its integration tests
+# bind local TCP/UDP sockets; use a host that permits loopback networking.
+mira-test:
+	$(GO) test ./protocol ./mira ./internal/wire ./durable ./journal ./resume ./delegation ./gateway ./cluster ./mobile -count=1
+
+mira-race:
+	$(GO) test -race ./delegation ./gateway ./mira ./resume ./cluster -count=1
+
+mira-check:
+	bash scripts/verify-v7.sh
+
+mira-mobile-android:
+	bash scripts/build-mobile.sh android
+
+mira-mobile-ios:
+	bash scripts/build-mobile.sh ios
 
 kernel-test:
 	CGO_ENABLED=0 $(GO) test ./kernel . -run 'TestKernel|TestIOUring|TestPortKey|TestNormalizeKernel' -count=1

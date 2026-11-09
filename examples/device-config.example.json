@@ -1,0 +1,9 @@
+{
+  "devices": {
+    "device-123": {
+      "key": "REPLACE_WITH_64_CHARACTERS_OF_CSPRNG_GENERATED_HEX",
+      "allow_reliable": true,
+      "allow_best_effort": false
+    }
+  }
+}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh/kernel"
+	"github.com/oarkflow/fh/mira"
 )
 
 type Map map[string]any
@@ -567,6 +568,11 @@ type App struct {
 	trustedEdgeNets       []*net.IPNet // populated by the opt-in deployment gate before serving
 	contextMu             sync.RWMutex
 	baseContext           context.Context
+	miraMu                sync.Mutex
+	miraServers           []*mira.SecureServer
+	miraShutdownOnce      sync.Once
+	miraShutdownDone      chan struct{}
+	miraShutdownErr       error // guarded by miraMu
 }
 
 type connState struct {
@@ -727,15 +733,16 @@ func buildApp(cfg Config) *App {
 	}
 
 	app := &App{
-		cfg:             cfg,
-		router:          newRouter(),
-		logger:          logger,
-		conns:           make(map[net.Conn]*connState),
-		connectionsByIP: make(map[string]int),
-		healthSlots:     make(chan struct{}, 32),
-		shutdownDone:    make(chan struct{}),
-		drainingCh:      make(chan struct{}),
-		fastHTTP1:       cfg.Mode == ModeFast,
+		cfg:              cfg,
+		router:           newRouter(),
+		logger:           logger,
+		conns:            make(map[net.Conn]*connState),
+		connectionsByIP:  make(map[string]int),
+		healthSlots:      make(chan struct{}, 32),
+		shutdownDone:     make(chan struct{}),
+		miraShutdownDone: make(chan struct{}),
+		drainingCh:       make(chan struct{}),
+		fastHTTP1:        cfg.Mode == ModeFast,
 	}
 
 	if cfg.Audit.Enabled {
@@ -1532,6 +1539,29 @@ func (a *App) beginShutdown() error {
 		close(a.drainingCh)
 	}()
 	var err error
+	a.miraShutdownOnce.Do(func() {
+		a.miraMu.Lock()
+		if a.miraShutdownDone == nil {
+			a.miraShutdownDone = make(chan struct{})
+		}
+		miraServers := append([]*mira.SecureServer(nil), a.miraServers...)
+		a.miraServers = nil
+		a.miraMu.Unlock()
+		if len(miraServers) == 0 {
+			close(a.miraShutdownDone)
+			return
+		}
+		go func() {
+			var closeErr error
+			for _, server := range miraServers {
+				closeErr = errors.Join(closeErr, server.Close())
+			}
+			a.miraMu.Lock()
+			a.miraShutdownErr = closeErr
+			a.miraMu.Unlock()
+			close(a.miraShutdownDone)
+		}()
+	})
 	a.connMu.Lock()
 	listener := a.listener
 	a.connMu.Unlock()
@@ -1581,6 +1611,14 @@ func (a *App) runShutdownHooks(ctx context.Context) error {
 		go func() {
 			defer close(a.shutdownDone)
 			var errs []error
+			select {
+			case <-a.miraShutdownDone:
+				a.miraMu.Lock()
+				errs = append(errs, a.miraShutdownErr)
+				a.miraMu.Unlock()
+			case <-ctx.Done():
+				errs = append(errs, ctx.Err())
+			}
 			for _, root := range a.staticRoots {
 				if err := root.Close(); err != nil {
 					a.logger.Error("static root shutdown error", "error", err)

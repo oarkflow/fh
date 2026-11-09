@@ -17,7 +17,7 @@ type Config struct {
 	// Format is used when FormatName is empty or unknown.
 	//
 	// Supported tokens:
-	// ${time} ${ip} ${method} ${path} ${query} ${uri} ${status} ${latency} ${error}
+	// ${time} ${ip} ${method} ${path} ${query} ${status} ${latency} ${error}
 	Format string
 
 	// FormatName can be:
@@ -80,7 +80,9 @@ type Config struct {
 	// SkipStatusCodes skips after request handling.
 	SkipStatusCodes []int
 
-	// IncludeQueryInPath makes ${path} include query string.
+	// IncludeQueryInPath is retained for compatibility. The path now always
+	// includes the complete request target, including its query string. URL
+	// fragments are not sent in HTTP requests and therefore cannot be logged.
 	IncludeQueryInPath bool
 
 	// DisableAsync is not recommended.
@@ -100,8 +102,8 @@ const (
 
 const (
 	formatDefault  = "[${ip}] ${method} ${path} → ${status} (${latency})\n"
-	formatCommon   = `${ip} - - [${time}] "${method} ${uri}" ${status} ${latency}` + "\n"
-	formatCombined = `${ip} - - [${time}] "${method} ${uri}" ${status} ${latency}` + "\n"
+	formatCommon   = `${ip} - - [${time}] "${method} ${path}" ${status} ${latency}` + "\n"
+	formatCombined = `${ip} - - [${time}] "${method} ${path}" ${status} ${latency}` + "\n"
 	formatTiny     = "${method} ${path} ${status} ${latency}\n"
 )
 
@@ -268,8 +270,7 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 			return err
 		}
 
-		path := uriPath(uri, m.cfg.IncludeQueryInPath)
-		query := uriQuery(uri)
+		path := uriPath(uri, true)
 		ip := ctx.IP()
 		rid := requestIDFromCtx(ctx)
 
@@ -283,9 +284,9 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 			buf.Reset()
 
 			if m.json {
-				m.renderJSON(buf, end, ip, method, path, query, uri, status, lat, errText, rid)
+				m.renderJSON(buf, end, ip, method, path, status, lat, errText, rid)
 			} else {
-				m.renderTokens(buf, end, ip, method, path, query, uri, status, lat, errText, rid)
+				m.renderTokens(buf, end, ip, method, path, uriQuery(uri), status, lat, errText, rid)
 			}
 
 			if m.cfg.MaxLineBytes > 0 && buf.Len() > m.cfg.MaxLineBytes {
@@ -308,8 +309,6 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 			rec.Time = end
 			rec.Method = string(method)
 			rec.Path = string(path)
-			rec.URI = string(uri)
-			rec.Query = string(query)
 			rec.IP = ip
 			rec.RequestID = rid
 			rec.Status = status
@@ -347,7 +346,6 @@ func (m *Middleware) renderTokens(
 	method []byte,
 	path []byte,
 	query []byte,
-	uri []byte,
 	status int,
 	latency time.Duration,
 	errText string,
@@ -366,7 +364,7 @@ func (m *Middleware) renderTokens(
 		case logQuery:
 			buf.Write(query)
 		case logURI:
-			buf.Write(uri)
+			buf.Write(path)
 		case logStatus:
 			appendInt(buf, status)
 		case logLatency:
@@ -387,8 +385,6 @@ func (m *Middleware) renderJSON(
 	ip string,
 	method []byte,
 	path []byte,
-	query []byte,
-	uri []byte,
 	status int,
 	latency time.Duration,
 	errText string,
@@ -408,14 +404,6 @@ func (m *Middleware) renderJSON(
 
 	buf.WriteByte(',')
 	writeJSONKeyBytes(buf, "path", path)
-
-	if len(query) > 0 {
-		buf.WriteByte(',')
-		writeJSONKeyBytes(buf, "query", query)
-	}
-
-	buf.WriteByte(',')
-	writeJSONKeyBytes(buf, "uri", uri)
 
 	buf.WriteByte(',')
 	writeJSONKeyString(buf, "status")
@@ -600,12 +588,8 @@ func (o *asyncOutput) writeEntry(e *logEntry) {
 					"ip", e.rec.IP,
 					"method", e.rec.Method,
 					"path", e.rec.Path,
-					"uri", e.rec.URI,
 					"status", e.rec.Status,
 					"latency_us", e.rec.Latency.Microseconds(),
-				}
-				if e.rec.Query != "" {
-					args = append(args, "query", e.rec.Query)
 				}
 				if e.rec.RequestID != "" {
 					args = append(args, "request_id", e.rec.RequestID)
@@ -622,14 +606,10 @@ func (o *asyncOutput) writeEntry(e *logEntry) {
 				slog.String("ip", e.rec.IP),
 				slog.String("method", e.rec.Method),
 				slog.String("path", e.rec.Path),
-				slog.String("uri", e.rec.URI),
 				slog.Int("status", e.rec.Status),
 				slog.Int64("latency_us", e.rec.Latency.Microseconds()),
 			}
 
-			if e.rec.Query != "" {
-				attrs = append(attrs, slog.String("query", e.rec.Query))
-			}
 			if e.rec.RequestID != "" {
 				attrs = append(attrs, slog.String("request_id", e.rec.RequestID))
 			}
@@ -691,8 +671,6 @@ type slogRecord struct {
 	Time      time.Time
 	Method    string
 	Path      string
-	URI       string
-	Query     string
 	IP        string
 	RequestID string
 	Status    int

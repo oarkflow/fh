@@ -1,0 +1,58 @@
+.PHONY: fmt test race vet build check conformance typescript loss load certs tls-server tls-client release-check mobile-android mobile-ios v6-check
+
+fmt:
+	gofmt -w $$(find . -name '*.go')
+
+test:
+	go test ./... -count=1 -timeout 120s
+
+race:
+	go test -race ./... -count=1 -timeout 120s
+
+vet:
+	go vet ./...
+
+build:
+	go build ./...
+
+conformance:
+	python3 -m unittest discover -s conformance -p 'test_wire_v4.py' -v
+
+typescript:
+	tsc --noEmit --target ES2020 --module ES2020 --lib ES2020,DOM browser/client.ts
+
+check: test race vet build conformance
+
+loss:
+	go test ./mira -run '^TestReliabilityWithPacketLoss$$' -count=12 -timeout 90s
+
+load:
+	go run ./cmd/mira-load -clients 4 -messages 50 -bytes 256 -timeout 45s
+
+certs:
+	go run ./cmd/mira-dev-certs -out ./dev-certs
+
+tls-server:
+	go run ./cmd/mira-tls-server -udp 127.0.0.1:7447 -tcp 127.0.0.1:7448 -cert ./dev-certs/server.pem -key ./dev-certs/server.key -ca ./dev-certs/root.pem -allow device-1
+
+tls-client:
+	go run ./cmd/mira-tls-client -udp 127.0.0.1:7447 -tcp 127.0.0.1:7448 -cert ./dev-certs/client.pem -key ./dev-certs/client.key -ca ./dev-certs/root.pem -name server.local -probe-mtu 1400
+
+release-check:
+	bash scripts/verify.sh
+
+mobile-android:
+	bash scripts/build-mobile.sh android
+
+mobile-ios:
+	bash scripts/build-mobile.sh ios
+
+v6-check:
+	bash scripts/verify-v6.sh
+
+.PHONY: v7-check v7-source
+v7-check:
+	bash scripts/verify-v7.sh
+
+v7-source:
+	python3 scripts/package-source.py ../MIRA-T1-v7-Source.zip

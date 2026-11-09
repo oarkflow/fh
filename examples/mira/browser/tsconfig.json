@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ES2020",
+    "moduleResolution": "node",
+    "lib": ["ES2020", "DOM"],
+    "rootDir": "../../..",
+    "outDir": "dist",
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "files": ["main.ts", "../../../browser/client.ts"]
+}

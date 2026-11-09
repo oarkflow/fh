@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>fh MIRA browser gateway example</title>
+  </head>
+  <body>
+    <h1>MIRA browser gateway</h1>
+    <p>This browser connects to the HTTPS gateway. It does not speak UDP.</p>
+    <label>Gateway URL <input id="endpoint" value="https://localhost:9443"></label>
+    <label>Bearer token <input id="token" type="password" autocomplete="off"></label>
+    <label>Message <input id="message" value="hello from browser"></label>
+    <button id="connect">Connect</button>
+    <button id="send" disabled>Send</button>
+    <button id="close" disabled>Close</button>
+    <pre id="log" aria-live="polite"></pre>
+    <script type="module" src="./dist/examples/mira/browser/main.js"></script>
+  </body>
+</html>

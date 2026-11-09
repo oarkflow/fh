@@ -39,6 +39,7 @@ options rather than a `Config` value.
 | [HTTP/2](http2.md) | TLS ALPN, h2c prior knowledge, h2c upgrade, framing, flow control, HPACK |
 | [WebSocket](websocket.md) | RFC 6455 WebSocket, low-level `Conn`, `EventHub` pub/sub |
 | [HTTP Client](http-client.md) | Outbound `fh.NewClient` HTTP/1.1 + HTTP/2 client with resilience and security |
+| [MIRA-T/1 Native UDP](mira/transport.md) | Opt-in encrypted UDP sessions and trust boundaries; see the [complete guide and runnable examples](../examples/mira/README.md) for wire format and real application scenarios |
 
 ## Platform features
 
@@ -77,6 +78,7 @@ options rather than a `Config` value.
 - **Minimal dependencies** — the standard library plus `golang.org/x/crypto`
 - **HTTP/1.1** — keep-alive, pipelining, chunked transfer, trailers, `Expect: 100-continue`
 - **HTTP/2** — TLS ALPN, h2c prior knowledge, h2c upgrade, full framing, flow control, HPACK
+- **MIRA-T/1** — opt-in encrypted UDP transport with multiplexed channels, delivery receipts, browser gateway, durable replay, and fenced cluster building blocks (staging-grade; see security limits)
 - **WebSocket (RFC 6455)** — low-level `Conn` + high-level `EventHub` pub/sub with rooms, topics, auth
 - **Radix tree router** — compressed trie with named params (`:param`), wildcards (`*wild`), named routes
 - **Route groups** — shared prefix and middleware inheritance, nested groups

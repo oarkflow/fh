@@ -1,0 +1,42 @@
+# Hardened single-node MIRA server. Put credentials in ./certs (server.pem,
+# server.key, root.pem; keys chmod 600) and the allowed client identities in
+# ./allow.txt (one certificate identity per line). Reload with SIGHUP:
+#   docker kill -s HUP mira-server
+services:
+  mira-server:
+    image: ${MIRA_IMAGE:-fh-mira:local}
+    container_name: mira-server
+    restart: unless-stopped
+    command:
+      - -udp=:7447
+      - -tcp=:7448
+      - -cert=/certs/server.pem
+      - -key=/certs/server.key
+      - -ca=/certs/root.pem
+      - -allow-file=/config/allow.txt
+      - -metrics=127.0.0.1:9109
+      - -max-sessions=1000
+      - -max-sessions-per-identity=4   # raise for gateways / load tests
+      - -max-inflight=128              # bulk senders; default 32
+    ports:
+      # Loopback by default. Publish on a public address only after review:
+      #   "0.0.0.0:7447:7447/udp" and "0.0.0.0:7448:7448/tcp"
+      - "127.0.0.1:7447:7447/udp"
+      - "127.0.0.1:7448:7448/tcp"
+    volumes:
+      - ./certs:/certs:ro
+      - ./allow.txt:/config/allow.txt:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 512m
+    cpus: 1.5
+    # The container user must be able to read the mounted key. Either chown the
+    # certs to this uid, or set user: to the key owner's uid:gid.
+    user: "65532:65532"
+    ulimits:
+      nofile: 65536
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

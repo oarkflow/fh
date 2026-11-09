@@ -1,0 +1,17 @@
+# Native MIRA TLS server image. Trust roots, private keys and access controls
+# must be mounted at runtime. Never bake secrets or the development CA into it.
+FROM golang:1.27.3-alpine AS builder
+WORKDIR /src
+COPY . .
+ENV CGO_ENABLED=0 GOOS=linux
+RUN go build -trimpath -ldflags='-s -w' -o /out/mira-tls-server ./cmd/mira-tls-server \
+ && go build -trimpath -ldflags='-s -w' -o /out/mira-healthcheck ./cmd/mira-healthcheck \
+ && go build -trimpath -ldflags='-s -w' -o /out/mira-bench ./cmd/mira-bench \
+ && go build -trimpath -ldflags='-s -w' -o /out/mira-dev-certs ./cmd/mira-dev-certs
+
+FROM scratch
+COPY --from=builder /out/ /
+USER 65532:65532
+EXPOSE 7447/udp 7448/tcp
+HEALTHCHECK --interval=15s --timeout=4s --start-period=5s --retries=3 CMD ["/mira-healthcheck"]
+ENTRYPOINT ["/mira-tls-server"]
