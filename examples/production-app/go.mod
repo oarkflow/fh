@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/oarkflow/authz v0.0.6
 	github.com/oarkflow/config v0.0.1
-	github.com/oarkflow/fh v0.0.29
+	github.com/oarkflow/fh v0.0.31
 	github.com/oarkflow/fh-contrib v0.0.4
 	github.com/oarkflow/squealx v0.0.78
 	github.com/oarkflow/tcpguard v0.0.16
@@ -40,10 +40,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.53.0 // indirect
 )
-
-// This example is a checked-in copy of fh-init's template output, kept
-// buildable against the fh source in this repository (not the last
-// published release) so it stays honest about what the framework's own
-// working tree currently produces - see the root Makefile's
-// production-app-check target.
-replace github.com/oarkflow/fh => ../..

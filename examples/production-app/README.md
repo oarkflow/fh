@@ -125,7 +125,7 @@ temporarily-running instance of the generated app:
 fh-init -module github.com/oarkflow/fh/examples/production-app -dir . -force -verify
 ```
 
-It builds the frontend (`npm ci && npm run build`, producing
+It builds the frontend (`npm install && npm run build`, producing
 `web/public/app.js` + `app.css`) and the server, boots the server on a free
 loopback port using the credentials in `.env`, works through the same
 checklist below (plus the static assets and WASM transport bundle every page

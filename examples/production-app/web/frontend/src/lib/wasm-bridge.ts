@@ -1,8 +1,9 @@
 import type { WasmBridge } from './types.ts';
 
-// The secure-fetch runtime (web/wasm/index.js, secure-fetch.js,
-// wasm_exec.js, securefetch.wasm) is a hand-authored, unbundled set of
-// browser-native ES modules served as-is by the Go server. It is
+// The secure-fetch runtime (web/wasm/index.js, secure-fetch.js, client.js,
+// errors.js, body.js, storage.js, wasm_exec.js, securefetch.wasm) is a
+// hand-authored, unbundled set of browser-native ES modules served as-is by
+// the Go server. It is
 // deliberately outside this project's compiled module graph: it carries
 // its own subresource-integrity check against web/wasm/asset-manifest.json,
 // and the server refuses to start if that manifest is incomplete, so it

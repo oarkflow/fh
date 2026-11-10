@@ -1,7 +1,7 @@
 GO ?= go
 NPM ?= npm
 
-.PHONY: check test run keys wasm frontend check-secure-fetch
+.PHONY: check test run keys wasm frontend check-secure-fetch test-secure-fetch
 
 check:
 	$(GO) test ./...
@@ -14,6 +14,9 @@ check:
 check-secure-fetch:
 	@command -v $(NPM) >/dev/null 2>&1 || (echo "npm was not found on PATH. Install Node.js 22.6+." >&2; exit 1)
 	cd web/frontend && $(NPM) run check:secure-fetch
+
+test-secure-fetch:
+	node --test web/wasm/coalesce.test.mjs
 
 test:
 	$(GO) test ./...
@@ -31,16 +34,12 @@ keys:
 # web/frontend/src. Requires Node.js 22.6+.
 frontend: check-secure-fetch
 	@command -v $(NPM) >/dev/null 2>&1 || (echo "npm was not found on PATH. Install Node.js 22.6+." >&2; exit 1)
-	cd web/frontend && $(NPM) ci && $(NPM) run build
+	cd web/frontend && $(NPM) install && $(NPM) run build
 
-# TinyGo pins a maximum supported Go version below what this project's
-# go.mod requires (0.41.x supports Go 1.19-1.26), so `go` on PATH usually
-# needs to be a matching 1.26.x for this target specifically, not whatever
-# newer toolchain `go build`/`go test` use elsewhere. If tinygo reports
-# "requires go version 1.19 through 1.26", install one side by side and put
-# it first on PATH for this command:
-#   go install golang.org/dl/go1.26.5@latest && go1.26.5 download
-#   PATH="$$(go1.26.5 env GOROOT)/bin:$$PATH" make wasm
+# This project requires Go 1.27.3. Use a TinyGo release whose compatibility
+# matrix includes Go 1.27 (TinyGo 0.44.x) and put Go 1.27.3 first on PATH:
+#   go install golang.org/dl/go1.27.3@latest && go1.27.3 download
+#   PATH="$$(go1.27.3 env GOROOT)/bin:$$PATH" make wasm
 TINYGO ?= tinygo
 wasm:
 	@mkdir -p web/wasm

@@ -78,6 +78,23 @@ axios, but every event is a synthetic 0%/100% start/end pair
 bodies rather than streaming them, so true incremental progress isn't
 available yet.
 
+## Duplicate read requests
+
+The secure Fetch client coalesces overlapping identical `GET` and `HEAD` calls
+by default, before encryption, so a burst in one browser tab sends one network
+request. Set `coalesceRequests: false` in `createSecureFetch` configuration to
+disable this. If any caller aborts a shared call, the underlying request is
+aborted for every caller. Writes and requests made after the shared call
+finishes are always sent normally. The server also coalesces overlapping reads
+for the same authenticated principal and secure session, URL including query,
+and response-varying headers. The browser key also includes request context and
+the secure session ID, request context, and a fragment (`#...`) when supplied
+as a string or URL. Fragments are removed by Fetch and never reach the server;
+they only separate client-side calls.
+
+Run `make test-secure-fetch` to check the browser coalescer's overlap, request
+key, fresh-after-completion, and abort behavior.
+
 ## Development and production trust
 
 The checked-in bundle is intended for loopback development. Development may use
@@ -119,15 +136,13 @@ public pins but must still be distributed with integrity.
 ## Build a trusted production bundle
 
 Requires [TinyGo](https://tinygo.org) and Binaryen's `wasm-opt` (`brew install
-tinygo binaryen`). TinyGo pins a maximum supported Go version below this
-project's go.mod floor (0.41.x supports Go 1.19-1.26; go.mod requires >=
-1.26.5), so `go` on PATH usually needs to be a matching 1.26.x for this build
-specifically. If `make wasm` reports "requires go version 1.19 through 1.26",
-install one side by side and put it first on PATH:
+tinygo binaryen`). This project requires Go 1.27.3. Use a TinyGo release whose
+compatibility matrix includes Go 1.27 (TinyGo 0.44.x) and put Go 1.27.3 first
+on PATH for this target:
 
 ```sh
-go install golang.org/dl/go1.26.5@latest && go1.26.5 download
-PATH="$(go1.26.5 env GOROOT)/bin:$PATH"
+go install golang.org/dl/go1.27.3@latest && go1.27.3 download
+PATH="$(go1.27.3 env GOROOT)/bin:$PATH"
 ```
 
 Use the external browser origin and key IDs that exactly match the server:

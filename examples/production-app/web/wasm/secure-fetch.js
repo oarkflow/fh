@@ -1,4 +1,5 @@
 import { isBodyInit, responseHasNoBody } from "./body.js";
+import { createRequestCoalescer, secureRequestKey } from "./coalesce.mjs";
 import { clearDevice, installSecureStorageBridge } from "./storage.js";
 const DEFAULT_WASM = "/wasm/securefetch.wasm";
 const DEFAULT_WASM_EXEC = "/wasm/wasm_exec.js";
@@ -189,11 +190,18 @@ function normalizeInit(init) {
 }
 export async function createSecureFetch(config = {}) {
     const api = await runtime(config);
-    await api.initialize(config);
+    const sessionInfo = await api.initialize(config);
+    const secureSessionID = sessionInfo?.sessionId ?? api.sessionInfo()?.sessionId ?? "";
+    const coalescer = createRequestCoalescer();
+    const coalesceRequests = config.coalesceRequests !== false;
     const secureFetch = async (input, init) => {
         const request = new Request(input, normalizeInit(init));
         const method = request.method.toUpperCase();
         const url = new URL(request.url, config.baseURL ?? location.href);
+        // Fetch strips fragments from Request.url. Preserve a fragment supplied
+        // with a string/URL input in the local coalescing key; it still never
+        // enters the encrypted HTTP request target.
+        const inputHash = input instanceof Request ? "" : new URL(input, config.baseURL ?? location.href).hash;
         const headers = Array.from(request.headers.entries());
         const body = method === "GET" || method === "HEAD" ? new Uint8Array() : new Uint8Array(await request.arrayBuffer());
         const credentials = init?.credentials ??
@@ -203,25 +211,29 @@ export async function createSecureFetch(config = {}) {
             body.fill(0);
             throw new Error("FH secure fetch only permits cors or same-origin request modes");
         }
+        const requestOptions = {
+            url: url.toString(), target: exactTarget(url), method, headers, body,
+            credentials, mode,
+        };
         let result;
         try {
-            result = await api.request({
-                url: url.toString(),
-                target: exactTarget(url),
-                method,
-                headers,
-                body,
-                credentials,
-                mode,
-                signal: request.signal,
-            });
+            if (coalesceRequests && (method === "GET" || method === "HEAD")) {
+                const key = secureRequestKey(method, url.toString() + inputHash, credentials, mode, headers, [
+                    request.referrer, request.referrerPolicy, request.cache, request.redirect,
+                    request.integrity, request.keepalive, request.destination, secureSessionID,
+                ]);
+                result = await coalescer.run(key, request.signal, (signal) => api.request({ ...requestOptions, signal }));
+            }
+            else {
+                result = await api.request({ ...requestOptions, signal: request.signal });
+            }
         }
         finally {
             body.fill(0);
         }
         const responseHeaders = new Headers(result.headers);
         responseHeaders.set("x-fh-request-id", result.requestId);
-        const responseBody = responseHasNoBody(method, result.status) ? null : result.body;
+        const responseBody = responseHasNoBody(method, result.status) ? null : new Uint8Array(result.body);
         const response = new Response(responseBody, { status: result.status, headers: responseHeaders });
         try {
             Object.defineProperty(response, "url", { configurable: true, value: result.url });

@@ -18,6 +18,7 @@ import (
 	appsecurity "github.com/oarkflow/fh/examples/production-app/internal/security"
 	"github.com/oarkflow/authz"
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/coalesce"
 	"github.com/oarkflow/fh/mw/contract"
 	"github.com/oarkflow/fh/mw/securetransport"
 	"github.com/oarkflow/fh/mw/session"
@@ -105,7 +106,24 @@ func Register(app *fh.App, cfg appconfig.Config, sessions *session.SessionManage
 		})
 	}).Name("secure-config").Tag("authentication")
 
-	api := app.Group("/api", appauth.Require, appauth.PolicyMiddleware(engine))
+	api := app.Group("/api", appauth.Require, appauth.PolicyMiddleware(engine), coalesce.New(coalesce.Config{
+		MaxEntries: 4096, MaxBodySize: 1 << 20,
+		KeyFunc: func(c fh.Ctx) string {
+			principal, ok := appauth.Principal(c)
+			secure, secureOK := securetransport.SessionFromContext(c)
+			if !ok || !secureOK {
+				return ""
+			}
+			// The request URL includes its query. Add the response-varying
+			// representation and tenant headers plus the authenticated principal
+			// and secure session. HTTP fragments are never sent to the server.
+			key, _ := json.Marshal([]string{
+				c.Method(), principal.ID, fmt.Sprintf("%x", secure.ID[:]), c.OriginalURL(),
+				c.Get("Accept"), c.Get("Accept-Language"), c.Get("Origin"), c.Get("Prefer"), c.Get("X-Tenant-ID"),
+			})
+			return string(key)
+		},
+	}))
 	api.Get("/me", func(c fh.Ctx) error {
 		p, _ := appauth.Principal(c)
 		secure, _ := securetransport.SessionFromContext(c)
