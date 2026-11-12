@@ -100,6 +100,7 @@ Use the following middleware order for most public APIs:
 | `conditional` | Evaluates HTTP validators and precondition headers. |
 | `contentdigest` | Verifies and emits RFC 9530 Content-Digest fields. |
 | `decompress` | Performs bounded gzip request decompression. |
+| `deviceauth` | Device-bound Ed25519 challenge login, signed short-lived sessions, and replay-protected request proofs. |
 | `etag` | Generates and validates entity tags. |
 | `fetchmetadata` | Enforces browser Fetch Metadata isolation policy. |
 | `hostguard` | Restricts accepted Host/authority values. |

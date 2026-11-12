@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Device authentication</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="FH Device Auth home"><span class="brand-mark">FH</span><span>Device Auth</span></a>
+        <span class="local-pill"><i></i> Local demo</span>
+      </header>
+
+      <section class="hero">
+        <p class="eyebrow">PASSWORDLESS ACCOUNT EXAMPLE</p>
+        <h1>Your account,<br><em>your device.</em></h1>
+        <p class="intro">Request access, then sign in with this device. Your private key stays in this browser.</p>
+      </section>
+
+      <div class="layout">
+        <section class="card admin-card">
+          <div class="card-heading"><span class="step">NEW ACCOUNT</span><h2>Request access</h2></div>
+          <p class="muted">Verify your email address. The system checks your request and creates your account automatically.</p>
+          <form id="register-form" class="stack">
+            <label>Account ID<input name="user_id" autocomplete="off" required minlength="3" maxlength="128" placeholder="alice"></label>
+            <label>Email address<input name="email" type="email" autocomplete="email" required maxlength="254" placeholder="you@example.com"></label>
+            <button type="submit" class="button button-secondary">Request access <span>↗</span></button>
+          </form>
+          <div id="request-status" class="result-box" hidden aria-live="polite"></div>
+          <form id="email-verification-form" class="stack" hidden>
+            <label>Email verification code<input name="code" inputmode="numeric" autocomplete="one-time-code" required minlength="6" maxlength="6" pattern="[0-9]{6}" placeholder="123456"></label>
+            <button type="submit" class="button button-secondary">Verify email and continue <span>→</span></button>
+          </form>
+        </section>
+
+        <section class="card account-card">
+          <div class="card-heading"><span class="step">ACCOUNT</span><h2>Get started</h2></div>
+          <div class="divider"><span>ALREADY REGISTERED</span></div>
+          <form id="login-form" class="stack compact">
+            <label>Account ID<input name="user_id" autocomplete="username" required minlength="3" maxlength="128" placeholder="alice"></label>
+            <button type="submit" class="button button-dark">Sign in on this device <span>→</span></button>
+          </form>
+        </section>
+      </div>
+
+      <section id="account-panel" class="card account-panel" hidden>
+        <div class="panel-title"><div><span class="step">SIGNED IN</span><h2 id="signed-in-as">Account</h2></div><button id="logout" class="button button-quiet" type="button">Sign out</button></div>
+        <p id="device-status" class="muted">This browser has a registered device key.</p>
+        <div class="actions">
+          <button id="check-session" type="button" class="button">Check protected session</button>
+          <button id="change-device" type="button" class="button button-secondary">Replace this device key</button>
+        </div>
+        <pre id="protected-result" class="result-box" aria-live="polite">Sign in to check the protected endpoint.</pre>
+      </section>
+
+      <section class="card recovery-card">
+        <div class="card-heading"><span class="step">ACCOUNT RECOVERY</span><h2>Lost access to a device?</h2></div>
+        <p class="muted">Use the recovery code shown once at registration. Recovery registers this browser and invalidates the previous device.</p>
+        <form id="recover-form" class="stack recovery-form">
+          <label>Account ID<input name="user_id" autocomplete="username" required minlength="3" maxlength="128" placeholder="alice"></label>
+          <label>Recovery code<input name="recovery_code" autocomplete="off" required placeholder="Paste your saved recovery code"></label>
+          <button type="submit" class="button button-secondary">Recover account <span>↗</span></button>
+        </form>
+      </section>
+
+      <footer><span>Device-bound challenge authentication</span><span>Use HTTPS outside localhost</span></footer>
+    </main>
+    <dialog id="recovery-dialog">
+      <form method="dialog" class="dialog-content">
+        <p class="eyebrow">SAVE THIS CODE</p><h2>Recovery code</h2>
+        <p class="muted">It is shown only once. Store it somewhere private and separate from this device.</p>
+        <pre id="recovery-output" class="recovery-output"></pre>
+        <button class="button" value="close">I saved it</button>
+      </form>
+    </dialog>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
