@@ -2,7 +2,7 @@
 
 **fh** is a standalone Go web framework that implements HTTP/1.1, HTTP/2, and WebSocket protocols entirely from scratch using only the Go standard library plus `golang.org/x/crypto` (OCSP stapling and ACME/`autocert`, both optional). It is not a wrapper around `net/http` or `fasthttp` — it has its own TCP server, HTTP parser, trie-based router, HTTP/2 framing engine, HPACK encoder/decoder, and WebSocket implementation.
 
-**Module:** `github.com/oarkflow/fh` · **Go:** 1.27.3+
+**Module:** `github.com/oarkflow/fh` · **Go:** 1.27.4+
 
 **Documentation version:** current `main` after `v0.0.26` · reviewed
 2026-10-23. For deployed applications, use the documentation from the exact
@@ -68,6 +68,8 @@ options rather than a `Config` value.
 | [Performance](performance.md) | Hot-path configuration and zero-allocation response APIs |
 | [Linux Kernel Transport](kernel-transport.md) | epoll/io_uring reactors, SO_REUSEPORT steering, XDP operations and deployment |
 | [Performance Profiles](performance_profiles.md) | Fast / Production / Enterprise runtime profiles |
+| [Local Hot-Path Baseline](local-hotpath-baseline-2026-11-12.md) | Reproducible local microbenchmark snapshot with allocation counts and scope limits |
+| [Cross-Framework Benchmark](cross-framework-benchmark-2026-11-12.md) | Interleaved fh/Fiber/fasthttp results and limits for a local workload |
 | [Prefork & Zero-Downtime Restarts](prefork.md) | Multi-process `SO_REUSEPORT` prefork and `SIGHUP`-triggered rolling restarts |
 | [Production Readiness](production-readiness.md) | Required security, CI, platform, load, failure and release gates |
 

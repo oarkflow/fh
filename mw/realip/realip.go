@@ -3,6 +3,7 @@ package realip
 import (
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/oarkflow/fh"
@@ -20,7 +21,10 @@ type Config struct {
 func New(cfg Config) fh.HandlerFunc {
 	if len(cfg.Headers) == 0 {
 		cfg.Headers = []string{"Forwarded", "X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP", "True-Client-IP"}
+	} else {
+		cfg.Headers = append([]string(nil), cfg.Headers...)
 	}
+	cfg.TrustedProxies = cloneNetworks(cfg.TrustedProxies)
 	if cfg.LocalKey == "" {
 		cfg.LocalKey = "real_ip"
 	}
@@ -40,9 +44,15 @@ func New(cfg Config) fh.HandlerFunc {
 			return c.Next()
 		}
 		for _, header := range cfg.Headers {
-			value := c.Get(header)
-			if value == "" {
+			value, count := forwardingHeaderValue(c, header)
+			if count == 0 || value == "" {
 				continue
+			}
+			if count > 1 && !strings.EqualFold(header, "Forwarded") && !strings.EqualFold(header, "X-Forwarded-For") {
+				// Singleton identity headers do not define a chain. Reject
+				// ambiguous duplicates instead of trusting whichever value the
+				// request accessor happens to return first.
+				return c.Next()
 			}
 			var chain []net.IP
 			if strings.EqualFold(header, "Forwarded") {
@@ -50,9 +60,14 @@ func New(cfg Config) fh.HandlerFunc {
 			} else {
 				chain = parseIPChain(value)
 			}
+			if len(chain) == 0 {
+				// A malformed higher-priority forwarding header must not cause
+				// fallback to a lower-priority value that may be client supplied.
+				return c.Next()
+			}
 			ip := clientFromChain(remote, chain, cfg.TrustedProxies, cfg.TrustAll)
 			if ip == nil {
-				continue
+				return c.Next()
 			}
 			canonical := ip.String()
 			if fh.SetClientIP(c, canonical) {
@@ -62,6 +77,62 @@ func New(cfg Config) fh.HandlerFunc {
 		}
 		return c.Next()
 	}
+}
+
+func forwardingHeaderValue(c fh.Ctx, name string) (string, int) {
+	var value strings.Builder
+	count := 0
+	c.RequestHeader().VisitAll(func(key, fieldValue []byte) {
+		if !equalHeaderName(key, name) {
+			return
+		}
+		if count > 0 {
+			value.WriteByte(',')
+		}
+		_, _ = value.Write(fieldValue)
+		count++
+	})
+	if count == 0 {
+		return "", 0
+	}
+	return value.String(), count
+}
+
+func equalHeaderName(key []byte, name string) bool {
+	if len(key) != len(name) {
+		return false
+	}
+	for i := range key {
+		b := key[i]
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		n := name[i]
+		if n >= 'A' && n <= 'Z' {
+			n += 'a' - 'A'
+		}
+		if b != n {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneNetworks(networks []*net.IPNet) []*net.IPNet {
+	if networks == nil {
+		return nil
+	}
+	cloned := make([]*net.IPNet, len(networks))
+	for i, network := range networks {
+		if network == nil {
+			continue
+		}
+		cloned[i] = &net.IPNet{
+			IP:   append(net.IP(nil), network.IP...),
+			Mask: append(net.IPMask(nil), network.Mask...),
+		}
+	}
+	return cloned
 }
 
 // clientFromChain walks right-to-left. Each hop may only assert the address to
@@ -85,9 +156,11 @@ func parseIPChain(value string) []net.IP {
 	parts := strings.Split(value, ",")
 	result := make([]net.IP, 0, len(parts))
 	for _, part := range parts {
-		if ip := parseNode(strings.TrimSpace(part)); ip != nil {
-			result = append(result, ip)
+		ip := parseNode(strings.TrimSpace(part))
+		if ip == nil {
+			return nil
 		}
+		result = append(result, ip)
 	}
 	return result
 }
@@ -95,16 +168,34 @@ func parseIPChain(value string) []net.IP {
 func parseForwarded(value string) []net.IP {
 	result := make([]net.IP, 0, 2)
 	for _, element := range strings.Split(value, ",") {
+		var found bool
 		for _, param := range strings.Split(element, ";") {
 			key, raw, ok := strings.Cut(strings.TrimSpace(param), "=")
-			if !ok || !strings.EqualFold(key, "for") {
+			if !ok || !strings.EqualFold(strings.TrimSpace(key), "for") {
 				continue
 			}
-			raw = strings.Trim(strings.TrimSpace(raw), "\"")
-			if ip := parseNode(raw); ip != nil {
-				result = append(result, ip)
+			if found {
+				return nil
 			}
-			break
+			found = true
+			raw = strings.TrimSpace(raw)
+			if strings.HasPrefix(raw, "\"") || strings.HasSuffix(raw, "\"") {
+				if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+					return nil
+				}
+				raw = raw[1 : len(raw)-1]
+			}
+			if strings.ContainsAny(raw, "\"\\") {
+				return nil
+			}
+			ip := parseNode(raw)
+			if ip == nil {
+				return nil
+			}
+			result = append(result, ip)
+		}
+		if !found {
+			return nil
 		}
 	}
 	return result
@@ -114,12 +205,29 @@ func parseNode(value string) net.IP {
 	if value == "" || value[0] == '_' || strings.EqualFold(value, "unknown") {
 		return nil
 	}
-	if host, _, err := net.SplitHostPort(value); err == nil {
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		if port == "" || !decimalPort(port) {
+			return nil
+		}
 		value = host
+	} else if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") && len(value) > 2 {
+		value = value[1 : len(value)-1]
 	} else {
-		value = strings.Trim(value, "[]")
+		if strings.ContainsAny(value, "[]") || strings.Count(value, ":") == 1 {
+			return nil
+		}
 	}
 	return net.ParseIP(value)
+}
+
+func decimalPort(port string) bool {
+	for i := 0; i < len(port); i++ {
+		if port[i] < '0' || port[i] > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseUint(port, 10, 16)
+	return err == nil
 }
 
 func trusted(ip net.IP, nets []*net.IPNet) bool {

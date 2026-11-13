@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"os"
 	"strconv"
 
+	"github.com/oarkflow/fh/benchmarks/servers/go/benchstats"
 	"github.com/valyala/fasthttp"
 )
 
@@ -53,6 +55,8 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 		writeJSON(ctx, value)
 	case string(path) == "/users" && ctx.IsGet():
 		writeJSON(ctx, users)
+	case string(path) == "/__bench/stats" && ctx.IsGet():
+		writeJSON(ctx, benchstats.Read())
 	default:
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		ctx.SetBodyString("Not Found")
@@ -60,6 +64,10 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 }
 
 func main() {
+	addr := os.Getenv("FH_BENCH_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:3004"
+	}
 	server := &fasthttp.Server{
 		Handler:               requestHandler,
 		ReadBufferSize:        16 << 10,
@@ -67,5 +75,5 @@ func main() {
 		NoDefaultDate:         true,
 		NoDefaultServerHeader: true,
 	}
-	log.Fatal(server.ListenAndServe("127.0.0.1:3004"))
+	log.Fatal(server.ListenAndServe(addr))
 }

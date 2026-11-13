@@ -169,6 +169,77 @@ ok  	github.com/oarkflow/fh/mw/mtls	0.024s
 Full-repo test suite and build/vet after all changes are in the final
 report section below.
 
+## Follow-up hardening (2026-11-13)
+
+`mw/mtls` now rejects unverified TLS peer certificates unless `AllowUnverified`
+and a custom `Verify` callback are both configured. Certificates injected with
+`WithPeerCertificates` also require `Verify`, and live TLS state takes
+precedence over injected context values. This prevents an adapter-provided
+raw certificate or a misconfigured `AllowUnverified` flag from acting as
+authentication by itself. The change passed `go vet ./...`; its certificate
+chain behavior still needs end-to-end TLS coverage.
+
+Redaction traversal was also bounded and made cycle-safe. Typed nested
+containers are inspected, cyclic references become a marker, and excessive
+depth is truncated; see `redaction.go`.
+
+`mw/realip` now rejects an entire forwarding chain when any address is
+malformed or ambiguous, validates forwarded ports, and stops at the socket
+peer rather than falling through to a lower-priority header. This avoids
+resolving a partial chain after silently dropping invalid elements; see
+`mw/realip/realip.go`.
+
+The pprof endpoints now stop CPU capture when the request is canceled, cap
+buffered profile output at 16 MiB by default, and allow only one profile
+capture per `Enable` instance at a time. The limit is configurable. This
+reduces the risk that diagnostics retain request work or multiply process
+memory under concurrent captures; runtime behavior was not exercised in this
+follow-up.
+
+Response compression now skips authenticated or cookie-bearing requests by
+default as an additional BREACH mitigation and adds `Vary: Accept-Encoding`
+for uncompressed as well as compressed responses, so shared caches can
+distinguish representations. The compression behavior was not exercised in
+this follow-up.
+
+Outbound client diagnostics now mask both URL userinfo fields, omit fragments,
+and redact query values for credential and OAuth-related keys (including
+`code`, `state`, `nonce`, and `signature`) before logging or attaching URLs to
+client errors. Embedded URLs and common credential key/value forms are also
+scrubbed from outbound transport error strings before logs or `ClientError`
+formatting expose them. The general logger also applies its sensitive-field filtering
+to request query strings and error text, with application-specific keys
+available through `RedactQueryKeys`; its explicit opt-out disables both
+filters. `ClientGzipRequest` now bypasses `http.NoBody` requests instead of
+starting a compression goroutine for an absent body. These latest changes were
+source-reviewed and formatting-checked, but their runtime behavior has not
+been exercised in this session.
+
+Admin queue endpoints now wrap backend failures in typed errors with fixed
+client-safe messages instead of returning `err.Error()` to clients. `HTTPError.Error()`
+now returns its public message while retaining the private cause through
+`Unwrap()`; debug diagnostics and internal logging retrieve and redact that
+cause explicitly. The affected documentation examples now use safe messages.
+These changes were source-reviewed and formatting-checked; runtime behavior
+remains unverified.
+
+The webhook middleware's default error response no longer returns raw
+verification errors. Invalid signatures receive a generic 401; unavailable
+secret lookup, verifier configuration, or replay storage receives a generic
+503 so delivery systems can retry. Custom error callbacks still receive the
+original error and are documented as responsible for safe responses. This
+change was source-reviewed and formatting-checked; runtime behavior remains
+unverified.
+
+Dependency review found `golang.org/x/net v0.61.0` in the module graph. It is
+now upgraded to v0.62.0, which addresses two upstream HTML parser/renderer
+security issues. The minimum Go version is now 1.27.4 to include current
+standard-library and toolchain security fixes. A full `govulncheck ./...`
+could not complete locally because the sandbox cannot resolve `vuln.go.dev`;
+the GitLab lint and release-gate jobs already run it, and the declared-version
+Linux matrix now follows the updated Go 1.27.4 minimum. A successful remote
+CI scan remains unverified in this session.
+
 ## NOT FIXED / needs a human decision
 
 - **`mw/mtls` real-certificate integration coverage**: the new tests exercise
@@ -182,36 +253,23 @@ report section below.
   tests to reuse it is a reasonable follow-up but was out of scope for the
   time budget here. No known bug motivates this — it's a coverage gap, not a
   vulnerability.
-- **`mw/compress`, `mw/bodylimit`, `mw/idempotency`, `mw/requesthash`,
-  `mw/policy`, `mw/logger`, `mw/metrics`, `mw/pprof`, `mw/privacy` have no
-  test files.** I read all of them; none showed a security defect worth a
-  targeted fix, but "no defect found on a read-through" is weaker evidence
-  than a test suite. Recommend a follow-up pass to backfill tests package by
-  package rather than doing it wholesale here, since several (`mw/pprof`)
-  are debug-only surfaces where the main security property ("don't mount
-  this in production without an authz gate") is a documentation concern, not
-  something a unit test enforces.
-- **CSRF double-submit token is never rotated after authentication
-  (`mw/csrf/csrf.go`)**: the token is generated once per (missing-cookie)
-  request and reused for the cookie's lifetime; it is not regenerated on
-  login/privilege change. This is a defensible design choice for a
-  stateless double-submit-cookie CSRF scheme (rotating it would require
-  session-scoped storage, which the middleware deliberately avoids to stay
-  stateless), but it does mean a token fixed before authentication remains
-  valid after. Flagging for a human decision because "fix" here means a
-  design change (session-bound tokens), not a bug fix, and the brief asked
-  me to keep changes minimal and backward compatible.
-- **`RedactMap`/`redactValue` does not recurse into arbitrary `[]T` slice
-  types via reflection** (only `[]any` and `[]map[string]any`, the two
-  shapes `encoding/json`-decoded data actually produces). A caller who hands
-  `RedactMap` a `[]CustomStruct` typed slice (rather than JSON-decoded
-  `map[string]any`/`[]any`) will not have it redacted. Given `RedactMap`'s
-  only current call site (`audit.go`) works on JSON-shaped metadata, this
-  covers the real-world input; a reflection-based general fallback was left
-  out to avoid adding `reflect` to a hot path and to keep the fix minimal,
-  but should be reconsidered if `RedactMap` grows new callers with
-  strongly-typed input.
-
+- **Current test execution for middleware coverage remains unverified.** The
+  packages previously listed here (`mw/compress`, `mw/bodylimit`,
+  `mw/idempotency`, `mw/requesthash`, `mw/policy`, `mw/logger`, `mw/metrics`,
+  `mw/pprof`, and `mw/privacy`) now each have at least one `_test.go` file in
+  the current tree. File presence does not prove those tests pass or cover
+  every security invariant; run the repository CI test and race stages to
+  establish that evidence.
+- **CSRF session-change rotation requires application configuration
+  (`mw/csrf/csrf.go`)**: the earlier audit described token rotation after
+  authentication as unimplemented. The current middleware supports
+  `SessionBinding` plus `AutoRotateOnChange`, detects binding changes with a
+  companion fingerprint cookie, and issues a token bound to the new session.
+  Applications must supply a stable, non-secret session identifier and enable
+  automatic rotation (or call `Protector.RotateToken` during the transition).
+  Without `SessionBinding`, token validity is not tied to the authenticated
+  session. The framework cannot infer the application's login/logout events or
+  choose a correct session identifier on its behalf.
 ## Final verification
 
 ```

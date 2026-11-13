@@ -2,38 +2,47 @@ package fh
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
-	"strconv"
-	"strings"
+	"sync"
 )
 
 // requestBodyStream consumes exactly one HTTP/1 request body. It never reads
 // beyond the body boundary, so bytes belonging to a pipelined request remain
 // available to the connection loop.
 type requestBodyStream struct {
-	conn      net.Conn
-	prefix    []byte
-	remaining int64
-	chunked   bool
-	max       int64
-	total     int64
-	chunkLeft int64
-	needCRLF  bool
-	done      bool
-	err       error
-	leftover  []byte
-	trailers  []Header
+	conn            net.Conn
+	prefix          []byte
+	remaining       int64
+	chunked         bool
+	max             int64
+	maxTrailerBytes int
+	trailerBytes    int
+	total           int64
+	chunkLeft       int64
+	needCRLF        bool
+	done            bool
+	err             error
+	leftover        []byte
+	trailers        []Header
+	lineBuf         [32]byte
+	line            []byte
 }
 
-func newRequestBodyStream(conn net.Conn, prefix []byte, length int, chunked bool, max int) *requestBodyStream {
-	return &requestBodyStream{
-		conn:      conn,
-		prefix:    prefix,
-		remaining: int64(length),
-		chunked:   chunked,
-		max:       int64(max),
+func newRequestBodyStream(conn net.Conn, prefix []byte, length int, chunked bool, max, maxTrailerBytes int) *requestBodyStream {
+	r := &requestBodyStream{
+		conn:            conn,
+		prefix:          prefix,
+		remaining:       int64(length),
+		chunked:         chunked,
+		max:             int64(max),
+		maxTrailerBytes: maxTrailerBytes,
 	}
+	if chunked {
+		r.line = r.lineBuf[:0]
+	}
+	return r
 }
 
 func (r *requestBodyStream) Read(p []byte) (int, error) {
@@ -108,11 +117,11 @@ func (r *requestBodyStream) readChunked(p []byte) (int, error) {
 		if semi := bytes.IndexByte(line, ';'); semi >= 0 {
 			sizeText = line[:semi]
 		}
-		size, parseErr := strconv.ParseInt(strings.TrimSpace(string(sizeText)), 16, 64)
-		if parseErr != nil || size < 0 {
+		size, ok := parseHex(trimOWS(sizeText))
+		if !ok {
 			return 0, r.fail(ErrMalformedRequest)
 		}
-		if size > r.max-r.total {
+		if int64(size) > r.max-r.total {
 			return 0, r.fail(ErrBodyTooLarge)
 		}
 		if size == 0 {
@@ -122,7 +131,7 @@ func (r *requestBodyStream) readChunked(p []byte) (int, error) {
 			r.done = true
 			return 0, io.EOF
 		}
-		r.chunkLeft = size
+		r.chunkLeft = int64(size)
 	}
 }
 
@@ -131,6 +140,12 @@ func (r *requestBodyStream) readSome(p []byte) int {
 		n := copy(p, r.prefix)
 		r.prefix = r.prefix[n:]
 		return n
+	}
+	// A Reader may return data and a terminal error together. The caller gets
+	// the data first; keep that error and never issue another socket read after
+	// it has been observed.
+	if r.err != nil {
+		return 0
 	}
 	n, err := r.conn.Read(p)
 	if err != nil {
@@ -145,8 +160,14 @@ func (r *requestBodyStream) readByte() (byte, error) {
 		r.prefix = r.prefix[1:]
 		return b, nil
 	}
+	if r.err != nil {
+		return 0, r.fail(r.err)
+	}
 	var one [1]byte
 	n, err := r.conn.Read(one[:])
+	if err != nil {
+		r.err = err
+	}
 	if n == 1 {
 		return one[0], nil
 	}
@@ -157,18 +178,18 @@ func (r *requestBodyStream) readByte() (byte, error) {
 }
 
 func (r *requestBodyStream) readLine() ([]byte, error) {
-	line := make([]byte, 0, 32)
-	for len(line) <= maxChunkLine {
+	r.line = r.line[:0]
+	for len(r.line) <= maxChunkLine {
 		b, err := r.readByte()
 		if err != nil {
 			return nil, err
 		}
-		line = append(line, b)
+		r.line = append(r.line, b)
 		if b == '\n' {
-			if len(line) < 2 || line[len(line)-2] != '\r' {
+			if len(r.line) < 2 || r.line[len(r.line)-2] != '\r' {
 				return nil, r.fail(ErrMalformedRequest)
 			}
-			return line[:len(line)-2], nil
+			return r.line[:len(r.line)-2], nil
 		}
 	}
 	return nil, r.fail(ErrInvalidChunkedBody)
@@ -198,6 +219,11 @@ func (r *requestBodyStream) readTrailers() error {
 		if len(line) == 0 {
 			return nil
 		}
+		lineBytes := len(line) + 2 // include the field's CRLF on the wire
+		if r.maxTrailerBytes > 0 && lineBytes > r.maxTrailerBytes-r.trailerBytes {
+			return r.fail(ErrInvalidChunkedBody)
+		}
+		r.trailerBytes += lineBytes
 		colon := bytes.IndexByte(line, ':')
 		if colon <= 0 || !validToken(line[:colon]) || len(r.trailers) >= maxHeaders {
 			return r.fail(ErrInvalidChunkedBody)
@@ -230,8 +256,10 @@ func (r *requestBodyStream) finish() ([]byte, []Header, error) {
 // providing bounded backpressure while allowing the connection reactor to
 // continue processing other streams.
 type h2RequestBodyReader struct {
-	conn   *h2Conn
-	stream *h2Stream
+	conn     *h2Conn
+	stream   *h2Stream
+	ctx      context.Context
+	wakeOnce sync.Once
 }
 
 func (r *h2RequestBodyReader) Read(p []byte) (int, error) {
@@ -239,13 +267,30 @@ func (r *h2RequestBodyReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	s := r.stream
+	if r.ctx != nil {
+		r.wakeOnce.Do(func() {
+			context.AfterFunc(r.ctx, func() {
+				s.bodyMu.Lock()
+				if s.bodyCond != nil {
+					s.bodyCond.Broadcast()
+				}
+				s.bodyMu.Unlock()
+			})
+		})
+	}
 	s.bodyMu.Lock()
-	for s.bodyQueued == 0 && !s.bodyEOF && s.bodyErr == nil && !s.reset.Load() {
+	for s.bodyQueued == 0 && !s.bodyEOF && s.bodyErr == nil && !s.reset.Load() && (r.ctx == nil || r.ctx.Err() == nil) {
 		if s.bodyCond == nil {
 			s.bodyMu.Unlock()
 			return 0, net.ErrClosed
 		}
 		s.bodyCond.Wait()
+	}
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			s.bodyMu.Unlock()
+			return 0, err
+		}
 	}
 	if s.bodyQueued > 0 {
 		n := 0
@@ -261,8 +306,8 @@ func (r *h2RequestBodyReader) Read(p []byte) (int, error) {
 				s.bodyChunkOffset = 0
 			}
 		}
-		s.bodyMu.Unlock()
 		s.bodyReserved.Add(-int64(n))
+		s.bodyMu.Unlock()
 		r.conn.app.releaseBufferedBody(int64(n))
 		r.conn.consumeH2Body(s, n)
 		return n, nil
@@ -288,6 +333,8 @@ func (h *h2Conn) flushH2BodyCredit(s *h2Stream) {
 	h.mu.Lock()
 	connWU := uint32(h.connRecvWindowAccum)
 	streamWU := uint32(s.recvWindowAccum)
+	h.connRecvWindowRemaining += int64(connWU)
+	s.recvWindow += int64(streamWU)
 	h.connRecvWindowAccum = 0
 	s.recvWindowAccum = 0
 	h.mu.Unlock()
@@ -304,17 +351,17 @@ func (h *h2Conn) consumeH2Body(s *h2Stream, n int) {
 		return
 	}
 	h.mu.Lock()
-	h.connRecvWindowRemaining += int64(n)
-	s.recvWindow += int64(n)
 	h.connRecvWindowAccum += int64(n)
 	s.recvWindowAccum += int64(n)
 	var connWU, streamWU uint32
 	if h.connRecvWindowAccum >= windowsUpdateThreshold {
 		connWU = uint32(h.connRecvWindowAccum)
+		h.connRecvWindowRemaining += h.connRecvWindowAccum
 		h.connRecvWindowAccum = 0
 	}
 	if s.recvWindowAccum >= windowsUpdateThreshold {
 		streamWU = uint32(s.recvWindowAccum)
+		s.recvWindow += s.recvWindowAccum
 		s.recvWindowAccum = 0
 	}
 	h.mu.Unlock()

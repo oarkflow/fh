@@ -44,6 +44,13 @@ protected := manager.Middleware(apiHandler)
 
 For a shared KV backend, configure `Replay: &deviceauth.KVReplayGuard{Store: sharedKV}` and `Challenges: &deviceauth.KVChallengeStore{Store: sharedKV}`. The backend's per-key atomic `Mutate` operation must be safe across replicas. `MaxChallenges` bounds the default memory store; configure a capacity limit in the shared backend as well.
 
+The built-in memory device store validates its inputs too: IDs are limited to
+128 bytes, subjects to 256 bytes, and public keys must be exactly 32 bytes. The
+memory replay guard retains fixed-size key digests, accepts keys up to 256 bytes
+by default, and enforces its configured total entry count. The memory challenge
+store validates identifier and record sizes and defaults to a 16 MiB retained
+byte budget; `Config.MaxChallengeBytes` tunes the default store's budget.
+
 `BeginEnrollment` must only follow an application-authorized step. Challenge
 creation and login endpoints need per-account and per-network rate limits. Keep
 the signing key stable across replicas and rotate it with an explicit key-ring

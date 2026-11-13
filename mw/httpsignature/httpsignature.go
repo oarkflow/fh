@@ -74,7 +74,11 @@ func New(config Config) (fh.HandlerFunc, error) {
 		config.MaxBodySize = 16 << 20
 	}
 	if config.NonceStore == nil {
-		config.NonceStore = kv.NewMemoryStore(kv.WithShardCount(1))
+		config.NonceStore = kv.NewMemoryStore(
+			kv.WithShardCount(256),
+			kv.WithMaxEntries(250_000),
+			kv.WithRejectWhenFull(),
+		)
 	}
 	var nonceMu sync.Mutex
 	privateKey := append(ed25519.PrivateKey(nil), config.PrivateKey...)
@@ -221,6 +225,24 @@ func CheckAndStore(store kv.Store, mu *sync.Mutex, key string, expiresAt time.Ti
 	if maxEntries <= 0 {
 		maxEntries = 250_000
 	}
+	if bounded, ok := store.(interface{ CapacityLimit() int }); ok && bounded.CapacityLimit() > 0 && bounded.CapacityLimit() <= maxEntries {
+		ttl := time.Until(expiresAt)
+		accepted := false
+		err := store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+			if exists {
+				return nil, 0, false, nil
+			}
+			accepted = true
+			if ttl <= 0 {
+				return nil, 0, false, nil
+			}
+			return nonceMarker, ttl, true, nil
+		})
+		if errors.Is(err, kv.ErrCapacityExceeded) {
+			return false, fmt.Errorf("http signature nonce store capacity exhausted")
+		}
+		return accepted, err
+	}
 	if mu != nil {
 		mu.Lock()
 		defer mu.Unlock()
@@ -252,8 +274,13 @@ func CheckAndStore(store kv.Store, mu *sync.Mutex, key string, expiresAt time.Ti
 		// net effect.
 		return true, nil
 	}
-	if err := store.Set(key, nonceMarker, ttl); err != nil {
-		return false, err
-	}
-	return true, nil
+	accepted := false
+	err = store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		if exists {
+			return nil, 0, false, nil
+		}
+		accepted = true
+		return nonceMarker, ttl, true, nil
+	})
+	return accepted, err
 }

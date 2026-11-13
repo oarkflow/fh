@@ -124,8 +124,5 @@ func isHTTPS(c fh.Ctx) bool {
 		return true
 	}
 	proto := c.Get("X-Forwarded-Proto")
-	if strings.EqualFold(proto, "https") {
-		return true
-	}
-	return false
+	return strings.EqualFold(proto, "https")
 }

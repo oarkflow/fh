@@ -41,3 +41,5 @@ Forwarding headers are ignored unless the socket peer belongs to a configured
 `TrustedProxies` CIDR. The middleware walks multi-proxy chains from right to
 left and stops at the first untrusted hop. `TrustAll` is available only for
 isolated test/listener setups where untrusted clients cannot connect directly.
+Repeated `Forwarded` and `X-Forwarded-For` fields are combined in wire order;
+duplicate singleton identity fields are ignored as ambiguous.

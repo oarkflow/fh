@@ -1,10 +1,20 @@
 package fh
 
 import (
+	"encoding"
+	"errors"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync"
+)
+
+var errUnsupportedJSONFloat = errors.New("json: unsupported non-finite floating-point value")
+
+var (
+	jsonMarshalerType = reflect.TypeOf((*JSONMarshaler)(nil)).Elem()
+	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 )
 
 type JSONValue struct{ v any }
@@ -30,6 +40,12 @@ func supportsJSON(v any) bool {
 }
 
 func JSONTypeSupported(t reflect.Type, seen map[reflect.Type]bool) bool {
+	if t == nil || hasJSONMarshaler(t) {
+		return false
+	}
+	if seen == nil {
+		seen = make(map[reflect.Type]bool)
+	}
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
@@ -51,11 +67,19 @@ func JSONTypeSupported(t reflect.Type, seen map[reflect.Type]bool) bool {
 		seen[t] = true
 		for i := 0; i < t.NumField(); i++ {
 			sf := t.Field(i)
+			if sf.Anonymous {
+				return false
+			}
 			if sf.PkgPath != "" {
 				continue
 			}
-			if tag := sf.Tag.Get("json"); tag == "-" {
-				continue
+			if tag := sf.Tag.Get("json"); tag != "" {
+				if tag == "-" {
+					continue
+				}
+				if !fastJSONTagSupported(tag) {
+					return false
+				}
 			}
 			if !JSONTypeSupported(sf.Type, seen) {
 				return false
@@ -64,6 +88,38 @@ func JSONTypeSupported(t reflect.Type, seen map[reflect.Type]bool) bool {
 		return true
 	}
 	return false
+}
+
+func hasJSONMarshaler(t reflect.Type) bool {
+	for t != nil {
+		if t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) {
+			return true
+		}
+		if t.Kind() != reflect.Pointer && (reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)) {
+			return true
+		}
+		if t.Kind() != reflect.Pointer {
+			break
+		}
+		t = t.Elem()
+	}
+	return false
+}
+
+func fastJSONTagSupported(tag string) bool {
+	parts := strings.Split(tag, ",")
+	for _, option := range parts[1:] {
+		if option != "omitempty" {
+			return false
+		}
+	}
+	for i := 0; i < len(parts[0]); i++ {
+		b := parts[0][i]
+		if !(b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_' || b == '-' || b == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func appendJSONValueRef(dst []byte, v reflect.Value) ([]byte, bool, error) {
@@ -78,7 +134,7 @@ func appendJSONValueRef(dst []byte, v reflect.Value) ([]byte, bool, error) {
 	}
 	switch v.Kind() {
 	case reflect.Struct:
-		return appendJSONStruct(dst, v), true, nil
+		return appendJSONStruct(dst, v)
 	case reflect.Slice, reflect.Array:
 		if v.Kind() == reflect.Slice && v.IsNil() {
 			return append(dst, "null"...), true, nil
@@ -112,11 +168,20 @@ func appendJSONValueRef(dst []byte, v reflect.Value) ([]byte, bool, error) {
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return strconv.AppendUint(dst, v.Uint(), 10), true, nil
 	case reflect.Float32:
-		return strconv.AppendFloat(dst, v.Float(), 'g', -1, 32), true, nil
+		out, err := appendJSONFloat(dst, v.Float(), 32)
+		return out, err == nil, err
 	case reflect.Float64:
-		return strconv.AppendFloat(dst, v.Float(), 'g', -1, 64), true, nil
+		out, err := appendJSONFloat(dst, v.Float(), 64)
+		return out, err == nil, err
 	}
 	return dst, false, nil
+}
+
+func appendJSONFloat(dst []byte, value float64, bitSize int) ([]byte, error) {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return dst, errUnsupportedJSONFloat
+	}
+	return strconv.AppendFloat(dst, value, 'g', -1, bitSize), nil
 }
 
 type JSONField struct {
@@ -162,7 +227,7 @@ func cachedJSONFields(t reflect.Type) []JSONField {
 	return actual.([]JSONField)
 }
 
-func appendJSONStruct(dst []byte, v reflect.Value) []byte {
+func appendJSONStruct(dst []byte, v reflect.Value) ([]byte, bool, error) {
 	t := v.Type()
 	fields := cachedJSONFields(t)
 	dst = append(dst, '{')
@@ -179,18 +244,20 @@ func appendJSONStruct(dst []byte, v reflect.Value) []byte {
 		wrote = true
 		dst = appendJSONString(dst, f.name)
 		dst = append(dst, ':')
-		dst, _, _ = appendJSONValueRef(dst, fv)
+		var ok bool
+		var err error
+		dst, ok, err = appendJSONValueRef(dst, fv)
+		if err != nil || !ok {
+			return dst, ok, err
+		}
 	}
 	dst = append(dst, '}')
-	return dst
+	return dst, true, nil
 }
 
 func isJSONEmpty(v reflect.Value) bool {
-	for v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer {
-		if v.IsNil() {
-			return true
-		}
-		v = v.Elem()
+	if v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer {
+		return v.IsNil()
 	}
 	switch v.Kind() {
 	case reflect.String, reflect.Array, reflect.Slice, reflect.Map:
@@ -205,13 +272,6 @@ func isJSONEmpty(v reflect.Value) bool {
 		return v.Float() == 0
 	}
 	return false
-}
-
-func mapPointer(m map[string]any) uintptr {
-	if m == nil {
-		return 0
-	}
-	return reflect.ValueOf(m).Pointer()
 }
 
 func isJSONContentTypeBytes(ct []byte) bool {
@@ -230,18 +290,4 @@ func isJSONContentTypeBytes(ct []byte) bool {
 		s = strings.TrimSpace(s[:idx])
 	}
 	return strings.HasSuffix(s, "+json")
-}
-
-func jsonLooksObjectOrArray(b []byte) bool {
-	for len(b) > 0 {
-		switch b[0] {
-		case ' ', '\n', '\r', '\t':
-			b = b[1:]
-		case '{', '[':
-			return true
-		default:
-			return false
-		}
-	}
-	return false
 }

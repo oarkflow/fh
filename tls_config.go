@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -77,12 +78,15 @@ func NewServerTLSConfig(opt ServerTLSOptions) (*tls.Config, error) {
 // CertPinningConfig configures certificate pinning for outbound TLS connections.
 type CertPinningConfig struct {
 	// Pins maps hostname -> list of acceptable SHA-256 SPKI hashes (base64 encoded).
-	Pins      map[string][]string
+	Pins map[string][]string
+	// BackupPin is an optional rotation pin accepted for configured hostnames.
+	// It does not authorize hostnames absent from Pins.
 	BackupPin string
 }
 
-// Verifier returns a function suitable for tls.Config.VerifyPeerCertificate
-// that enforces certificate pinning. Unpinned hosts fail-closed (rejected).
+// Verifier returns a function suitable for tls.Config.VerifyPeerCertificate.
+// Because that callback has no target-host argument, host-specific pins fail
+// closed; use VerifierForHost or NewClient with CertPinningConfig instead.
 func (pc *CertPinningConfig) Verifier() func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	return pc.VerifierForHost("")
 }
@@ -93,6 +97,12 @@ func (pc *CertPinningConfig) VerifierForHost(targetHost string) func(rawCerts []
 	if pc == nil || len(pc.Pins) == 0 {
 		return nil
 	}
+	snapshot := &CertPinningConfig{BackupPin: pc.BackupPin, Pins: make(map[string][]string, len(pc.Pins))}
+	for host, pins := range pc.Pins {
+		key := strings.TrimSuffix(strings.ToLower(host), ".")
+		snapshot.Pins[key] = append(snapshot.Pins[key], pins...)
+	}
+	pc = snapshot
 	return func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			return errors.New("fh: no certificates presented")
@@ -104,46 +114,109 @@ func (pc *CertPinningConfig) VerifierForHost(targetHost string) func(rawCerts []
 		if err != nil {
 			return err
 		}
-		spkiHash := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
-		spkiB64 := base64.StdEncoding.EncodeToString(spkiHash[:])
+		return verifyCertificatePin(pc, targetHost, leaf)
+	}
+}
 
-		// Check backup pin first (allows rotation).
-		if pc.BackupPin != "" && pc.BackupPin == spkiB64 {
+// connectionVerifier binds host-specific pins to the actual SNI name used by
+// the TLS connection. VerifyPeerCertificate does not provide that name, so
+// matching against certificate SANs there can accidentally authorize a pin
+// configured for a different hostname on the same certificate.
+func (pc *CertPinningConfig) connectionVerifier() (func(tls.ConnectionState) error, error) {
+	if pc == nil || len(pc.Pins) == 0 {
+		return nil, errors.New("fh: certificate pinning requires pins for at least one hostname")
+	}
+	snapshot := &compiledCertPinning{pins: make(map[string][][sha256.Size]byte, len(pc.Pins))}
+	for host, pins := range pc.Pins {
+		host = strings.TrimSuffix(strings.ToLower(host), ".")
+		if host == "" || len(pins) == 0 {
+			return nil, errors.New("fh: certificate pinning requires non-empty hostnames and pins")
+		}
+		for _, encoded := range pins {
+			pin, err := decodeSPKIPin(encoded)
+			if err != nil {
+				return nil, err
+			}
+			snapshot.pins[host] = append(snapshot.pins[host], pin)
+		}
+	}
+	if pc.BackupPin != "" {
+		pin, err := decodeSPKIPin(pc.BackupPin)
+		if err != nil {
+			return nil, err
+		}
+		snapshot.backupPin = pin
+		snapshot.hasBackup = true
+	}
+	verifier := func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) == 0 {
+			return errors.New("fh: no certificates presented")
+		}
+		if len(state.VerifiedChains) == 0 {
+			return errors.New("fh: certificate pinning requires normal CA and hostname verification")
+		}
+		host := strings.TrimSuffix(strings.ToLower(state.ServerName), ".")
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		pins, ok := snapshot.pins[host]
+		if !ok {
+			return errors.New("fh: certificate pin mismatch — no configured pins for " + host)
+		}
+		spkiHash := sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
+		for _, pin := range pins {
+			if subtle.ConstantTimeCompare(pin[:], spkiHash[:]) == 1 {
+				return nil
+			}
+		}
+		if snapshot.hasBackup && subtle.ConstantTimeCompare(snapshot.backupPin[:], spkiHash[:]) == 1 {
 			return nil
 		}
-
-		cleanHost := strings.ToLower(targetHost)
-		if h, _, err := net.SplitHostPort(cleanHost); err == nil {
-			cleanHost = h
-		}
-
-		if cleanHost != "" {
-			if pins, ok := pc.Pins[cleanHost]; ok {
-				for _, expected := range pins {
-					if expected == spkiB64 {
-						return nil
-					}
-				}
-				return errors.New("fh: certificate pin mismatch for host " + cleanHost)
-			}
-		}
-
-		// Check host-specific pins from candidate names when targetHost is not specified.
-		if cleanHost == "" {
-			candidateNames := append([]string{leaf.Subject.CommonName}, leaf.DNSNames...)
-			for _, name := range candidateNames {
-				if pins, ok := pc.Pins[name]; ok {
-					for _, expected := range pins {
-						if expected == spkiB64 {
-							return nil
-						}
-					}
-				}
-			}
-		}
-
-		return errors.New("fh: certificate pin mismatch — no matching pin or backup for " + leaf.Subject.CommonName)
+		return errors.New("fh: certificate pin mismatch for host " + host)
 	}
+	return verifier, nil
+}
+
+type compiledCertPinning struct {
+	pins      map[string][][sha256.Size]byte
+	backupPin [sha256.Size]byte
+	hasBackup bool
+}
+
+func decodeSPKIPin(encoded string) ([sha256.Size]byte, error) {
+	var pin [sha256.Size]byte
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(decoded) != len(pin) {
+		return pin, errors.New("fh: certificate pins must be base64-encoded SHA-256 hashes")
+	}
+	copy(pin[:], decoded)
+	return pin, nil
+}
+
+func verifyCertificatePin(pc *CertPinningConfig, targetHost string, leaf *x509.Certificate) error {
+	spkiHash := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+	spkiB64 := base64.StdEncoding.EncodeToString(spkiHash[:])
+
+	cleanHost := strings.TrimSuffix(strings.ToLower(targetHost), ".")
+	if h, _, err := net.SplitHostPort(cleanHost); err == nil {
+		cleanHost = h
+	}
+	if cleanHost == "" {
+		return errors.New("fh: certificate pinning requires a target hostname")
+	}
+	pins, ok := pc.Pins[cleanHost]
+	if !ok {
+		return errors.New("fh: certificate pin mismatch — no configured pins for " + cleanHost)
+	}
+	for _, expected := range pins {
+		if subtle.ConstantTimeCompare([]byte(expected), []byte(spkiB64)) == 1 {
+			return nil
+		}
+	}
+	if pc.BackupPin != "" && subtle.ConstantTimeCompare([]byte(pc.BackupPin), []byte(spkiB64)) == 1 {
+		return nil
+	}
+	return errors.New("fh: certificate pin mismatch for host " + cleanHost)
 }
 
 // OCSPStapler fetches and caches OCSP responses for a certificate chain.

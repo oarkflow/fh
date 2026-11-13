@@ -3,8 +3,10 @@ package fh
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +41,31 @@ func TestHTTPClientJSONRetryAndMiddleware(t *testing.T) {
 	}
 	if !res.IsSuccess() || out.ID != 42 || out.Name != "fh" || calls.Load() != 2 {
 		t.Fatalf("unexpected response: status=%d out=%+v calls=%d", res.StatusCode(), out, calls.Load())
+	}
+}
+
+func TestHTTPClientRetryConsumesUpstreamBudget(t *testing.T) {
+	var calls atomic.Int32
+	c := NewClient(ClientConfig{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+		}),
+		Retry: RetryPolicy{
+			MaxAttempts:   3,
+			BaseDelay:     time.Nanosecond,
+			RetryStatuses: map[int]bool{http.StatusServiceUnavailable: true},
+			RetryMethods:  map[string]bool{http.MethodGet: true},
+		},
+	})
+	defer c.Close()
+	ctx := WithBudget(context.Background(), NewBudget(BudgetConfig{MaxUpstreamCalls: 1}))
+	_, err := c.Get(ctx, "http://budget.test/")
+	if !errors.Is(err, ErrClientUpstreamBudgetExceeded) {
+		t.Fatalf("request error = %v, want upstream budget exhaustion", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("server received %d requests, want 1", got)
 	}
 }
 

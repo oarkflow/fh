@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"mime"
+	"net/url"
 	"os"
 	"path"
 	"sort"
@@ -22,6 +23,10 @@ const indexFileName = "index.html"
 
 const streamCompressionThreshold = 64 << 10
 const defaultMaxStaticRanges = 16
+const defaultMaxStaticBrowseEntries = 1000
+const maxStaticBrowseEntriesLimit = 10000
+const maxStaticFileCacheEntries = 8192
+const maxStaticFileCacheKeyBytes = 4096
 
 // DefaultStaticConfig is the default configuration for Static and StaticFS.
 var DefaultStaticConfig = StaticConfig{
@@ -83,6 +88,12 @@ type StaticConfig struct {
 	// MaxRanges limits the number of byte ranges accepted in one request.
 	// Zero uses the safe default of 16 ranges.
 	MaxRanges int
+
+	// MaxBrowseEntries limits the number of directory entries rendered when
+	// Browse is enabled. Zero uses the safe default of 1000 entries; values
+	// above 10000 are clamped. The filesystem must expose fs.ReadDirFile so
+	// fh can stop reading at the cap without loading the full directory.
+	MaxBrowseEntries int
 }
 
 // indexFiles returns the ordered list of index filenames to try.
@@ -124,8 +135,14 @@ func (a *App) StaticFS(prefix string, filesystem fs.FS, config ...StaticConfig) 
 }
 
 func (a *App) addStatic(prefix string, filesystem fs.FS, cfg StaticConfig) {
+	cfg.IndexFiles = append([]string(nil), cfg.IndexFiles...)
 	if cfg.MaxRanges <= 0 {
 		cfg.MaxRanges = defaultMaxStaticRanges
+	}
+	if cfg.MaxBrowseEntries <= 0 {
+		cfg.MaxBrowseEntries = defaultMaxStaticBrowseEntries
+	} else if cfg.MaxBrowseEntries > maxStaticBrowseEntriesLimit {
+		cfg.MaxBrowseEntries = maxStaticBrowseEntriesLimit
 	}
 	fsc := &staticFS{
 		fs:    filesystem,
@@ -181,8 +198,14 @@ func (g *Group) StaticFS(prefix string, filesystem fs.FS, config ...StaticConfig
 }
 
 func (g *Group) addStatic(prefix string, filesystem fs.FS, cfg StaticConfig) {
+	cfg.IndexFiles = append([]string(nil), cfg.IndexFiles...)
 	if cfg.MaxRanges <= 0 {
 		cfg.MaxRanges = defaultMaxStaticRanges
+	}
+	if cfg.MaxBrowseEntries <= 0 {
+		cfg.MaxBrowseEntries = defaultMaxStaticBrowseEntries
+	} else if cfg.MaxBrowseEntries > maxStaticBrowseEntriesLimit {
+		cfg.MaxBrowseEntries = maxStaticBrowseEntriesLimit
 	}
 	fsc := &staticFS{
 		fs:    filesystem,
@@ -232,6 +255,16 @@ func (s *staticFS) serve(c Ctx) error {
 	upath := c.Param("*")
 	if upath == "" {
 		return s.servePath(c, ".")
+	}
+	for start := 0; start < len(upath); {
+		end := strings.IndexByte(upath[start:], '/')
+		if end < 0 {
+			end = len(upath) - start
+		}
+		if upath[start:start+end] == ".." {
+			return c.Status(404).SendString("404 Not Found")
+		}
+		start += end + 1
 	}
 	upath = path.Clean("/" + upath)
 	if upath == "/" {
@@ -332,17 +365,13 @@ func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
 	fileSize := info.Size()
 	if rangeHeader := c.Get("Range"); rangeHeader != "" && !s.cfg.Compress {
 		if strings.HasPrefix(rangeHeader, "bytes=") {
-			ranges, rangeErr := parseRangeHeader(rangeHeader, fileSize)
+			ranges, rangeErr := parseRangeHeaderLimit(rangeHeader, fileSize, s.cfg.MaxRanges)
 			if rangeErr != nil {
 				c.Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
 				return c.Status(416).SendStatus(416)
 			}
-			if len(ranges) > s.cfg.MaxRanges {
-				c.Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
-				return c.Status(416).SendStatus(416)
-			}
 			ifRange := c.Get("If-Range")
-			if ifRange == "" || ifRange == fi.etag || ifRange == info.ModTime().UTC().Format(httpTimeFormat) {
+			if ifRange == "" || (!strings.HasPrefix(fi.etag, "W/") && ifRange == fi.etag) || ifRange == info.ModTime().UTC().Format(httpTimeFormat) {
 				c.Status(206)
 				if len(ranges) == 1 {
 					start, end := ranges[0].Start, ranges[0].End
@@ -525,7 +554,7 @@ func isCompressible(mimeType string) bool {
 // ── Directory listing ───────────────────────────────────────────────────────
 
 func (s *staticFS) listDir(c Ctx, upath string) error {
-	entries, err := fs.ReadDir(s.fs, upath)
+	entries, truncated, err := readStaticDirEntries(s.fs, upath, s.cfg.MaxBrowseEntries)
 	if err != nil {
 		return c.Status(500).SendString("Internal Server Error")
 	}
@@ -567,28 +596,75 @@ func (s *staticFS) listDir(c Ctx, upath string) error {
 	}
 
 	for _, entry := range entries {
-		// html.EscapeString escapes & < > " ' which is safe both inside the
-		// href="..." attribute and as element text content.
 		name := html.EscapeString(entry.Name())
+		href := html.EscapeString("./" + url.PathEscape(entry.Name()))
 		if entry.IsDir() {
 			buf.WriteString("<li><a href=\"")
-			buf.WriteString(name)
+			buf.WriteString(href)
 			buf.WriteString("/\"><strong>")
 			buf.WriteString(name)
 			buf.WriteString("/</strong></a></li>")
 		} else {
 			buf.WriteString("<li><a href=\"")
-			buf.WriteString(name)
+			buf.WriteString(href)
 			buf.WriteString("\">")
 			buf.WriteString(name)
 			buf.WriteString("</a></li>")
 		}
+	}
+	if truncated {
+		buf.WriteString("<li><em>Listing truncated at ")
+		buf.WriteString(strconv.Itoa(s.cfg.MaxBrowseEntries))
+		buf.WriteString(" entries.</em></li>")
 	}
 
 	buf.WriteString("</ul><hr></body></html>")
 
 	c.Type("text/html; charset=utf-8")
 	return c.SendBytes(buf.Bytes())
+}
+
+// readStaticDirEntries bounds directory memory use for ReadDirFile-backed
+// filesystems by reading in small batches and stopping after limit+1 entries.
+// The extra entry lets the caller report that the listing was truncated.
+func readStaticDirEntries(filesystem fs.FS, name string, limit int) ([]fs.DirEntry, bool, error) {
+	if limit <= 0 {
+		limit = defaultMaxStaticBrowseEntries
+	} else if limit > maxStaticBrowseEntriesLimit {
+		limit = maxStaticBrowseEntriesLimit
+	}
+	file, err := filesystem.Open(name)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	dir, ok := file.(fs.ReadDirFile)
+	if !ok {
+		return nil, false, errors.New("fs: directory listing requires a bounded ReadDirFile")
+	}
+	entries := make([]fs.DirEntry, 0, min(limit, 128))
+	for len(entries) <= limit {
+		batchSize := min(128, limit+1-len(entries))
+		batch, readErr := dir.ReadDir(batchSize)
+		if len(batch) == 0 && readErr == nil {
+			return nil, false, errors.New("fs: ReadDir returned no entries without an error")
+		}
+		remaining := limit + 1 - len(entries)
+		if len(batch) > remaining {
+			batch = batch[:remaining]
+		}
+		entries = append(entries, batch...)
+		if len(entries) > limit {
+			return entries[:limit], true, nil
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return entries, false, nil
+			}
+			return nil, false, readErr
+		}
+	}
+	return entries, false, nil
 }
 
 // ── ETag / Info caching ─────────────────────────────────────────────────────
@@ -600,8 +676,10 @@ type fileCache struct {
 }
 
 type cacheEntry struct {
-	etag    string
-	modTime time.Time
+	etag     string
+	modTime  time.Time
+	size     int64
+	cachedAt time.Time
 }
 
 func newFileCache(ttl time.Duration) *fileCache {
@@ -615,20 +693,42 @@ func newFileCache(ttl time.Duration) *fileCache {
 }
 
 func (c *fileCache) get(key string) (cacheEntry, bool) {
-	if c == nil {
+	if c == nil || len(key) > maxStaticFileCacheKeyBytes {
 		return cacheEntry{}, false
 	}
 	c.mu.RLock()
 	e, ok := c.entries[key]
 	c.mu.RUnlock()
-	return e, ok
+	if !ok {
+		return cacheEntry{}, false
+	}
+	if time.Since(e.cachedAt) < c.ttl {
+		return e, true
+	}
+	c.mu.Lock()
+	if current, exists := c.entries[key]; exists && current.cachedAt.Equal(e.cachedAt) {
+		delete(c.entries, key)
+	}
+	c.mu.Unlock()
+	return cacheEntry{}, false
 }
 
 func (c *fileCache) set(key string, entry cacheEntry) {
-	if c == nil {
+	if c == nil || len(key) > maxStaticFileCacheKeyBytes {
 		return
 	}
+	now := time.Now()
+	entry.cachedAt = now
 	c.mu.Lock()
+	if _, exists := c.entries[key]; !exists && len(c.entries) >= maxStaticFileCacheEntries {
+		// Lookups discard expired entries. Evict one entry here instead of
+		// scanning the full cache under the write lock on every new path once
+		// the cache reaches its cap.
+		for candidate := range c.entries {
+			delete(c.entries, candidate)
+			break
+		}
+	}
 	c.entries[key] = entry
 	c.mu.Unlock()
 }
@@ -638,18 +738,19 @@ func generateETag(info fs.FileInfo) string {
 	size := info.Size()
 
 	const hex = "0123456789abcdef"
-	var b [35]byte
-	b[0] = '"'
-	for i := 16; i > 0; i-- {
+	var b [37]byte
+	b[0], b[1] = 'W', '/'
+	b[2] = '"'
+	for i := 18; i > 2; i-- {
 		b[i] = hex[mtime&0xf]
 		mtime >>= 4
 	}
-	b[17] = '-'
-	for i := 33; i > 17; i-- {
+	b[19] = '-'
+	for i := 35; i > 19; i-- {
 		b[i] = hex[size&0xf]
 		size >>= 4
 	}
-	b[34] = '"'
+	b[36] = '"'
 	return string(b[:])
 }
 
@@ -674,7 +775,7 @@ func etagListMatches(header, current string, weak bool) bool {
 
 func (s *staticFS) fileInfo(upath string, info fs.FileInfo) cacheEntry {
 	if e, ok := s.cache.get(upath); ok {
-		if e.modTime.Equal(info.ModTime()) {
+		if e.modTime.Equal(info.ModTime()) && e.size == info.Size() {
 			return e
 		}
 	}
@@ -682,6 +783,7 @@ func (s *staticFS) fileInfo(upath string, info fs.FileInfo) cacheEntry {
 	e := cacheEntry{
 		etag:    generateETag(info),
 		modTime: info.ModTime(),
+		size:    info.Size(),
 	}
 	s.cache.set(upath, e)
 	return e

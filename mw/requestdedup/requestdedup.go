@@ -17,6 +17,12 @@ type Config struct {
 	// MaxKeys is the maximum number of dedup keys stored before eviction.
 	// Default: 10000.
 	MaxKeys int
+	// MaxKeyBytes bounds a custom dedup key retained in memory. Default: 256.
+	MaxKeyBytes int
+	// MaxResponseHeaderCount and MaxResponseHeaderBytes bound captured response
+	// headers retained per entry. Defaults: 64 headers and 16 KiB.
+	MaxResponseHeaderCount int
+	MaxResponseHeaderBytes int
 
 	// KeyFunc extracts the dedup key from the request. The default computes
 	// SHA-256(method + path + body).
@@ -29,12 +35,14 @@ type Config struct {
 
 // Entry represents a tracked request.
 type Entry struct {
-	Key        string
-	Status     int
-	Body       []byte
-	Headers    map[string]string
-	ReceivedAt time.Time
-	ExpiresAt  time.Time
+	Key     string
+	Status  int
+	Body    []byte
+	Headers map[string]string
+	// HeadersComplete is false when response headers exceeded the capture limit.
+	HeadersComplete bool
+	ReceivedAt      time.Time
+	ExpiresAt       time.Time
 }
 
 // Deduplicator tracks in-flight requests and deduplicates within a window.
@@ -59,9 +67,12 @@ func New(cfg ...Config) *Deduplicator {
 
 func defaultConfig() Config {
 	return Config{
-		Window:  5 * time.Second,
-		MaxKeys: 10000,
-		KeyFunc: defaultKeyFunc,
+		Window:                 5 * time.Second,
+		MaxKeys:                10000,
+		MaxKeyBytes:            256,
+		MaxResponseHeaderCount: 64,
+		MaxResponseHeaderBytes: 16 << 10,
+		KeyFunc:                defaultKeyFunc,
 		OnDuplicate: func(c fh.Ctx, e *Entry) error {
 			c.Set("X-Dedup-Key", e.Key)
 			c.Set("X-Dedup-Received", e.ReceivedAt.Format(time.RFC3339Nano))
@@ -81,6 +92,15 @@ func mergeConfig(base, override Config) Config {
 	}
 	if override.MaxKeys > 0 {
 		base.MaxKeys = override.MaxKeys
+	}
+	if override.MaxKeyBytes > 0 {
+		base.MaxKeyBytes = override.MaxKeyBytes
+	}
+	if override.MaxResponseHeaderCount > 0 {
+		base.MaxResponseHeaderCount = override.MaxResponseHeaderCount
+	}
+	if override.MaxResponseHeaderBytes > 0 {
+		base.MaxResponseHeaderBytes = override.MaxResponseHeaderBytes
 	}
 	if override.KeyFunc != nil {
 		base.KeyFunc = override.KeyFunc
@@ -121,6 +141,9 @@ func (d *Deduplicator) Handler() fh.HandlerFunc {
 		if key == "" {
 			return c.Next()
 		}
+		if len(key) > d.cfg.MaxKeyBytes {
+			return fh.NewHTTPError(fh.StatusBadRequest, "DEDUP_KEY_TOO_LARGE", "deduplication key is too long")
+		}
 
 		now := time.Now()
 		expires := now.Add(d.cfg.Window)
@@ -150,10 +173,20 @@ func (d *Deduplicator) Handler() fh.HandlerFunc {
 		d.mu.Lock()
 		if entry, ok := d.entries[key]; ok {
 			entry.Status = c.StatusCode()
-			entry.Headers = make(map[string]string)
-			for k, v := range c.GetRespHeaders() {
+			headers := c.GetRespHeaders()
+			entry.Headers = make(map[string]string, min(len(headers), d.cfg.MaxResponseHeaderCount))
+			entry.HeadersComplete = true
+			headerCount, headerBytes := 0, 0
+			for k, v := range headers {
 				if len(v) > 0 {
+					if headerCount >= d.cfg.MaxResponseHeaderCount || len(k) > d.cfg.MaxResponseHeaderBytes-headerBytes || len(v[0]) > d.cfg.MaxResponseHeaderBytes-headerBytes-len(k) {
+						entry.Headers = nil
+						entry.HeadersComplete = false
+						break
+					}
 					entry.Headers[k] = v[0]
+					headerCount++
+					headerBytes += len(k) + len(v[0])
 				}
 			}
 		}

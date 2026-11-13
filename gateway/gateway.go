@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -38,6 +39,10 @@ type Config struct {
 	MaxSessions             int
 	IdleTimeout             time.Duration
 	History                 int
+	// MaxHistoryBytes bounds encoded event history retained for one session.
+	MaxHistoryBytes int64
+	// MaxTotalHistoryBytes bounds encoded event history across all sessions.
+	MaxTotalHistoryBytes    int64
 	AllowedOrigins          []string // Explicit HTTPS origins; no wildcards permitted.
 	MaxSessionsPerPrincipal int
 	AllowPlaintextLoopback  bool // integration/local development only
@@ -48,6 +53,7 @@ type Gateway struct {
 	sessions           map[string]*browserSession
 	pending            int
 	pendingByPrincipal map[string]int
+	historyBytes       int64
 	closed             bool
 	done               chan struct{}
 	wg                 sync.WaitGroup
@@ -57,14 +63,15 @@ type Event struct {
 	Data   string `json:"data"`
 }
 type browserSession struct {
-	id, owner string
-	conn      *mira.Session
-	ch        protocol.Channel
-	last      time.Time
-	next      uint64
-	history   []Event
-	changed   chan struct{}
-	closed    bool
+	id, owner    string
+	conn         *mira.Session
+	ch           protocol.Channel
+	last         time.Time
+	next         uint64
+	history      []Event
+	historyBytes int64
+	changed      chan struct{}
+	closed       bool
 }
 
 func New(c Config) (*Gateway, error) {
@@ -98,6 +105,15 @@ func New(c Config) (*Gateway, error) {
 	if c.History > 4096 {
 		return nil, errors.New("gateway: excessive event history")
 	}
+	if c.MaxHistoryBytes <= 0 {
+		c.MaxHistoryBytes = 1 << 20
+	}
+	if c.MaxTotalHistoryBytes <= 0 {
+		c.MaxTotalHistoryBytes = 64 << 20
+	}
+	if c.MaxHistoryBytes > c.MaxTotalHistoryBytes {
+		return nil, errors.New("gateway: per-session history budget exceeds total history budget")
+	}
 	g := &Gateway{c: c, sessions: make(map[string]*browserSession), pendingByPrincipal: make(map[string]int), done: make(chan struct{})}
 	g.wg.Add(1)
 	go g.sweep()
@@ -119,6 +135,7 @@ func (g *Gateway) InvalidateAllSessions() {
 			bs.closed = true
 			close(bs.changed)
 		}
+		g.clearHistoryLocked(bs)
 	}
 	g.mu.Unlock()
 	for _, bs := range all {
@@ -139,6 +156,7 @@ func (g *Gateway) Close() error {
 	for _, ss := range all {
 		ss.closed = true
 		close(ss.changed)
+		g.clearHistoryLocked(ss)
 	}
 	g.mu.Unlock()
 	for _, ss := range all {
@@ -169,6 +187,7 @@ func (g *Gateway) expire() {
 			ss.closed = true
 			close(ss.changed)
 			delete(g.sessions, key)
+			g.clearHistoryLocked(ss)
 			old = append(old, ss)
 		}
 	}
@@ -252,6 +271,20 @@ func (g *Gateway) capacityLocked(owner string) bool {
 	}
 	return count+g.pendingByPrincipal[owner] < g.c.MaxSessionsPerPrincipal
 }
+
+// releasePendingLocked removes reservation bookkeeping once a connect attempt
+// no longer owns a slot. The caller holds g.mu.
+func (g *Gateway) releasePendingLocked(owner string) {
+	if g.pending > 0 {
+		g.pending--
+	}
+	if count := g.pendingByPrincipal[owner]; count <= 1 {
+		delete(g.pendingByPrincipal, owner)
+	} else {
+		g.pendingByPrincipal[owner] = count - 1
+	}
+}
+
 func (g *Gateway) connect(w http.ResponseWriter, r *http.Request) {
 	owner, ok := g.principal(w, r)
 	if !ok {
@@ -272,8 +305,7 @@ func (g *Gateway) connect(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		g.mu.Lock()
 		if reserved {
-			g.pending--
-			g.pendingByPrincipal[owner]--
+			g.releasePendingLocked(owner)
 		}
 		g.mu.Unlock()
 	}()
@@ -306,13 +338,12 @@ func (g *Gateway) connect(w http.ResponseWriter, r *http.Request) {
 	id := base64.RawURLEncoding.EncodeToString(token[:])
 	bs := &browserSession{id: id, owner: owner, conn: ss, ch: ch, last: time.Now(), changed: make(chan struct{})}
 	g.mu.Lock()
-	g.pending--
-	g.pendingByPrincipal[owner]--
+	g.releasePendingLocked(owner)
 	reserved = false
 	if !g.capacityLocked(owner) {
 		g.mu.Unlock()
 		_ = ss.Close(context.Background())
-		http.Error(w, "capacity exceeded", 503)
+		http.Error(w, "capacity exceeded", http.StatusServiceUnavailable)
 		return
 	}
 	g.sessions[id] = bs
@@ -335,9 +366,9 @@ func (g *Gateway) receive(bs *browserSession) {
 			break
 		}
 		bs.next++
-		bs.history = append(bs.history, Event{Cursor: bs.next, Data: base64.StdEncoding.EncodeToString(m.Payload)})
-		if len(bs.history) > g.c.History {
-			bs.history = append([]Event(nil), bs.history[len(bs.history)-g.c.History:]...)
+		encodedBytes := int64(base64.StdEncoding.EncodedLen(len(m.Payload)))
+		if encodedBytes+historyEventOverhead <= g.c.MaxHistoryBytes && encodedBytes+historyEventOverhead <= g.c.MaxTotalHistoryBytes {
+			g.appendHistoryLocked(bs, Event{Cursor: bs.next, Data: base64.StdEncoding.EncodeToString(m.Payload)})
 		}
 		close(bs.changed)
 		bs.changed = make(chan struct{})
@@ -348,6 +379,7 @@ func (g *Gateway) receive(bs *browserSession) {
 		bs.closed = true
 		close(bs.changed)
 		delete(g.sessions, bs.id)
+		g.clearHistoryLocked(bs)
 	}
 	g.mu.Unlock()
 	_ = bs.conn.Close(context.Background())
@@ -377,17 +409,54 @@ func (g *Gateway) disconnect(w http.ResponseWriter, r *http.Request) {
 		bs.closed = true
 		close(bs.changed)
 		delete(g.sessions, bs.id)
+		g.clearHistoryLocked(bs)
 	}
 	g.mu.Unlock()
 	_ = bs.conn.Close(context.Background())
 	w.WriteHeader(http.StatusNoContent)
+}
+
+const historyEventOverhead = int64(32)
+
+func (g *Gateway) appendHistoryLocked(bs *browserSession, event Event) {
+	cost := int64(len(event.Data)) + historyEventOverhead
+	if cost > g.c.MaxHistoryBytes || cost > g.c.MaxTotalHistoryBytes {
+		return
+	}
+	for len(bs.history) > 0 && (len(bs.history) >= g.c.History || bs.historyBytes+cost > g.c.MaxHistoryBytes || g.historyBytes+cost > g.c.MaxTotalHistoryBytes) {
+		oldest := bs.history[0]
+		oldestCost := int64(len(oldest.Data)) + historyEventOverhead
+		copy(bs.history, bs.history[1:])
+		bs.history[len(bs.history)-1] = Event{}
+		bs.history = bs.history[:len(bs.history)-1]
+		bs.historyBytes -= oldestCost
+		g.historyBytes -= oldestCost
+	}
+	if bs.historyBytes+cost > g.c.MaxHistoryBytes || g.historyBytes+cost > g.c.MaxTotalHistoryBytes {
+		return
+	}
+	bs.history = append(bs.history, event)
+	bs.historyBytes += cost
+	g.historyBytes += cost
+}
+
+// clearHistoryLocked releases the gateway and per-session accounting. The
+// caller holds g.mu.
+func (g *Gateway) clearHistoryLocked(bs *browserSession) {
+	if bs == nil || bs.historyBytes == 0 {
+		return
+	}
+	g.historyBytes -= bs.historyBytes
+	bs.historyBytes = 0
+	bs.history = nil
 }
 func (g *Gateway) send(w http.ResponseWriter, r *http.Request) {
 	owner, ok := g.principal(w, r)
 	if !ok {
 		return
 	}
-	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+	mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaErr != nil || mediaType != "application/json" {
 		http.Error(w, "JSON required", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -396,12 +465,23 @@ func (g *Gateway) send(w http.ResponseWriter, r *http.Request) {
 		Session string `json:"session"`
 		Data    string `json:"data"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", 400)
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
 		http.Error(w, "invalid JSON", 400)
 		return
 	}
 	bs, ok := g.lookup(w, r, owner, req.Session)
 	if !ok {
+		return
+	}
+	if len(req.Data) > base64.StdEncoding.EncodedLen(256<<10) {
+		http.Error(w, "invalid payload", 400)
 		return
 	}
 	payload, err := base64.StdEncoding.DecodeString(req.Data)
@@ -427,7 +507,17 @@ func (g *Gateway) read(bs *browserSession, after uint64) ([]Event, <-chan struct
 	if bs.closed {
 		return nil, nil, http.StatusGone
 	}
-	if len(bs.history) > 0 && after < bs.history[0].Cursor-1 {
+	expected := after + 1
+	for _, e := range bs.history {
+		if e.Cursor <= after {
+			continue
+		}
+		if e.Cursor != expected {
+			return nil, nil, http.StatusConflict
+		}
+		expected = e.Cursor + 1
+	}
+	if expected != 0 && expected <= bs.next {
 		return nil, nil, http.StatusConflict
 	}
 	events := make([]Event, 0)
@@ -498,18 +588,24 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("X-Accel-Buffering", "no")
+	started := false
 	for {
 		events, changed, status := g.read(bs, cursor)
 		if status != 0 {
+			if !started {
+				http.Error(w, "cursor no longer retained", status)
+			}
 			return
 		}
 		for _, e := range events {
 			if err := json.NewEncoder(w).Encode(e); err != nil {
 				return
 			}
+			started = true
 			cursor = e.Cursor
 		}
 		w.(http.Flusher).Flush()
+		started = true
 		timer := time.NewTimer(15 * time.Second)
 		select {
 		case <-r.Context().Done():

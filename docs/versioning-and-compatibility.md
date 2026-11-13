@@ -41,7 +41,7 @@ Reaching `v1.0.0` signals a formal commitment to backwards compatibility:
 3. **Deprecation Cycle**:
    - Obsolete methods or configurations will be marked with a `// Deprecated:` comment at least **one minor version** before removal, providing alternatives and deprecation timelines.
 4. **Supported Go Versions**:
-   - `fh` supports the two most recent major Go releases (e.g. Go 1.27 and Go 1.26), matching the official Go release and security support window.
+   - `fh` tracks the two most recent major Go releases when the module's minimum permits. The root `go.mod` is authoritative and may require a newer patched point release for security fixes; the current minimum is Go 1.27.4.
 
 ---
 

@@ -8,7 +8,14 @@
 // mechanics of "keep this durably, keyed by an arbitrary string, with an
 // optional TTL" — sharded locking, atomic file writes, key-to-filename hashing,
 // directory permissions, background expiry sweeps — live here once, in
-// MemoryStore and FileStore.
+// MemoryStore and FileStore. Both reject keys larger than 4 KiB and values
+// larger than 8 MiB by default. MemoryStore also defaults to a 100,000-entry
+// soft cap and a 256 MiB logical
+// key/value byte budget (excluding allocator and map overhead). Configure
+// explicit limits for the workload, and use WithRejectWhenFull for state that
+// must not evict live entries. Entry and byte limits are divided among shards,
+// so a skewed key distribution can exhaust one shard before the aggregate
+// limit.
 package kv
 
 import (
@@ -23,8 +30,11 @@ var ErrClosed = errors.New("kv: store is closed")
 // entry size.
 var ErrTooLarge = errors.New("kv: value exceeds maximum entry size")
 
-// ErrCapacityExceeded is returned by Set when a store enforcing a maximum
-// entry count is full and cannot admit a new key.
+// ErrKeyTooLarge is returned when a key exceeds a store's configured maximum.
+var ErrKeyTooLarge = errors.New("kv: key exceeds maximum size")
+
+// ErrCapacityExceeded is returned by Set or Mutate when a configured entry
+// count or byte budget cannot admit the write.
 var ErrCapacityExceeded = errors.New("kv: capacity exceeded")
 
 // Store is a generic byte-oriented key-value store with optional per-entry
@@ -57,7 +67,8 @@ type Store interface {
 	// Get/Set use for key for its entire duration, so callers implementing
 	// counters (rate limiters, window counts, reputation scores) get a
 	// race-free read-modify-write without needing their own locking or a
-	// separate compare-and-swap dance.
+	// separate compare-and-swap dance. The current bytes are an isolated
+	// snapshot: modifying or retaining them cannot mutate the stored value.
 	Mutate(key string, fn func(current []byte, exists bool) (next []byte, ttl time.Duration, ok bool, err error)) error
 }
 

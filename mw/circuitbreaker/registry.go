@@ -10,12 +10,14 @@ import (
 )
 
 var ErrRegistryFull = errors.New("circuitbreaker: registry capacity reached")
+var ErrRegistryKeyTooLarge = errors.New("circuitbreaker: registry key exceeds maximum size")
 
 // RegistryConfig configures a bounded collection of per-dependency breakers.
 type RegistryConfig struct {
-	Breaker    Config
-	MaxEntries int
-	IdleTTL    time.Duration
+	Breaker     Config
+	MaxEntries  int
+	MaxKeyBytes int
+	IdleTTL     time.Duration
 }
 
 type registryEntry struct {
@@ -33,12 +35,17 @@ type Registry struct {
 	entries map[string]*registryEntry
 }
 
+const defaultRegistryMaxKeyBytes = 1024
+
 func NewRegistry(cfg RegistryConfig) (*Registry, error) {
 	if cfg.MaxEntries == 0 {
 		cfg.MaxEntries = 1024
 	}
 	if cfg.MaxEntries < 1 {
 		return nil, errors.New("circuitbreaker: registry MaxEntries must be positive")
+	}
+	if cfg.MaxKeyBytes <= 0 {
+		cfg.MaxKeyBytes = defaultRegistryMaxKeyBytes
 	}
 	if cfg.IdleTTL < 0 {
 		return nil, errors.New("circuitbreaker: registry IdleTTL cannot be negative")
@@ -60,6 +67,9 @@ func NewRegistry(cfg RegistryConfig) (*Registry, error) {
 func (r *Registry) GetOrCreate(key string) (*Breaker, error) {
 	if key == "" {
 		return nil, errors.New("circuitbreaker: registry key cannot be empty")
+	}
+	if len(key) > r.cfg.MaxKeyBytes {
+		return nil, ErrRegistryKeyTooLarge
 	}
 	nowNS := r.now().UnixNano()
 
@@ -159,8 +169,8 @@ func (r *Registry) Handler(key func(fh.Ctx) string) fh.HandlerFunc {
 			return fh.NewHTTPError(
 				fh.StatusServiceUnavailable,
 				"CIRCUIT_REGISTRY_UNAVAILABLE",
-				err.Error(),
-			)
+				"Circuit breaker capacity is temporarily unavailable",
+			).WithCause(err)
 		}
 		return breaker.handle(c)
 	}

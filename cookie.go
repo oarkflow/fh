@@ -39,10 +39,19 @@ func (c *Cookie) Valid() error {
 	if c == nil || !validToken([]byte(c.Name)) || c.Name == "" || !validCookieValue(c.Value) {
 		return ErrInvalidCookie
 	}
-	if len(c.Name) > 256 || len(c.Value) > 4096 {
+	if len(c.Name) > 256 || len(c.Value) > 4096 || !validCookieAttributeValue(c.Path) {
 		return ErrInvalidCookie
 	}
-	if strings.ContainsAny(c.Path, ";\x00\r\n") || strings.ContainsAny(c.Domain, ";\x00\r\n") {
+	// Keep the complete Set-Cookie field within the same bound used by
+	// response headers, including attribute names, separators and fixed flags.
+	remaining := maxHeaderValueLength - 192
+	for _, n := range []int{len(c.Name), len(c.Value), len(c.Path), len(c.Domain)} {
+		if n > remaining {
+			return ErrInvalidCookie
+		}
+		remaining -= n
+	}
+	if strings.ContainsAny(c.Domain, ";\x00\r\n") {
 		return ErrInvalidCookie
 	}
 	if c.Domain != "" && !validCookieDomain(c.Domain) {
@@ -118,6 +127,15 @@ func validCookieValue(value string) bool {
 	for i := 0; i < len(value); i++ {
 		c := value[i]
 		if c < 0x21 || c > 0x7e || c == '"' || c == ',' || c == ';' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+func validCookieAttributeValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7e || value[i] == ';' {
 			return false
 		}
 	}

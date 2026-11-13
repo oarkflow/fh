@@ -35,3 +35,6 @@ Run before handlers or proxy routes that perform retries. Pair with circuit brea
 ## Production considerations
 
 Budget by tenant, route, upstream, or API key. Monitor exhausted budgets and tune refill rates.
+Custom keys are limited to 256 bytes by default (`MaxKeyBytes`); oversized keys
+are rejected with `400` before they enter the tracking map. The number of
+tracked keys is also bounded by `MaxKeys`.

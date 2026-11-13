@@ -17,6 +17,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oarkflow/fh/protocol"
@@ -57,14 +58,21 @@ type Hub struct {
 	// its command channel.
 	OnResult func(device string, payload []byte)
 
-	mu   sync.RWMutex
-	cmd  map[string]protocol.Channel
-	last map[string]Device
+	mu                  sync.RWMutex
+	cmd                 map[string]protocol.Channel
+	last                map[string]Device
+	telemetryGeneration map[string]uint64
+	nextGeneration      atomic.Uint64
 }
 
 // NewHub returns an empty Hub with the given identity policy.
 func NewHub(allow func(identity string) bool) *Hub {
-	return &Hub{Allow: allow, cmd: map[string]protocol.Channel{}, last: map[string]Device{}}
+	return &Hub{
+		Allow:               allow,
+		cmd:                 map[string]protocol.Channel{},
+		last:                map[string]Device{},
+		telemetryGeneration: map[string]uint64{},
+	}
 }
 
 // Authorize is the mira.ChannelAuthorizer for the fleet profile: allowed
@@ -92,13 +100,27 @@ func (h *Hub) Handle(ctx context.Context, identity string, ch protocol.Channel) 
 	}
 	switch cc.Config().Delivery {
 	case protocol.LatestState:
+		generation := h.nextGeneration.Add(1)
+		h.mu.Lock()
+		h.telemetryGeneration[identity] = generation
+		h.mu.Unlock()
+		defer func() {
+			h.mu.Lock()
+			if h.telemetryGeneration[identity] == generation {
+				delete(h.telemetryGeneration, identity)
+				delete(h.last, identity)
+			}
+			h.mu.Unlock()
+		}()
 		for {
 			msg, err := ch.Receive(ctx)
 			if err != nil {
 				return nil
 			}
 			h.mu.Lock()
-			h.last[identity] = Device{ID: identity, Telemetry: msg.Payload, UpdatedAt: time.Now()}
+			if h.telemetryGeneration[identity] == generation {
+				h.last[identity] = Device{ID: identity, Telemetry: msg.Payload, UpdatedAt: time.Now()}
+			}
 			h.mu.Unlock()
 		}
 	case protocol.ReliableOrdered:

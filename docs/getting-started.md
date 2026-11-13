@@ -6,7 +6,7 @@
 go get github.com/oarkflow/fh
 ```
 
-**Requirements:** Go 1.26.5 or later. The module is currently pre-v1, so pin a
+**Requirements:** Go 1.27.4 or later. The module is currently pre-v1, so pin a
 specific release and review release notes before upgrading.
 
 ## Quick Start
@@ -81,7 +81,7 @@ app.Add("PURGE", "/cache", purgeCache) // custom method
 app.Query("/search", func(c fh.Ctx) error {
     var q SearchRequest
     if err := c.BodyParser(&q); err != nil {
-        return fh.NewHTTPError(fh.StatusBadRequest, "INVALID_QUERY", err.Error())
+        return fh.WrapHTTPError(err, fh.StatusBadRequest, "INVALID_QUERY", "Query body is invalid")
     }
     return c.JSON(search(q))
 })
@@ -291,7 +291,7 @@ func main() {
     api.Post("/users", func(c fh.Ctx) error {
         var input map[string]any
         if err := c.BodyParser(&input); err != nil {
-            return fh.NewHTTPError(fh.StatusBadRequest, "INVALID_BODY", err.Error())
+            return fh.WrapHTTPError(err, fh.StatusBadRequest, "INVALID_BODY", "Request body is invalid")
         }
         return c.Status(fh.StatusCreated).JSON(input)
     })

@@ -109,10 +109,13 @@ for the full breakdown of what each constructor does and does not cover.
 | `ReadBufferSize` | 16KB | Initial buffer size for reading requests |
 | `WriteBufferSize` | ReadBufferSize | Initial reusable response buffer size per HTTP/1 connection |
 | `MaxRequestBodySize` | 4MB | Maximum allowed request body size |
-| `MaxHeaderListSize` | 64KB | Maximum total header size |
+| `MaxBufferedRequestBytes` | Disabled; 64MB with `SecureByDefault` | Process-wide budget for request bodies buffered in memory |
+| `MaxBufferedResponseBytes` | Disabled; 64MB with `SecureByDefault` | Process-wide budget for response transforms and buffered streams |
+| `MaxHeaderListSize` | 64KB | Maximum HTTP/1 header or trailer section size; HTTP/2 caps each decoded field block at 256KB |
 | `MaxHeaderCount` | 64 | Maximum number of headers |
 | `MaxRequestLineSize` | 8KB | Maximum request line length |
 | `MaxConnectionsPerIP` | 100 in production/secure profiles | Maximum simultaneous TCP connections from one socket peer |
+| `MaxInFlightRequests` | Disabled; 5,000 with `SecureByDefault` | Caps concurrent handlers; HTTP/2 refuses excess streams before starting handler goroutines |
 
 ### HTTP/2
 
@@ -275,6 +278,7 @@ type StaticConfig struct {
     NotFoundHandler fh.HandlerFunc  // Optional SPA/custom fallback
     PreCompressed bool              // Serve .br/.gz sidecars when accepted
     MaxRanges     int               // Default: 16
+    MaxBrowseEntries int            // Default: 1000, maximum: 10000
 }
 ```
 

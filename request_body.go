@@ -21,11 +21,23 @@ func ReplaceRequestBodyReader(c Ctx, reader io.Reader) bool {
 }
 
 func (c *DefaultCtx) SetRequestBodyReader(reader io.Reader) {
+	// Keep prior reservations until request cleanup: the supplied reader may
+	// still reference the body being replaced (for example, a decoder over the
+	// compressed input).
+	c.requestBodyStreamErr = nil
 	c.requestBodyOverride = reader
 	c.requestBodyLimit = nil
 	c.body = nil
-	c.bodyParserMapPtr = 0
-	c.bodyParserRawJSON = nil
+	limit := c.requestBodyMaxLimit
+	if c.server != nil && c.server.cfg.MaxRequestBodySize > 0 {
+		appLimit := int64(c.server.cfg.MaxRequestBodySize)
+		if limit == 0 || appLimit < limit {
+			limit = appLimit
+		}
+	}
+	if limit > 0 {
+		c.requestBodyLimit = &boundedRequestReader{reader: reader, left: limit}
+	}
 }
 
 // ReplaceRequestBody installs a middleware-produced request body for the
@@ -57,12 +69,22 @@ func (c *DefaultCtx) TrySetRequestBody(body []byte) bool {
 	if c.server != nil && c.server.cfg.MaxRequestBodySize > 0 && len(body) > c.server.cfg.MaxRequestBodySize {
 		return false
 	}
+	if c.requestBodyMaxLimit > 0 && int64(len(body)) > c.requestBodyMaxLimit {
+		return false
+	}
+	if !c.reserveRequestBody(int64(cap(body))) {
+		c.requestBodyStreamErr = ErrBufferedBodyBudget
+		return false
+	}
+	oldReserved := c.requestBodyBufferedReserved
+	c.requestBodyBufferedReserved = int64(cap(body))
+	if c.server != nil && oldReserved > 0 {
+		c.server.releaseBufferedBody(oldReserved)
+	}
 	c.body = body
 	c.requestBodyOverride = bytes.NewReader(body)
 	c.requestBodyLimit = nil
 	c.Header.ContentLength = len(body)
 	c.Header.HasContentLength = true
-	c.bodyParserMapPtr = 0
-	c.bodyParserRawJSON = nil
 	return true
 }

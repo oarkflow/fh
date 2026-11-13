@@ -53,7 +53,11 @@ func Send(ctx context.Context, ch protocol.Channel, name string, r io.Reader, si
 	rejected := make(chan string, 1)
 	go func() {
 		if m, rerr := ch.Receive(ctx); rerr == nil {
-			rejected <- string(m.Payload)
+			reason := "transfer_rejected"
+			if validRejectionCode(m.Payload) {
+				reason = string(m.Payload)
+			}
+			rejected <- reason
 			cancel()
 		}
 	}()
@@ -133,7 +137,7 @@ func isBackpressure(err error) bool {
 // publish it only from commit.
 func Receive(ctx context.Context, ch protocol.Channel, dst io.Writer, maxSize int64, commit func(Header) error) (Header, error) {
 	reject := func(err error) (Header, error) {
-		_, _ = ch.Send(ctx, []byte(err.Error()))
+		_, _ = ch.Send(ctx, []byte(rejectionCode(err)))
 		return Header{}, err
 	}
 	m, err := ch.Receive(ctx)
@@ -185,4 +189,29 @@ func Receive(ctx context.Context, ch protocol.Channel, dst io.Writer, maxSize in
 			return reject(ErrProtocol)
 		}
 	}
+}
+
+func rejectionCode(err error) string {
+	switch {
+	case errors.Is(err, ErrTooLarge):
+		return "too_large"
+	case errors.Is(err, ErrIntegrity):
+		return "integrity_failed"
+	case errors.Is(err, ErrProtocol):
+		return "protocol_error"
+	default:
+		return "transfer_rejected"
+	}
+}
+
+func validRejectionCode(code []byte) bool {
+	if len(code) == 0 || len(code) > 64 {
+		return false
+	}
+	for _, b := range code {
+		if (b < 'a' || b > 'z') && (b < '0' || b > '9') && b != '_' {
+			return false
+		}
+	}
+	return true
 }

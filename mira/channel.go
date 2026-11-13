@@ -412,9 +412,6 @@ func decodeOpen(body []byte) (uint64, protocol.ChannelConfig, bool) {
 // DATA v4 contains the sender's chosen fragment size. A message's fragments
 // must all agree on this size; this permits PMTU discovery without corrupting
 // in-flight reassembly when the path changes between messages.
-func encodeData(id, msg, total, offset uint64, data []byte) []byte {
-	return encodeDataSized(id, msg, total, offset, fragmentSize, data)
-}
 func encodeDataSized(id, msg, total, offset, size uint64, data []byte) []byte {
 	b := binary.AppendUvarint(nil, id)
 	b = binary.AppendUvarint(b, msg)

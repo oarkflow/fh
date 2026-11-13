@@ -80,7 +80,7 @@ func Enable(app *fh.App, cfg Config) *fh.App {
 		defer cancel()
 		jobs, err := q.ListJobs(ctx, c.Query("state"), limit)
 		if err != nil {
-			return c.Status(fh.StatusNotImplemented).JSON(fh.Map{"error": err.Error()})
+			return fh.WrapHTTPError(err, fh.StatusInternalServerError, "QUEUE_LIST_FAILED", "Queue jobs could not be listed")
 		}
 		return c.JSON(fh.Map{"jobs": jobs, "count": len(jobs)})
 	})
@@ -92,7 +92,7 @@ func Enable(app *fh.App, cfg Config) *fh.App {
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 		defer cancel()
 		if err := q.RetryFailed(ctx, c.Param("id")); err != nil {
-			return c.Status(fh.StatusBadRequest).JSON(fh.Map{"error": err.Error()})
+			return fh.WrapHTTPError(err, fh.StatusBadRequest, "QUEUE_RETRY_FAILED", "Queue job could not be retried")
 		}
 		return c.Status(fh.StatusAccepted).JSON(fh.Map{"status": "requeued", "id": c.Param("id")})
 	})
@@ -104,7 +104,7 @@ func Enable(app *fh.App, cfg Config) *fh.App {
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 		defer cancel()
 		if err := q.DiscardFailed(ctx, c.Param("id")); err != nil {
-			return c.Status(fh.StatusBadRequest).JSON(fh.Map{"error": err.Error()})
+			return fh.WrapHTTPError(err, fh.StatusBadRequest, "QUEUE_DISCARD_FAILED", "Queue job could not be discarded")
 		}
 		return c.Status(fh.StatusAccepted).JSON(fh.Map{"status": "discarded", "id": c.Param("id")})
 	})
@@ -127,7 +127,7 @@ func Enable(app *fh.App, cfg Config) *fh.App {
 		defer cancel()
 		n, err := q.PurgeJobs(ctx, state, before, limit)
 		if err != nil {
-			return c.Status(fh.StatusBadRequest).JSON(fh.Map{"error": err.Error()})
+			return fh.WrapHTTPError(err, fh.StatusBadRequest, "QUEUE_PURGE_FAILED", "Queue jobs could not be purged")
 		}
 		return c.Status(fh.StatusAccepted).JSON(fh.Map{"status": "purged", "count": n, "state": state})
 	})

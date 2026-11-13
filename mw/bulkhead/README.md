@@ -35,3 +35,7 @@ Place around expensive route groups or before handlers that call constrained dep
 ## Production considerations
 
 Tune limits per dependency capacity. Expose metrics for in-flight, accepted, and rejected requests. Combine with timeouts and circuit breakers.
+Per-key buckets are retained only while requests are active or queued. The
+default limits are 1,024 simultaneous distinct keys and 256 bytes per key;
+configure `MaxBuckets` and `MaxKeyBytes` for the workload. Oversized keys
+receive `400`; a new key at bucket capacity uses the configured reject handler.

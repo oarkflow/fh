@@ -80,7 +80,7 @@ test:linux:
   tags: [linux]
   parallel:
     matrix:
-      - GO_VERSION: ["1.27.3", "1.27"]
+      - GO_VERSION: ["1.27.4", "1.27"]
   script:
     - go build ./...
     - go test ./... -count=1

@@ -32,6 +32,7 @@ type Config struct {
 	SuspiciousThreshold float64
 	DecayRate           float64
 	MaxEntries          int
+	MaxKeyBytes         int
 	BlockDuration       time.Duration
 	KeyFunc             func(fh.Ctx) string
 	OnBlocked           func(fh.Ctx, *Score) error
@@ -62,6 +63,9 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 		}
 
 		key := cfg.KeyFunc(c)
+		if len(key) > cfg.MaxKeyBytes {
+			return fh.NewHTTPError(fh.StatusBadRequest, "REPUTATION_KEY_TOO_LARGE", "reputation key is too long")
+		}
 		ip := extractIP(key)
 
 		if whitelist[ip] {
@@ -110,11 +114,28 @@ func normalize(cfg Config) Config {
 	if cfg.MaxEntries <= 0 {
 		cfg.MaxEntries = 100000
 	}
+	if cfg.MaxKeyBytes <= 0 {
+		cfg.MaxKeyBytes = 256
+	}
 	if cfg.BlockDuration <= 0 {
 		cfg.BlockDuration = 30 * time.Minute
 	}
 	if cfg.Store == nil {
-		cfg.Store = kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(cfg.MaxEntries))
+		// Leave bounded room for concurrent first writes so the score index can
+		// evict its lowest-reputation entries before the backing store reaches
+		// capacity. Rejecting beyond this margin avoids the store's default
+		// arbitrary-live-entry eviction, which could otherwise forget a block.
+		maxInt := int(^uint(0) >> 1)
+		slack := max(1, cfg.MaxEntries/10)
+		storeMaxEntries := cfg.MaxEntries
+		if cfg.MaxEntries <= maxInt-slack {
+			storeMaxEntries += slack
+		}
+		cfg.Store = kv.NewMemoryStore(
+			kv.WithShardCount(1),
+			kv.WithMaxEntries(storeMaxEntries),
+			kv.WithRejectWhenFull(),
+		)
 	}
 	if cfg.KeyFunc == nil {
 		cfg.KeyFunc = func(c fh.Ctx) string { return c.IP() }

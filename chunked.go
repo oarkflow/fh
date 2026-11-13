@@ -14,14 +14,15 @@ var (
 )
 
 const maxChunkLine = 4096
+const defaultMaxTrailerBytes = 64 << 10
 
-// readChunkedBody decodes one RFC 9112 chunked body. Initial may also contain
-// bytes from the next pipelined request; those are returned as leftover.
-func readChunkedBody(conn net.Conn, initial []byte, maxBody int, timeout time.Duration) (body, leftover []byte, trailers []Header, err error) {
-	return readChunkedBodyWithReserve(conn, initial, maxBody, timeout, nil)
-}
-
-func readChunkedBodyWithReserve(conn net.Conn, initial []byte, maxBody int, timeout time.Duration, reserve func(int) bool) (body, leftover []byte, trailers []Header, err error) {
+// readChunkedBodyWithLimits decodes one RFC 9112 chunked body. Initial may
+// also contain bytes from the next pipelined request; those are returned as
+// leftover.
+func readChunkedBodyWithLimits(conn net.Conn, initial []byte, maxBody, maxTrailerBytes int, timeout time.Duration, reserve func(int) bool) (body, leftover []byte, trailers []Header, err error) {
+	if maxTrailerBytes <= 0 {
+		maxTrailerBytes = defaultMaxTrailerBytes
+	}
 	// Arm one absolute body deadline. Resetting it for every chunk would let a
 	// slow sender keep the connection alive indefinitely by periodically sending
 	// a byte. A zero timeout intentionally leaves the caller's deadline intact.
@@ -50,6 +51,14 @@ func readChunkedBodyWithReserve(conn net.Conn, initial []byte, maxBody int, time
 			return io.ErrNoProgress
 		}
 		return nil
+	}
+	compactWire := func() {
+		if pos == 0 {
+			return
+		}
+		remaining := copy(wire, wire[pos:])
+		wire = wire[:remaining]
+		pos = 0
 	}
 
 	readLine := func() ([]byte, error) {
@@ -80,6 +89,7 @@ func readChunkedBodyWithReserve(conn net.Conn, initial []byte, maxBody int, time
 		return nil
 	}
 
+	trailerBytes := 0
 	for {
 		line, lineErr := readLine()
 		if lineErr != nil {
@@ -92,8 +102,20 @@ func readChunkedBodyWithReserve(conn net.Conn, initial []byte, maxBody int, time
 		if !ok {
 			return nil, nil, nil, ErrInvalidChunkedBody
 		}
+		// Discard consumed size lines and extensions periodically. Without
+		// compaction, a bounded decoded body could retain unbounded wire framing
+		// from a client that sends many small chunks or oversized extensions.
+		if pos >= 4096 {
+			compactWire()
+		}
 		if size == 0 {
 			break
+		}
+		// Leave room for the chunk's trailing CRLF before adding it to size.
+		// A peer can send a syntactically valid hexadecimal size up to MaxInt;
+		// size+2 would wrap and skip ensure's read before the body slice below.
+		if size > int(^uint(0)>>1)-2 {
+			return nil, nil, nil, ErrBodyTooLarge
 		}
 		if size > maxBody-len(body) {
 			return nil, nil, nil, ErrBodyTooLarge
@@ -110,6 +132,9 @@ func readChunkedBodyWithReserve(conn net.Conn, initial []byte, maxBody int, time
 			return nil, nil, nil, ErrInvalidChunkedBody
 		}
 		pos += 2
+		if pos >= 4096 {
+			compactWire()
+		}
 	}
 
 	for {
@@ -120,6 +145,11 @@ func readChunkedBodyWithReserve(conn net.Conn, initial []byte, maxBody int, time
 		if len(line) == 0 {
 			break
 		}
+		lineBytes := len(line) + 2 // include the field's CRLF on the wire
+		if lineBytes > maxTrailerBytes-trailerBytes {
+			return nil, nil, nil, ErrInvalidChunkedBody
+		}
+		trailerBytes += lineBytes
 		colon := indexByte(line, ':')
 		if colon <= 0 || !validToken(line[:colon]) || len(trailers) >= maxHeaders {
 			return nil, nil, nil, ErrInvalidChunkedBody
@@ -127,8 +157,12 @@ func readChunkedBodyWithReserve(conn net.Conn, initial []byte, maxBody int, time
 		if bytesEqualFold(line[:colon], HeaderContentLengthBytes) || bytesEqualFold(line[:colon], HeaderTransferEncodingBytes) || bytesEqualFold(line[:colon], HeaderHostBytes) {
 			return nil, nil, nil, ErrInvalidChunkedBody
 		}
+		valueBytes := trimOWS(line[colon+1:])
+		if !validHeaderValueBytes(valueBytes) {
+			return nil, nil, nil, ErrInvalidChunkedBody
+		}
 		key := append([]byte(nil), line[:colon]...)
-		value := append([]byte(nil), trimOWS(line[colon+1:])...)
+		value := append([]byte(nil), valueBytes...)
 		trailers = append(trailers, Header{Key: key, Value: value})
 	}
 	leftover = append(leftover, wire[pos:]...)

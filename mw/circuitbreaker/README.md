@@ -41,6 +41,7 @@ registry, err := circuitbreaker.NewRegistry(circuitbreaker.RegistryConfig{
         ResetAfter:       30 * time.Second,
     },
     MaxEntries: 500,
+    MaxKeyBytes: 1024,
     IdleTTL:    15 * time.Minute,
 })
 if err != nil {
@@ -55,6 +56,11 @@ app.Use(registry.Handler(func(c fh.Ctx) string {
 ```
 
 Call `registry.Sweep()` periodically when `IdleTTL` is enabled.
+Registry keys default to a 1024-byte maximum (`MaxKeyBytes`) as well as the
+entry-count cap. Keep keys short and derived from configured dependency names;
+oversized keys are rejected with `ErrRegistryKeyTooLarge`. The HTTP middleware
+returns a generic 503 if it cannot allocate a breaker and retains the registry
+error as a private cause for internal diagnostics.
 
 ## Rolling failure rate
 

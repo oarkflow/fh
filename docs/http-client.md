@@ -2,6 +2,16 @@
 
 `fh.NewClient` provides a root-package outbound HTTP client with a middleware-first design, production defaults, typed JSON helpers, retries, circuit breaking, rate limiting, bulkheads, lifecycle hooks, metrics adapters, SSRF protection, request/response body limits, multipart upload, file download, async calls, batch calls, and `fh` JSON engine integration.
 
+The default transport retains at most 100 idle connections total and 10 per
+host, and allows at most 100 connections per host. Set
+`MaxIdleConns`, `MaxIdleConnsPerHost`, and `MaxConnsPerHost` explicitly when
+your measured workload needs different pool limits; larger limits can raise
+file-descriptor and upstream connection usage across many client instances.
+Set `ForceAttemptHTTP2` when custom dial or TLS settings would otherwise keep
+the standard transport from automatically enabling HTTP/2. HTTP/2 is enabled
+by default; set `DisableHTTP2` to turn it off for HTTP/1-only upstreams. If both
+are set, `ForceAttemptHTTP2` takes precedence.
+
 ## Minimal usage
 
 ```go
@@ -39,6 +49,18 @@ client.Use(
 )
 ```
 
+`ClientBulkhead` holds its slot until the response body reaches EOF or is
+closed. Close response bodies, including streamed responses, so capacity is
+returned promptly.
+
+`ClientLogger` and client error records use a sanitized URL: userinfo is fully
+masked, fragments are omitted, and query keys associated with credentials
+(including OAuth `code`, `state`, `nonce`, `signature`, and token fields) have
+their values removed. Error messages also scrub embedded URLs and common
+credential key/value forms before logging or formatting a `ClientError`.
+Lifecycle hooks receive the original `ClientEvent.Err` for `errors.Is` and
+`errors.As`; sanitize it before writing it to application logs.
+
 ## Security
 
 Enable strict outbound protections for untrusted URLs:
@@ -54,6 +76,20 @@ client := fh.NewClient(fh.ClientConfig{
 ```
 
 Strict mode blocks localhost, link-local and private IP targets unless explicitly allowed.
+Allowed and blocked host rules canonicalize DNS case/root dots and IP literal
+spellings, including bracketed IPv6 and IPv4-mapped IPv6.
+Strict mode also rejects a configured proxy because the proxy resolves the final
+destination and the client cannot pin that DNS result. Apply equivalent destination
+restrictions at the proxy if proxying is required. It also rejects a caller-supplied
+`Transport`, since fh cannot guarantee that a custom round tripper uses its validating
+dial path.
+Outbound security checks run after client middleware, so URL rewrites such as
+load balancing are validated against the final destination before transport.
+
+The default retry policy bounds total retry time and uses capped exponential
+backoff with jitter. If a custom policy leaves `MaxElapsed` unset, an upstream
+`Retry-After` longer than `MaxDelay` (two seconds when unset) ends retries
+instead of keeping the request goroutine waiting for an unbounded interval.
 
 ## Typed helpers
 
@@ -100,10 +136,17 @@ The root `fh` package HTTP client also includes:
 - streaming download support through `Response.DownloadTo`
 - stricter dial-path SSRF protection through `ClientSecurityDialContext`
 
-`ResponseBodyLimit` applies to `Response.Reader`, `Bytes`, `DownloadTo`, and
-`SaveAtomic`. An oversized response returns `ErrClientBodyTooLarge`. Streaming
-reads and downloads expose at most the configured number of bytes; an atomic
-download leaves its destination untouched on this error.
+`ResponseBodyLimit` applies to `Response.Raw.Body`, `Response.Reader`, `Bytes`,
+`DownloadTo`, and `SaveAtomic`. It defaults to 16 MiB so response reads cannot grow without
+bound; set it to a negative value to disable the limit. `Request.ResponseLimit`
+overrides it for one request, with the same negative-value opt-out. An oversized
+response returns `ErrClientBodyTooLarge`. Streaming reads and downloads expose
+at most the configured number of bytes; an atomic download leaves its
+destination untouched on this error.
+
+`Request.Param` values are escaped as individual URL path components, so
+reserved characters such as `/` remain escaped on the wire and are not
+double-encoded.
 
 ### Streaming multipart uploads and body limits
 
@@ -115,6 +158,14 @@ oversized bodies before sending and returns `ErrClientBodyTooLarge` when a
 stream crosses the limit. A streaming body may already have sent bytes when
 the limit is reached, so use a known-size body when the server must receive
 nothing on rejection.
+
+### Streaming request compression
+
+`ClientGzipRequest(min)` compresses request bodies through a pipe instead of
+buffering them in memory. A positive `min` uses a known `ContentLength` as the
+uncompressed-size threshold; if the length is unknown or below the threshold,
+the body is passed through unchanged. Replayable requests receive a matching
+gzip `GetBody` callback so retries and redirects send compressed data too.
 
 ### Service client
 
@@ -130,6 +181,17 @@ res, err := api.Get(ctx, "/users")
 ```go
 client.Use(fh.ClientCache(fh.NewMemoryHTTPCache(time.Minute, 1<<20)))
 ```
+
+The in-memory cache keeps at most 1,024 entries and an estimated 16 MiB of
+cached data. It bypasses credentialed requests (including URL userinfo),
+requests with sensitive query keys, conditional/range requests, responses with
+`Vary`, and `no-store`/`no-cache` requests or responses. It also bypasses
+requests with custom headers whose names indicate credentials or identity
+(such as API keys, tenant, account, or user identifiers). When composing it
+with middleware that adds credentials, install that middleware before
+`ClientCache` so cache hits also see the credentials and bypass storage. Cache
+keys are fixed-size hashes, so raw URL paths and query values are not retained
+as map keys.
 
 ### Request id and trace propagation
 

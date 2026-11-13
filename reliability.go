@@ -2,6 +2,7 @@ package fh
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,9 +10,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -31,7 +35,10 @@ const (
 	maxScannerBufSize = 1 << 18 // 256KB
 )
 
-var ErrQueueEmpty = errors.New("fh: queue empty")
+var (
+	ErrQueueEmpty         = errors.New("fh: queue empty")
+	ErrQueueJobIDConflict = errors.New("fh: queue job id already belongs to different work")
+)
 
 type ReliabilityConfig struct {
 	Enabled bool
@@ -115,6 +122,40 @@ type QueueStorage interface {
 type MultiReplicaQueueStorage interface {
 	QueueStorage
 	SupportsMultiReplica() bool
+}
+
+// MultiReplicaQueueKeyConcurrencyStorage marks stores that enforce
+// QueueConcurrencyLimitByKey across all replicas, rather than only within one
+// DurableQueue process.
+type MultiReplicaQueueKeyConcurrencyStorage interface {
+	SupportsMultiReplicaKeyConcurrency() bool
+}
+
+// QueueConcurrencyLeaseStorage provides cross-process serialization for a
+// concurrency key. The lease must be fenced by the job claim and expire if its
+// owner stops renewing it.
+type QueueConcurrencyLeaseStorage interface {
+	AcquireConcurrencyLease(context.Context, *QueueJob) (bool, error)
+	// ReleaseConcurrencyLease is called only after the job has successfully
+	// transitioned out of processing. Failed transitions must retain the lease
+	// until expiry, so an uncertain owner cannot overlap a new worker.
+	ReleaseConcurrencyLease(context.Context, *QueueJob) error
+}
+
+// QueueJobDeferrer moves a claimed job back to pending after a temporary
+// scheduling conflict without recording a handler failure or consuming an
+// attempt.
+type QueueJobDeferrer interface {
+	Defer(context.Context, *QueueJob, time.Duration) error
+}
+
+// QueueLeaseRenewer is an optional extension for queue stores that assign
+// expiring ownership leases when Claim succeeds. RenewLease must fail after a
+// lease expires or a newer fence has been issued. DurableQueue renews the lease
+// while the handler runs and cancels its context when ownership is lost.
+type QueueLeaseRenewer interface {
+	RenewLease(context.Context, *QueueJob) error
+	LeaseTTL() time.Duration
 }
 
 // QueueJobLister is an optional extension for QueueStorage implementations that
@@ -789,6 +830,12 @@ type QueueJob struct {
 	Priority       int               `json:"priority,omitempty"`
 	RunAt          time.Time         `json:"run_at,omitempty"`
 	ConcurrencyKey string            `json:"concurrency_key,omitempty"`
+	// LeaseFence increments for each SQL claim of this job ID and can be used
+	// by handlers to fence their own transactional side effects.
+	LeaseFence uint64 `json:"lease_fence,omitempty"`
+	// LeaseExpiresAt is the expiry observed when Claim returned. A lease renewer
+	// may extend the stored lease without mutating the handler's QueueJob.
+	LeaseExpiresAt time.Time `json:"lease_expires_at,omitempty"`
 }
 type QueueHandler func(context.Context, *QueueJob) error
 type QueueEvent struct {
@@ -822,6 +869,33 @@ type QueueJobSnapshot struct {
 	ConcurrencyKey string            `json:"concurrency_key,omitempty"`
 	PayloadBytes   int               `json:"payload_bytes"`
 	PayloadPreview string            `json:"payload_preview,omitempty"`
+}
+
+// SanitizeQueueJobSnapshot removes common secrets from queue metadata before
+// returning it to operational interfaces. Payloads and headers may contain
+// application credentials even when they are not named as credentials by the
+// queue itself.
+var queueSnapshotRedactor = NewRedactor(DefaultRedactionConfig())
+
+func SanitizeQueueJobSnapshot(snapshot QueueJobSnapshot) QueueJobSnapshot {
+	if len(snapshot.Headers) > 0 {
+		headers := maps.Clone(snapshot.Headers)
+		snapshot.Headers = headers
+		for key, value := range headers {
+			redacted := value
+			if queueSnapshotRedactor.isSensitive(key) {
+				redacted = queueSnapshotRedactor.Replacement
+			} else {
+				redacted = RedactSecrets(value)
+			}
+			if redacted != value {
+				headers[key] = redacted
+			}
+		}
+	}
+	snapshot.PayloadPreview = RedactSecrets(snapshot.PayloadPreview)
+	snapshot.LastError = RedactSecrets(snapshot.LastError)
+	return snapshot
 }
 
 type DurableQueue struct {
@@ -1008,11 +1082,15 @@ func (q *DurableQueue) processOne() bool {
 	if err != nil || job == nil {
 		return false
 	}
+	// Keep the ownership token separate from the handler-visible job. Handlers
+	// receive a mutable pointer and may change ID, LeaseFence or ConcurrencyKey;
+	// those values must not redirect renewal or a later state transition.
+	claim := *job
 	if q.cfg.ConcurrencyLimitByKey && job.ConcurrencyKey != "" {
 		q.mu.Lock()
 		if _, ok := q.activeKeys[job.ConcurrencyKey]; ok {
 			q.mu.Unlock()
-			_ = q.store.Retry(q.ctx, job, errors.New("concurrency key is busy"), q.cfg.Backoff)
+			q.deferJob(job, q.cfg.Backoff)
 			return true
 		}
 		q.activeKeys[job.ConcurrencyKey] = struct{}{}
@@ -1023,20 +1101,154 @@ func (q *DurableQueue) processOne() bool {
 	handler := q.handlers[job.Type]
 	q.mu.RUnlock()
 	if handler == nil {
-		_ = q.store.Retry(q.ctx, job, fmt.Errorf("no handler registered for job type %q", job.Type), q.cfg.Backoff)
+		q.retry(job, fmt.Errorf("no handler registered for job type %q", job.Type), q.cfg.Backoff)
 		return true
 	}
-	if err := handler(q.ctx, job); err != nil {
-		_ = q.store.Retry(q.ctx, job, err, q.cfg.Backoff)
+	concurrencyLeaseHeld := false
+	if q.cfg.ConcurrencyLimitByKey && job.ConcurrencyKey != "" {
+		if leases, ok := q.store.(QueueConcurrencyLeaseStorage); ok {
+			acquired, err := leases.AcquireConcurrencyLease(q.ctx, &claim)
+			if err != nil {
+				q.logStorageFailure("concurrency lease acquisition", job, err)
+				return true
+			}
+			if !acquired {
+				q.deferJob(job, q.cfg.Backoff)
+				return true
+			}
+			concurrencyLeaseHeld = true
+		}
+	}
+	handlerCtx, stopRenewal, lostLease := q.leaseContext(&claim)
+	handlerErr := invokeQueueHandler(handlerCtx, handler, job)
+	stopRenewal()
+	// Restore fields used to authenticate the claim and key lease before any
+	// completion, retry, logging or release operation observes handler changes.
+	job.ID = claim.ID
+	job.LeaseFence = claim.LeaseFence
+	job.LeaseExpiresAt = claim.LeaseExpiresAt
+	job.ConcurrencyKey = claim.ConcurrencyKey
+	select {
+	case err := <-lostLease:
+		q.logStorageFailure("lease renewal", job, err)
+		return true
+	default:
+	}
+	if handlerErr != nil {
+		if q.retry(job, handlerErr, q.cfg.Backoff) {
+			q.releaseConcurrencyLease(job, concurrencyLeaseHeld)
+		}
 		return true
 	}
 	if err := q.store.Complete(q.ctx, job); err != nil {
-		if q.cfg.LogError != nil {
-			q.cfg.LogError("queue job complete failed", "job_id", job.ID, "type", job.Type, "error", err)
-		}
+		q.logStorageFailure("complete", job, err)
+	} else {
+		q.releaseConcurrencyLease(job, concurrencyLeaseHeld)
 	}
 	return true
 }
+
+func (q *DurableQueue) leaseContext(job *QueueJob) (context.Context, func(), <-chan error) {
+	renewer, ok := q.store.(QueueLeaseRenewer)
+	if !ok || renewer.LeaseTTL() <= 0 {
+		return q.ctx, func() {}, nil
+	}
+	ctx, cancel := context.WithCancel(q.ctx)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	lost := make(chan error, 1)
+	interval := renewer.LeaseTTL() / 3
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				renewCtx, cancelRenew := context.WithTimeout(ctx, interval)
+				err := renewer.RenewLease(renewCtx, job)
+				cancelRenew()
+				if err != nil {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if ctx.Err() != nil {
+						return
+					}
+					lost <- err
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return ctx, func() {
+		close(stop)
+		cancel()
+		<-done
+	}, lost
+}
+
+func (q *DurableQueue) retry(job *QueueJob, cause error, backoff time.Duration) bool {
+	if err := q.store.Retry(q.ctx, job, cause, backoff); err != nil {
+		q.logStorageFailure("retry", job, err)
+		return false
+	}
+	return true
+}
+
+func (q *DurableQueue) deferJob(job *QueueJob, delay time.Duration) {
+	if deferrer, ok := q.store.(QueueJobDeferrer); ok {
+		if err := deferrer.Defer(q.ctx, job, delay); err != nil {
+			q.logStorageFailure("defer", job, err)
+		}
+		return
+	}
+	// Preserve compatibility with external adapters that have not implemented
+	// the optional no-attempt deferral operation yet.
+	q.retry(job, errors.New("concurrency key is busy"), delay)
+}
+
+func (q *DurableQueue) releaseConcurrencyLease(job *QueueJob, held bool) {
+	if job == nil || !held {
+		return
+	}
+	if leases, ok := q.store.(QueueConcurrencyLeaseStorage); ok {
+		if err := leases.ReleaseConcurrencyLease(q.ctx, job); err != nil {
+			q.logStorageFailure("concurrency lease release", job, err)
+		}
+	}
+}
+
+func (q *DurableQueue) logStorageFailure(operation string, job *QueueJob, err error) {
+	if q.cfg.LogError != nil {
+		q.cfg.LogError("queue storage operation failed", "operation", operation, "job_id", job.ID, "type", job.Type, "error", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "fh: queue storage operation failed: operation=%s job_id=%q type=%q error=%v\n", operation, job.ID, job.Type, err)
+}
+
+// invokeQueueHandler contains panics to the current job. A handler panic must
+// not escape to worker's goroutine-level recovery, which would permanently
+// remove that worker from the pool.
+func invokeQueueHandler(ctx context.Context, handler QueueHandler, job *QueueJob) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("fh: queue handler panic: %v", recovered)
+		}
+	}()
+	return handler(ctx, job)
+}
+
 func (q *DurableQueue) Stats() (QueueStats, error) {
 	if q == nil || q.store == nil {
 		return QueueStats{}, nil
@@ -1054,7 +1266,14 @@ func (q *DurableQueue) ListJobs(ctx context.Context, state string, limit int) ([
 	if !ok {
 		return nil, errors.New("fh: queue job listing unsupported by storage")
 	}
-	return lister.ListJobs(ctx, state, limit)
+	snapshots, err := lister.ListJobs(ctx, state, limit)
+	if err != nil {
+		return nil, err
+	}
+	for i := range snapshots {
+		snapshots[i] = SanitizeQueueJobSnapshot(snapshots[i])
+	}
+	return snapshots, nil
 }
 
 // FileQueueStorage is the default file/directory based QueueStorage.
@@ -1065,24 +1284,90 @@ type FileQueueStorageConfig struct {
 type FileQueueStorage struct {
 	dir      string
 	logError func(msg string, args ...any)
+	stateMu  *sync.Mutex
 	eventMu  sync.Mutex
 	events   *os.File
+}
+
+// Striped locks coordinate multiple storage handles opened for the same
+// canonical directory without retaining one mutex per historical directory.
+// A hash collision only serializes unrelated local queue operations.
+var fileQueueStateLocks [256]sync.Mutex
+
+func queueStateLock(dir string) *sync.Mutex {
+	key, err := filepath.Abs(dir)
+	if err == nil {
+		if resolved, resolveErr := filepath.EvalSymlinks(key); resolveErr == nil {
+			key = resolved
+		}
+	}
+	key = filepath.Clean(key)
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(key))
+	return &fileQueueStateLocks[h.Sum64()%uint64(len(fileQueueStateLocks))]
 }
 
 func OpenFileQueueStorage(cfg FileQueueStorageConfig) (*FileQueueStorage, error) {
 	if cfg.Dir == "" {
 		cfg.Dir = ".fh-reliability/queue"
 	}
-	for _, d := range []string{"pending", "processing", "done", "failed"} {
-		if err := os.MkdirAll(filepath.Join(cfg.Dir, d), 0o700); err != nil {
+	if err := ensureQueuePrivateDirectory(cfg.Dir); err != nil {
+		return nil, err
+	}
+	for _, d := range []string{"pending", "processing", "done", "failed", "quarantine"} {
+		if err := ensureQueuePrivateDirectory(filepath.Join(cfg.Dir, d)); err != nil {
 			return nil, err
 		}
 	}
-	events, err := os.OpenFile(filepath.Join(cfg.Dir, "events.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	eventsPath := filepath.Join(cfg.Dir, "events.jsonl")
+	before, beforeErr := os.Lstat(eventsPath)
+	if beforeErr != nil && !os.IsNotExist(beforeErr) {
+		return nil, beforeErr
+	}
+	if beforeErr == nil && (!before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0) {
+		return nil, fmt.Errorf("fh: queue event log %q must be a regular file", eventsPath)
+	}
+	events, err := os.OpenFile(eventsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	return &FileQueueStorage{dir: cfg.Dir, logError: cfg.LogError, events: events}, nil
+	fileInfo, statErr := events.Stat()
+	after, pathErr := os.Lstat(eventsPath)
+	if statErr != nil || pathErr != nil || !fileInfo.Mode().IsRegular() || !after.Mode().IsRegular() || !os.SameFile(fileInfo, after) || (beforeErr == nil && !os.SameFile(before, fileInfo)) {
+		_ = events.Close()
+		if statErr != nil {
+			return nil, statErr
+		}
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		return nil, fmt.Errorf("fh: queue event log %q changed or is not a regular file", eventsPath)
+	}
+	if runtime.GOOS != "windows" && fileInfo.Mode().Perm() != 0o600 {
+		_ = events.Close()
+		return nil, fmt.Errorf("fh: queue event log %q must have mode 0600 (has %04o)", eventsPath, fileInfo.Mode().Perm())
+	}
+	return &FileQueueStorage{dir: cfg.Dir, logError: cfg.LogError, stateMu: queueStateLock(cfg.Dir), events: events}, nil
+}
+
+func ensureQueuePrivateDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return err
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("fh: queue directory %q must be a real directory", path)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("fh: queue directory %q must have mode 0700 (has %04o)", path, info.Mode().Perm())
+	}
+	return nil
 }
 func (s *FileQueueStorage) Dir() string {
 	if s == nil {
@@ -1094,10 +1379,119 @@ func (s *FileQueueStorage) Enqueue(ctx context.Context, job *QueueJob) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := s.writeJobAtomic("pending", job); err != nil {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if err := s.enqueueJobAtomic(job); err != nil {
 		return err
 	}
-	return s.appendEvent("enqueued", "pending", job, "")
+	// The job file is authoritative; the event log is an observability record.
+	// Returning its append error would tell callers the enqueue failed even
+	// though the job is already durable, encouraging duplicate retries.
+	s.recordEvent("enqueued", "pending", job, "")
+	return nil
+}
+
+func (s *FileQueueStorage) enqueueJobAtomic(job *QueueJob) error {
+	if job == nil {
+		return errors.New("fh: nil queue job")
+	}
+	if job.ID == "" {
+		job.ID = newQueueID()
+	}
+	if !validQueueJobID(job.ID) {
+		return errors.New("fh: invalid queue job id")
+	}
+	job.UpdatedAt = time.Now().UTC()
+	b, err := json.MarshalIndent(job, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(s.dir, "pending")
+	f, err := os.CreateTemp(dir, ".job-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	// Check terminal states before pending so a retry cannot resurrect a job
+	// that has already completed or failed. stateMu serializes this check with
+	// local claims; Link supplies atomic create-if-absent semantics for pending.
+	if existing, state, found, err := s.findQueueJob(job.ID); err != nil {
+		return err
+	} else if found {
+		if !sameQueueJobRequest(existing, job) {
+			return ErrQueueJobIDConflict
+		}
+		return syncQueueDirectory(filepath.Join(s.dir, state))
+	}
+	final := filepath.Join(dir, job.ID+".json")
+	if err := os.Link(tmp, final); err != nil {
+		if !os.IsExist(err) {
+			return err
+		}
+		existing, state, found, lookupErr := s.findQueueJob(job.ID)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if !found {
+			return ErrQueueJobIDConflict
+		}
+		if !sameQueueJobRequest(existing, job) {
+			return ErrQueueJobIDConflict
+		}
+		return syncQueueDirectory(filepath.Join(s.dir, state))
+	}
+	_ = os.Remove(tmp)
+	return syncQueueDirectory(dir)
+}
+
+func (s *FileQueueStorage) findQueueJob(id string) (*QueueJob, string, bool, error) {
+	for _, state := range []string{"done", "failed", "processing", "pending"} {
+		path := filepath.Join(s.dir, state, id+".json")
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, "", false, err
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, "", false, fmt.Errorf("fh: existing queue job %q is not a regular file", id)
+		}
+		job, err := readJob(path)
+		if err != nil {
+			return nil, "", false, err
+		}
+		if job == nil || job.ID != id {
+			return nil, "", false, ErrQueueJobIDConflict
+		}
+		return job, state, true, nil
+	}
+	return nil, "", false, nil
+}
+
+func sameQueueJobRequest(a, b *QueueJob) bool {
+	return a != nil && b != nil &&
+		a.ID == b.ID && a.Type == b.Type && bytes.Equal(a.Payload, b.Payload) &&
+		maps.Equal(a.Headers, b.Headers) && a.MaxAttempts == b.MaxAttempts &&
+		a.Priority == b.Priority && a.RunAt.Equal(b.RunAt) &&
+		a.ConcurrencyKey == b.ConcurrencyKey
 }
 func (s *FileQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJob, error) {
 	files, err := os.ReadDir(filepath.Join(s.dir, "pending"))
@@ -1118,12 +1512,33 @@ func (s *FileQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJob,
 			continue
 		}
 		pending := filepath.Join(s.dir, "pending", ent.Name())
+		info, statErr := os.Lstat(pending)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			return nil, statErr
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			if s.logError != nil {
+				s.logError("queue job file is not a regular file, quarantining", "file", pending)
+			}
+			if err := s.quarantineQueueFile(pending, "pending", ent.Name()); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		job, err := readJob(pending)
+		if err == nil && (job == nil || !validQueueJobID(job.ID) || job.ID+".json" != ent.Name()) {
+			err = errors.New("fh: queue job id does not match its file name")
+		}
 		if err != nil {
 			if s.logError != nil {
-				s.logError("queue job file corrupt, removing", "file", pending, "error", err)
+				s.logError("queue job file corrupt, quarantining", "file", pending, "error", err)
 			}
-			_ = os.Remove(pending)
+			if quarantineErr := s.quarantineQueueFile(pending, "pending", ent.Name()); quarantineErr != nil {
+				return nil, quarantineErr
+			}
 			continue
 		}
 		if job.VisibleAt.IsZero() && !job.RunAt.IsZero() {
@@ -1147,10 +1562,17 @@ func (s *FileQueueStorage) Claim(ctx context.Context, now time.Time) (*QueueJob,
 		// queue directory, so exactly one process can move this pending job.
 		// This avoids the close-before-rename race of advisory file locks and
 		// works consistently on Unix, Windows, AIX and Plan 9.
+		s.stateMu.Lock()
 		if os.Rename(pending, processing) == nil {
-			_ = s.appendEvent("claimed", "processing", item.job, "")
+			if err := syncQueueMove(filepath.Dir(pending), filepath.Dir(processing)); err != nil {
+				s.stateMu.Unlock()
+				return nil, err
+			}
+			s.stateMu.Unlock()
+			s.recordEvent("claimed", "processing", item.job, "")
 			return item.job, nil
 		}
+		s.stateMu.Unlock()
 	}
 	return nil, ErrQueueEmpty
 }
@@ -1163,8 +1585,12 @@ func (s *FileQueueStorage) Complete(ctx context.Context, job *QueueJob) error {
 	if err := s.writeJobAtomic("done", job); err != nil {
 		return err
 	}
-	_ = s.appendEvent("completed", "done", job, "")
-	return os.Remove(filepath.Join(s.dir, "processing", job.ID+".json"))
+	s.recordEvent("completed", "done", job, "")
+	processing := filepath.Join(s.dir, "processing", job.ID+".json")
+	if err := os.Remove(processing); err != nil {
+		return err
+	}
+	return syncQueueDirectory(filepath.Dir(processing))
 }
 func (s *FileQueueStorage) Retry(ctx context.Context, job *QueueJob, cause error, backoff time.Duration) error {
 	if err := ctx.Err(); err != nil {
@@ -1186,9 +1612,57 @@ func (s *FileQueueStorage) Retry(ctx context.Context, job *QueueJob, cause error
 	if err := s.writeJobAtomic("pending", job); err != nil {
 		return err
 	}
-	_ = s.appendEvent("retry_scheduled", "pending", job, job.LastError)
-	return os.Remove(filepath.Join(s.dir, "processing", job.ID+".json"))
+	s.recordEvent("retry_scheduled", "pending", job, job.LastError)
+	processing := filepath.Join(s.dir, "processing", job.ID+".json")
+	if err := os.Remove(processing); err != nil {
+		return err
+	}
+	return syncQueueDirectory(filepath.Dir(processing))
 }
+
+func (s *FileQueueStorage) Defer(ctx context.Context, job *QueueJob, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if job == nil || !validQueueJobID(job.ID) {
+		return errors.New("fh: invalid queue job id")
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	processing := filepath.Join(s.dir, "processing", job.ID+".json")
+	info, err := os.Lstat(processing)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("fh: processing queue job %q is not a regular file", job.ID)
+	}
+	stored, err := readJob(processing)
+	if err != nil {
+		return err
+	}
+	if stored == nil || stored.ID != job.ID {
+		return ErrQueueJobIDConflict
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	now := time.Now().UTC()
+	stored.UpdatedAt = now
+	stored.VisibleAt = now.Add(delay)
+	if err := s.writeJobAtomic("pending", stored); err != nil {
+		return err
+	}
+	s.recordEvent("deferred", "pending", stored, "")
+	if err := os.Remove(processing); err != nil {
+		return err
+	}
+	return syncQueueDirectory(filepath.Dir(processing))
+}
+
 func (s *FileQueueStorage) Fail(ctx context.Context, job *QueueJob, cause error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1200,8 +1674,12 @@ func (s *FileQueueStorage) Fail(ctx context.Context, job *QueueJob, cause error)
 	if err := s.writeJobAtomic("failed", job); err != nil {
 		return err
 	}
-	_ = s.appendEvent("failed", "failed", job, job.LastError)
-	return os.Remove(filepath.Join(s.dir, "processing", job.ID+".json"))
+	s.recordEvent("failed", "failed", job, job.LastError)
+	processing := filepath.Join(s.dir, "processing", job.ID+".json")
+	if err := os.Remove(processing); err != nil {
+		return err
+	}
+	return syncQueueDirectory(filepath.Dir(processing))
 }
 func (s *FileQueueStorage) Recover(ctx context.Context) error {
 	files, err := os.ReadDir(filepath.Join(s.dir, "processing"))
@@ -1212,21 +1690,109 @@ func (s *FileQueueStorage) Recover(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if ent.IsDir() {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
 			continue
 		}
 		from := filepath.Join(s.dir, "processing", ent.Name())
 		to := filepath.Join(s.dir, "pending", ent.Name())
-		if job, err := readJob(from); err == nil {
+		info, statErr := os.Lstat(from)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			if err := s.quarantineQueueFile(from, "processing", ent.Name()); err != nil {
+				return err
+			}
+			continue
+		}
+		if job, err := readJob(from); err == nil && job != nil && validQueueJobID(job.ID) && job.ID+".json" == ent.Name() {
+			// Complete, Retry and Fail persist the destination record before
+			// removing the processing record. A crash in that window leaves two
+			// copies. Keep the already-persisted transition instead of allowing
+			// the older processing copy to overwrite it during recovery.
+			alreadyTransitioned := false
+			terminalTransition := false
+			for _, state := range []string{"done", "failed", "pending"} {
+				destination := filepath.Join(s.dir, state, ent.Name())
+				destinationInfo, destinationErr := os.Lstat(destination)
+				if os.IsNotExist(destinationErr) {
+					continue
+				}
+				if destinationErr != nil {
+					return destinationErr
+				}
+				if !destinationInfo.Mode().IsRegular() || destinationInfo.Mode()&os.ModeSymlink != 0 {
+					return fmt.Errorf("fh: queue recovery destination %q is not a regular file", destination)
+				}
+				destinationJob, readErr := readJob(destination)
+				if readErr != nil || destinationJob == nil || destinationJob.ID != job.ID {
+					return fmt.Errorf("fh: queue recovery destination %q conflicts with processing job %q", destination, job.ID)
+				}
+				alreadyTransitioned = true
+				terminalTransition = state == "done" || state == "failed"
+				break
+			}
+			if alreadyTransitioned {
+				if terminalTransition {
+					pendingPath := filepath.Join(s.dir, "pending", ent.Name())
+					pendingInfo, pendingErr := os.Lstat(pendingPath)
+					if pendingErr == nil {
+						if !pendingInfo.Mode().IsRegular() || pendingInfo.Mode()&os.ModeSymlink != 0 {
+							return fmt.Errorf("fh: queue recovery destination %q is not a regular file", pendingPath)
+						}
+						pendingJob, readErr := readJob(pendingPath)
+						if readErr != nil || pendingJob == nil || pendingJob.ID != job.ID {
+							return fmt.Errorf("fh: queue recovery destination %q conflicts with processing job %q", pendingPath, job.ID)
+						}
+						if err := os.Remove(pendingPath); err != nil {
+							return err
+						}
+						if err := syncQueueDirectory(filepath.Dir(pendingPath)); err != nil {
+							return err
+						}
+					} else if !os.IsNotExist(pendingErr) {
+						return pendingErr
+					}
+				}
+				if err := os.Remove(from); err != nil {
+					return err
+				}
+				if err := syncQueueDirectory(filepath.Dir(from)); err != nil {
+					return err
+				}
+				continue
+			}
 			if os.Rename(from, to) == nil {
-				_ = s.appendEvent("recovered", "pending", job, "")
+				if err := syncQueueMove(filepath.Dir(from), filepath.Dir(to)); err != nil {
+					return err
+				}
+				s.recordEvent("recovered", "pending", job, "")
 			}
 		} else {
-			_ = os.Rename(from, to)
+			if err := s.quarantineQueueFile(from, "processing", ent.Name()); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
+
+func (s *FileQueueStorage) quarantineQueueFile(path, sourceState, name string) error {
+	if s == nil {
+		return errors.New("fh: nil queue storage")
+	}
+	quarantineDir := filepath.Join(s.dir, "quarantine")
+	quarantineName := sourceState + "-" + newQueueEventID() + "-" + filepath.Base(name)
+	quarantinePath := filepath.Join(quarantineDir, quarantineName)
+	if err := os.Rename(path, quarantinePath); err != nil {
+		return err
+	}
+	return syncQueueMove(filepath.Dir(path), quarantineDir)
+}
+
 func (s *FileQueueStorage) Stats(ctx context.Context) (QueueStats, error) {
 	var st QueueStats
 	for _, item := range []struct {
@@ -1255,8 +1821,14 @@ func (s *FileQueueStorage) Close() error {
 	return s.events.Close()
 }
 func (s *FileQueueStorage) writeJobAtomic(state string, job *QueueJob) error {
+	if job == nil {
+		return errors.New("fh: nil queue job")
+	}
 	if job.ID == "" {
 		job.ID = newQueueID()
+	}
+	if !validQueueJobID(job.ID) {
+		return errors.New("fh: invalid queue job id")
 	}
 	job.UpdatedAt = time.Now().UTC()
 	b, err := json.MarshalIndent(job, "", "  ")
@@ -1268,9 +1840,14 @@ func (s *FileQueueStorage) writeJobAtomic(state string, job *QueueJob) error {
 		return err
 	}
 	final := filepath.Join(dir, job.ID+".json")
-	tmp := final + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	f, err := os.CreateTemp(dir, ".job-*.tmp")
 	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
 		return err
 	}
 	_, werr := f.Write(b)
@@ -1285,7 +1862,39 @@ func (s *FileQueueStorage) writeJobAtomic(state string, job *QueueJob) error {
 	if cerr != nil {
 		return cerr
 	}
-	return os.Rename(tmp, final)
+	if err := os.Rename(tmp, final); err != nil {
+		return err
+	}
+	return syncQueueDirectory(dir)
+}
+
+func syncQueueDirectory(path string) error {
+	// Go exposes directory fsync on Unix, but Windows directory handles do not
+	// support FlushFileBuffers. Job contents are still synced before rename;
+	// Windows directory-entry durability across sudden power loss is best-effort.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	syncErr := dir.Sync()
+	closeErr := dir.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
+}
+
+func syncQueueMove(fromDir, toDir string) error {
+	if err := syncQueueDirectory(fromDir); err != nil {
+		return err
+	}
+	if filepath.Clean(fromDir) == filepath.Clean(toDir) {
+		return nil
+	}
+	return syncQueueDirectory(toDir)
 }
 func (s *FileQueueStorage) appendEvent(event, state string, job *QueueJob, errText string) error {
 	if s == nil || job == nil {
@@ -1301,10 +1910,29 @@ func (s *FileQueueStorage) appendEvent(event, state string, job *QueueJob, errTe
 	if err != nil {
 		return err
 	}
-	if _, err = s.events.Write(append(b, '\n')); err != nil {
+	line := append(b, '\n')
+	n, err := s.events.Write(line)
+	if err != nil {
 		return err
 	}
+	if n != len(line) {
+		return io.ErrShortWrite
+	}
 	return s.events.Sync()
+}
+
+func (s *FileQueueStorage) recordEvent(event, state string, job *QueueJob, errText string) {
+	if err := s.appendEvent(event, state, job, errText); err != nil {
+		jobID := ""
+		if job != nil {
+			jobID = job.ID
+		}
+		if s != nil && s.logError != nil {
+			s.logError("queue event log append failed", "event", event, "job_id", jobID, "error", err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "fh: queue event log append failed: event=%s job_id=%s error=%v\n", event, jobID, err)
+	}
 }
 
 func readJob(path string) (*QueueJob, error) {
@@ -1689,7 +2317,7 @@ func snapshotQueueJob(state string, job *QueueJob) QueueJobSnapshot {
 	if len(preview) > maxPreview {
 		preview = preview[:maxPreview] + "..."
 	}
-	return QueueJobSnapshot{ID: job.ID, Type: job.Type, State: state, Headers: cloneStringMap(job.Headers), Attempts: job.Attempts, MaxAttempts: job.MaxAttempts, VisibleAt: job.VisibleAt, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt, LastError: job.LastError, Priority: job.Priority, RunAt: job.RunAt, ConcurrencyKey: job.ConcurrencyKey, PayloadBytes: len(job.Payload), PayloadPreview: preview}
+	return SanitizeQueueJobSnapshot(QueueJobSnapshot{ID: job.ID, Type: job.Type, State: state, Headers: cloneStringMap(job.Headers), Attempts: job.Attempts, MaxAttempts: job.MaxAttempts, VisibleAt: job.VisibleAt, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt, LastError: job.LastError, Priority: job.Priority, RunAt: job.RunAt, ConcurrencyKey: job.ConcurrencyKey, PayloadBytes: len(job.Payload), PayloadPreview: preview})
 }
 
 func cloneStringMap(in map[string]string) map[string]string {
@@ -1770,14 +2398,21 @@ func (s *FileQueueStorage) RequeueFailed(ctx context.Context, id string) error {
 	if err := s.writeJobAtomic("pending", j); err != nil {
 		return err
 	}
-	_ = s.appendEvent("requeued", "pending", j, "")
-	return os.Remove(path)
+	s.recordEvent("requeued", "pending", j, "")
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return syncQueueDirectory(filepath.Dir(path))
 }
 func (s *FileQueueStorage) DiscardFailed(ctx context.Context, id string) error {
 	if !validQueueJobID(id) {
 		return errors.New("fh: invalid queue job id")
 	}
-	return os.Remove(filepath.Join(s.dir, "failed", id+".json"))
+	path := filepath.Join(s.dir, "failed", id+".json")
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return syncQueueDirectory(filepath.Dir(path))
 }
 
 // validQueueJobID rejects anything that isn't a plain job-id token

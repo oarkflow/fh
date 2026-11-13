@@ -28,6 +28,11 @@ func main() {
 ## Impact
 
 No request-path overhead except for the registered debug endpoints. Profiling itself can add overhead while active.
+Generated profile output is capped at 16 MiB by default. Set
+`Config.MaxProfileBytes` to a different positive limit for the expected heap
+and goroutine profile sizes; oversized profiles return HTTP 413. One profile
+capture may run per `Enable` instance at a time; overlapping captures return
+HTTP 429 to bound aggregate memory use.
 
 ## Ordering guidance
 

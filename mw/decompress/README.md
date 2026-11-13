@@ -15,4 +15,6 @@ app.Post("/ingest",
 
 The compressed wire body remains subject to the server's
 `MaxRequestBodySize`; `MaxSize` separately bounds the decoded body.
-
+When the framework context buffers the decoded body, its retained capacity is
+reserved incrementally against `WithMaxBufferedRequestBytes`; exhausted budget
+returns a temporary `503` before the expanded body is retained.

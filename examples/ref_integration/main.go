@@ -76,7 +76,7 @@ func buildEngine() *ref.Engine {
 
 	// Feature A: CQRS / Event Sourcing (Tier-0 Event Bus)
 	bus := eventbus.NewBus()
-	
+
 	bus.Subscribe("OrderPlacedEvent", func(ctx context.Context, e eventbus.Event) error {
 		req := e.Payload["req"].(CheckoutRequest)
 		fmt.Printf("[CQRS/Async] Projected Order to Read-Model for User %s\n", req.UserID)
@@ -119,12 +119,12 @@ func buildEngine() *ref.Engine {
 		Spec: intent.Spec{
 			Requires: []fact.AnyKey{KeyCheckoutReq.Any(), KeyInventory.Any()},
 			// Feature D: Execution Budgets / Loadshedding
-			Timeout:       2 * time.Second, // Max time before aborting
-			MaxMemory:     1024 * 1024 * 5, // 5MB limit
-			MaxDBQueries:  10,              // Guardrails
+			Timeout:      2 * time.Second, // Max time before aborting
+			MaxMemory:    1024 * 1024 * 5, // 5MB limit
+			MaxDBQueries: 10,              // Guardrails
 		},
 		InputKey: KeyCheckoutReq.Any(),
-		
+
 		// Decode input manually (since we aren't using the built-in JSON HTTP decoder)
 		DecodeNode: func(nc *execution.NodeContext) error {
 			var req CheckoutRequest
@@ -147,7 +147,7 @@ func buildEngine() *ref.Engine {
 			if !available {
 				// Simulate notifying CQRS system of failure
 				bus.Publish(context.Background(), eventbus.Event{
-					Type: "OrderFailedEvent",
+					Type:    "OrderFailedEvent",
 					Payload: map[string]any{"req": req},
 				})
 				return nil, effect.EffectPlan{}, intent.OutcomeMeta{}, fmt.Errorf("insufficient inventory for item %s", req.ItemID)
@@ -180,7 +180,7 @@ func buildEngine() *ref.Engine {
 			// Execute the Saga Orchestrator
 			if err := s.Execute(context.Background()); err != nil {
 				bus.Publish(context.Background(), eventbus.Event{
-					Type: "OrderFailedEvent",
+					Type:    "OrderFailedEvent",
 					Payload: map[string]any{"req": req},
 				})
 				return nil, effect.EffectPlan{}, intent.OutcomeMeta{}, fmt.Errorf("checkout saga aborted: %w", err)
@@ -188,7 +188,7 @@ func buildEngine() *ref.Engine {
 
 			// Broadcast Success Event to CQRS Bus
 			bus.Publish(context.Background(), eventbus.Event{
-				Type: "OrderPlacedEvent",
+				Type:    "OrderPlacedEvent",
 				Payload: map[string]any{"req": req},
 			})
 
@@ -231,7 +231,7 @@ func main() {
 
 		// Read raw request body
 		body := c.BodyRaw()
-		
+
 		// Create the invocation dynamically
 		inv := &invocation.Invocation{
 			ID:     invocation.ID(fmt.Sprintf("inv-%d", time.Now().UnixNano())),
@@ -242,9 +242,7 @@ func main() {
 		// Dispatch workflow to REF Engine
 		resAny, err := refEngine.Dispatch(c.Context(), inv)
 		if err != nil {
-			return c.Status(http.StatusUnprocessableEntity).JSON(map[string]string{
-				"error": err.Error(),
-			})
+			return fh.WrapHTTPError(err, http.StatusUnprocessableEntity, "CHECKOUT_FAILED", "Checkout could not be processed")
 		}
 
 		// Cast the agnostic result to our strong struct and return JSON
@@ -259,7 +257,7 @@ func main() {
 		fmt.Println("  [1. SUCCESS] curl -X POST -H \"Content-Type: application/json\" -d '{\"user_id\":\"tony\",\"item_id\":\"book\",\"qty\":1}' http://localhost:8080/api/checkout")
 		fmt.Println("  [2. INVENTORY ERROR] curl -X POST -H \"Content-Type: application/json\" -d '{\"user_id\":\"tony\",\"item_id\":\"book\",\"qty\":99}' http://localhost:8080/api/checkout")
 		fmt.Println("  [3. SAGA ROLLBACK] curl -X POST -H \"Content-Type: application/json\" -d '{\"user_id\":\"poor-user\",\"item_id\":\"book\",\"qty\":1}' http://localhost:8080/api/checkout")
-		
+
 		if err := app.Listen(":8080"); err != nil {
 			panic(err)
 		}

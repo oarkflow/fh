@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/oarkflow/fh/internal/wire"
@@ -94,7 +95,7 @@ func (s *SecureServer) acceptTLS() {
 				return
 			default:
 			}
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+			if ne, ok := err.(net.Error); (ok && ne.Timeout()) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.EINTR) {
 				time.Sleep(25 * time.Millisecond)
 				continue
 			}

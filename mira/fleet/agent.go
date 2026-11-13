@@ -23,9 +23,12 @@ type Agent struct {
 	Telemetry func() []byte
 	Interval  time.Duration // default 1s
 	// OnCommand applies a command. Returning nil produces AckProcessed and the
-	// result "ok"; an error is reported to the hub as the result text and no
+	// result "ok"; an error produces a generic "error" result and no
 	// AckProcessed is sent. Required.
 	OnCommand func(ctx context.Context, command []byte) error
+	// OnCommandError observes local command failures. The error is never sent to
+	// the remote hub; use this callback for local logging or diagnostics.
+	OnCommandError func(error)
 	// OnDisconnect, if set, observes each failed or ended session.
 	OnDisconnect func(error)
 }
@@ -106,7 +109,10 @@ func (a *Agent) session(ctx context.Context) error {
 		case m := <-in:
 			result := "ok"
 			if err := a.OnCommand(ctx, m.Payload); err != nil {
-				result = "error: " + err.Error()
+				result = "error"
+				if a.OnCommandError != nil {
+					a.OnCommandError(err)
+				}
 			} else if err := cmd.Acknowledge(ctx, m.MessageID, protocol.AckProcessed); err != nil {
 				return err
 			}

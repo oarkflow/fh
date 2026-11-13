@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -115,7 +114,7 @@ func TestThreeNodeMutualTLSForwardAndFencedTakeover(t *testing.T) {
 	// operation; the new owner is authoritative.
 	_, err = routers["node-a"].Forwarder.Forward(ctx, "node-b", initial, "operation-stale-owner", []byte("attack"))
 	if err == nil {
-		t.Fatal(fmt.Sprintf("stale fence %d was accepted", initial.Fence))
+		t.Fatalf("stale fence %d was accepted", initial.Fence)
 	}
 	for _, router := range routers {
 		_ = router.Close()

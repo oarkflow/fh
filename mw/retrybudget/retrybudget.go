@@ -23,6 +23,8 @@ type Config struct {
 	// client sending the retry-attempt header from many distinct keys
 	// causes unbounded map growth with no eviction.
 	MaxKeys int
+	// MaxKeyBytes bounds each retained retry-budget key. Default: 256.
+	MaxKeyBytes int
 }
 type bucket struct {
 	used  int
@@ -36,6 +38,7 @@ type limiter struct {
 }
 
 const defaultMaxKeys = 65536
+const defaultMaxKeyBytes = 256
 
 func New(cfg Config) fh.HandlerFunc {
 	if cfg.MaxRetries <= 0 {
@@ -49,6 +52,9 @@ func New(cfg Config) fh.HandlerFunc {
 	}
 	if cfg.MaxKeys <= 0 {
 		cfg.MaxKeys = defaultMaxKeys
+	}
+	if cfg.MaxKeyBytes <= 0 {
+		cfg.MaxKeyBytes = defaultMaxKeyBytes
 	}
 	if cfg.Error == nil {
 		cfg.Error = func(c fh.Ctx) error {
@@ -68,6 +74,9 @@ func (l *limiter) Handle(c fh.Ctx) error {
 	key := c.IP()
 	if l.cfg.Key != nil {
 		key = l.cfg.Key(c)
+	}
+	if len(key) > l.cfg.MaxKeyBytes {
+		return fh.NewHTTPError(fh.StatusBadRequest, "RETRY_BUDGET_KEY_TOO_LARGE", "retry budget key is too long")
 	}
 	now := time.Now()
 	l.mu.Lock()

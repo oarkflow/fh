@@ -2,9 +2,11 @@ package main
 
 import (
 	"log"
+	"os"
 	"strconv"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/oarkflow/fh/benchmarks/servers/go/benchstats"
 )
 
 type user struct {
@@ -23,6 +25,10 @@ func benchmarkUsers() []user {
 }
 
 func main() {
+	addr := os.Getenv("FH_BENCH_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:3003"
+	}
 	app := fiber.New(fiber.Config{
 		DisableDefaultDate: true,
 		ReadBufferSize:     16 << 10,
@@ -47,6 +53,7 @@ func main() {
 		return c.JSON(value)
 	})
 	app.Get("/users", func(c fiber.Ctx) error { return c.JSON(users) })
+	app.Get("/__bench/stats", func(c fiber.Ctx) error { return c.JSON(benchstats.Read()) })
 
-	log.Fatal(app.Listen("127.0.0.1:3003"))
+	log.Fatal(app.Listen(addr))
 }

@@ -23,7 +23,7 @@ type AdaptiveConfig struct {
 
 func NewAdaptive(cfg AdaptiveConfig) (fh.HandlerFunc, func()) {
 	if cfg.BaseConfig.Store == nil {
-		cfg.BaseConfig.Store = kv.NewMemoryStore(kv.WithShardCount(256))
+		cfg.BaseConfig.Store = newDefaultStore()
 	}
 	if cfg.BaseConfig.Max <= 0 {
 		cfg.BaseConfig.Max = 100
@@ -108,7 +108,16 @@ func NewAdaptive(cfg AdaptiveConfig) (fh.HandlerFunc, func()) {
 		now := time.Now()
 		result, err := Allow(cfg.BaseConfig.Store, key, limit, cfg.BaseConfig.Window, now)
 		if err != nil {
-			return err
+			if !failClosedStoreError(err) {
+				return err
+			}
+			result = Result{
+				Allowed:    false,
+				Limit:      limit,
+				Remaining:  0,
+				ResetAt:    now.Add(cfg.BaseConfig.Window),
+				RetryAfter: cfg.BaseConfig.Window,
+			}
 		}
 
 		if cfg.BaseConfig.SendHeaders {
@@ -151,11 +160,9 @@ type LoadAwareLimiter struct {
 }
 
 func NewLoadAware(baseCfg Config, highWater int64) *LoadAwareLimiter {
-	if baseCfg.Store == nil {
-		baseCfg.Store = kv.NewMemoryStore(kv.WithShardCount(256))
-	}
-	if baseCfg.Max <= 0 {
-		baseCfg.Max = 100
+	baseCfg = normalize(baseCfg)
+	if highWater <= 0 {
+		highWater = 1000
 	}
 	l := &LoadAwareLimiter{
 		baseLimit:   baseCfg.Max,
@@ -219,7 +226,16 @@ func (l *LoadAwareLimiter) Middleware() fh.HandlerFunc {
 		now := time.Now()
 		result, err := Allow(l.store, key, limit, l.window, now)
 		if err != nil {
-			return err
+			if !failClosedStoreError(err) {
+				return err
+			}
+			result = Result{
+				Allowed:    false,
+				Limit:      limit,
+				Remaining:  0,
+				ResetAt:    now.Add(l.window),
+				RetryAfter: l.window,
+			}
 		}
 
 		if l.sendHeaders {

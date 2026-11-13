@@ -94,7 +94,9 @@ func (r *Router) Route(ctx context.Context, identity, operation string, data []b
 // the locally registered handler. Incoming calls never auto-acquire leases.
 func (r *Router) ForwardHandler() http.Handler {
 	if r == nil || r.Forwarder == nil {
-		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "unavailable", 503) })
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		})
 	}
 	forwarder := *r.Forwarder
 	forwarder.NodeID = r.NodeID

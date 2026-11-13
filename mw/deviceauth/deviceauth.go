@@ -67,15 +67,16 @@ type ChallengeStore interface {
 }
 
 type Config struct {
-	SigningKey    []byte // server session signing key; at least 32 random bytes
-	Devices       DeviceStore
-	Replay        ReplayGuard
-	Challenges    ChallengeStore
-	SessionTTL    time.Duration
-	ChallengeTTL  time.Duration
-	Clock         func() time.Time
-	MaxBodyBytes  int64
-	MaxChallenges int
+	SigningKey        []byte // server session signing key; at least 32 random bytes
+	Devices           DeviceStore
+	Replay            ReplayGuard
+	Challenges        ChallengeStore
+	SessionTTL        time.Duration
+	ChallengeTTL      time.Duration
+	Clock             func() time.Time
+	MaxBodyBytes      int64
+	MaxChallenges     int
+	MaxChallengeBytes int64
 	// CheckDeviceEachRequest trades an online DeviceStore read per request for
 	// immediate device deletion semantics. The default uses the bounded signed
 	// session lease and applies deletion when the lease expires.
@@ -106,8 +107,14 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.MaxChallenges < 1 {
 		return nil, errors.New("deviceauth: challenge capacity must be positive")
 	}
+	if cfg.MaxChallengeBytes < 0 {
+		return nil, errors.New("deviceauth: challenge byte capacity must be positive")
+	}
+	if cfg.MaxChallengeBytes == 0 {
+		cfg.MaxChallengeBytes = 16 << 20
+	}
 	if cfg.Challenges == nil {
-		memoryChallenges := NewMemoryChallengeStore(cfg.MaxChallenges)
+		memoryChallenges := NewMemoryChallengeStoreWithLimits(cfg.MaxChallenges, cfg.MaxChallengeBytes)
 		memoryChallenges.Clock = cfg.Clock
 		cfg.Challenges = memoryChallenges
 	}
@@ -149,6 +156,9 @@ func (m *Manager) BeginEnrollment(subject, deviceID string) (challengeID, challe
 
 // BeginLogin starts a device challenge. The caller should apply account/IP rate limits.
 func (m *Manager) BeginLogin(deviceID string) (challengeID, challengeValue string, err error) {
+	if !validDeviceID(deviceID) {
+		return "", "", ErrInvalid
+	}
 	subject, _, ok, e := m.cfg.Devices.Get(deviceID)
 	if e != nil || !ok {
 		return "", "", ErrInvalid

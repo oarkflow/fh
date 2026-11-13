@@ -104,8 +104,11 @@ headers are not trusted.
 For `SecureByDefault` applications, `ServeTLS` rejects TLS versions below 1.3.
 The outbound client explicitly sets TLS 1.2 as its compatibility floor and
 rejects `InsecureSkipVerify` unless `AllowInsecureTLS` is deliberately enabled.
-Certificate pinning does not replace CA and hostname verification. OCSP staples
-are generated with the Go `x/crypto/ocsp` implementation and validated for
+Certificate pinning does not replace CA and hostname verification. Outbound
+client pins are matched to the TLS connection's server name, and a configured
+`BackupPin` only applies to hostnames listed in `Pins`. Pin strings are
+validated and compiled when the client is constructed. OCSP staples are
+generated with the Go `x/crypto/ocsp` implementation and validated for
 signature, certificate status, and freshness before publication.
 
 ## DDoS and resource exhaustion
@@ -163,7 +166,9 @@ renewing a deadline indefinitely.
 `mw/realip` ignores forwarding headers unless the immediate socket peer is in
 `TrustedProxies`. It supports `Forwarded`, `X-Forwarded-For`, and common
 single-IP edge headers, walking chains from right to left until the first
-untrusted hop. Rate limiters and logging then consume the normalized `Ctx.IP()`.
+untrusted hop. A malformed or ambiguous higher-priority header leaves the
+socket peer as the client address instead of falling through to a lower-priority
+header. Rate limiters and logging then consume the normalized `Ctx.IP()`.
 
 IP reputation and allowlisting never parse forwarding headers themselves;
 install `mw/realip` first. Basic Auth `RequireTLS` uses native verified fh TLS

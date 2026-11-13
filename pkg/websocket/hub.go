@@ -49,7 +49,47 @@ var (
 	ErrEventSlowClient        = errors.New("slow websocket client")
 	ErrEventAckTimeout        = errors.New("event ack timeout")
 	ErrEventDuplicateClientID = errors.New("duplicate websocket client id")
+	ErrEventCapacity          = errors.New("websocket event hub capacity reached")
 )
+
+// EventError carries a client-safe error code and message while retaining an
+// optional private cause for errors.Is, errors.As, and server-side logging.
+type EventError struct {
+	code    string
+	message string
+	cause   error
+}
+
+// NewEventError creates a client-visible event error. The message is capped so
+// an application cannot accidentally turn an error into an unbounded frame.
+func NewEventError(code, message string, cause error) *EventError {
+	code = strings.ToLower(normalizeName(code))
+	if code == "" || !validToken(code, 64) {
+		code = "invalid_event"
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "Event could not be processed"
+	}
+	if len(message) > 1024 {
+		message = message[:1024]
+	}
+	return &EventError{code: code, message: message, cause: cause}
+}
+
+func (e *EventError) Error() string {
+	if e == nil || e.message == "" {
+		return "Event could not be processed"
+	}
+	return e.message
+}
+
+func (e *EventError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
 
 const (
 	EnvelopeHello       = "hello"
@@ -166,6 +206,18 @@ type EventHubConfig struct {
 
 	// MaxSubscriptions is per connection.
 	MaxSubscriptions int
+	// MaxClients bounds connections retained by the hub. Default: 10000.
+	MaxClients int
+	// MaxTotalSubscriptions bounds subscriptions across all clients. Default: 100000.
+	MaxTotalSubscriptions int
+	// MaxMetadataEntries and MaxMetadataBytes bound copied per-client metadata.
+	// Defaults: 64 entries and 16 KiB.
+	MaxMetadataEntries int
+	MaxMetadataBytes   int
+	// Queue byte budgets include queued and in-flight payloads. Defaults:
+	// 1 MiB per client and 64 MiB across the hub.
+	MaxQueuedBytesPerClient int64
+	MaxTotalQueuedBytes     int64
 
 	// MaxPendingRequests is per connection for server-side request/ack tracking.
 	MaxPendingRequests int
@@ -201,18 +253,24 @@ type EventHubConfig struct {
 
 func DefaultEventHubConfig() EventHubConfig {
 	return EventHubConfig{
-		WriterQueueSize:    256,
-		MaxEnvelopeBytes:   1 << 20,
-		MaxPayloadBytes:    1 << 20,
-		AckTimeout:         10 * time.Second,
-		ClientIdleTimeout:  2 * time.Minute,
-		CleanupInterval:    30 * time.Second,
-		MaxSubscriptions:   512,
-		MaxPendingRequests: 1024,
-		CloseSlowClient:    true,
-		EnablePresence:     true,
-		SendHello:          true,
-		Now:                time.Now,
+		WriterQueueSize:         256,
+		MaxEnvelopeBytes:        1 << 20,
+		MaxPayloadBytes:         1 << 20,
+		AckTimeout:              10 * time.Second,
+		ClientIdleTimeout:       2 * time.Minute,
+		CleanupInterval:         30 * time.Second,
+		MaxSubscriptions:        512,
+		MaxClients:              10000,
+		MaxTotalSubscriptions:   100000,
+		MaxMetadataEntries:      64,
+		MaxMetadataBytes:        16 << 10,
+		MaxQueuedBytesPerClient: 1 << 20,
+		MaxTotalQueuedBytes:     64 << 20,
+		MaxPendingRequests:      1024,
+		CloseSlowClient:         true,
+		EnablePresence:          true,
+		SendHello:               true,
+		Now:                     time.Now,
 	}
 }
 
@@ -238,6 +296,24 @@ func normalizeEventHubConfig(cfg EventHubConfig) EventHubConfig {
 	}
 	if cfg.MaxSubscriptions <= 0 {
 		cfg.MaxSubscriptions = def.MaxSubscriptions
+	}
+	if cfg.MaxClients <= 0 {
+		cfg.MaxClients = def.MaxClients
+	}
+	if cfg.MaxTotalSubscriptions <= 0 {
+		cfg.MaxTotalSubscriptions = def.MaxTotalSubscriptions
+	}
+	if cfg.MaxMetadataEntries <= 0 {
+		cfg.MaxMetadataEntries = def.MaxMetadataEntries
+	}
+	if cfg.MaxMetadataBytes <= 0 {
+		cfg.MaxMetadataBytes = def.MaxMetadataBytes
+	}
+	if cfg.MaxQueuedBytesPerClient <= 0 {
+		cfg.MaxQueuedBytesPerClient = def.MaxQueuedBytesPerClient
+	}
+	if cfg.MaxTotalQueuedBytes <= 0 {
+		cfg.MaxTotalQueuedBytes = def.MaxTotalQueuedBytes
 	}
 	if cfg.MaxPendingRequests <= 0 {
 		cfg.MaxPendingRequests = def.MaxPendingRequests
@@ -295,12 +371,14 @@ func (s *eventStatsAtomic) Snapshot() EventStats {
 type EventHub struct {
 	cfg EventHubConfig
 
-	mu       sync.RWMutex
-	clients  map[string]*EventConn
-	index    map[string]map[string]*EventConn // subscriptionKey(topic, channel) -> client id -> conn
-	handlers map[string]Handler
-	mw       []Middleware
-	any      Handler
+	mu                 sync.RWMutex
+	clients            map[string]*EventConn
+	index              map[string]map[string]*EventConn // subscriptionKey(topic, channel) -> client id -> conn
+	totalSubscriptions int                              // guarded by mu
+	queuedBytes        atomic.Int64
+	handlers           map[string]Handler
+	mw                 []Middleware
+	any                Handler
 
 	closed      atomic.Bool
 	stopCleanup chan struct{}
@@ -359,6 +437,7 @@ func NewEventHandler(h *EventHub, wsCfg Config, metadata MetadataFunc) fh.Handle
 	wsCfg = normalizeConfig(wsCfg)
 	if wsCfg.Manager == nil {
 		wsCfg.Manager = NewManager()
+		wsCfg.Manager.MaxConnections = h.cfg.MaxClients
 	}
 
 	return func(c fh.Ctx) error {
@@ -410,7 +489,10 @@ func NewEventHandler(h *EventHub, wsCfg Config, metadata MetadataFunc) fh.Handle
 			ws := newConn(conn, wsCfg, selectedProtocol)
 
 			if wsCfg.Manager != nil {
-				wsCfg.Manager.Add(ws)
+				if !wsCfg.Manager.TryAdd(ws) {
+					_ = ws.CloseWithStatus(CloseTryAgainLater, "connection limit exceeded")
+					return ErrWebSocketClosed
+				}
 				defer wsCfg.Manager.Remove(ws)
 			}
 			if wsCfg.OnOpen != nil {
@@ -462,13 +544,24 @@ func (h *EventHub) Accept(ws *Conn, metadata map[string]string, requestedID stri
 	if !validToken(id, 128) {
 		return nil, ErrEventBadEnvelope
 	}
+	meta, ok := boundedEventMetadata(metadata, h.cfg.MaxMetadataEntries, h.cfg.MaxMetadataBytes)
+	if !ok {
+		_ = ws.CloseWithStatus(ClosePolicyViolation, "metadata limit exceeded")
+		return nil, ErrEventBadEnvelope
+	}
 
 	ec := &EventConn{
-		ID:        id,
-		Hub:       h,
-		Conn:      ws,
-		Writer:    NewWriter(ws, h.cfg.WriterQueueSize),
-		Meta:      copyStringMap(metadata),
+		ID:   id,
+		Hub:  h,
+		Conn: ws,
+		Writer: NewWriterWithByteBudget(
+			ws,
+			h.cfg.WriterQueueSize,
+			h.cfg.MaxQueuedBytesPerClient,
+			h.reserveQueuedBytes,
+			h.releaseQueuedBytes,
+		),
+		Meta:      meta,
 		subs:      make(map[string]Subscription),
 		pending:   make(map[string]chan Envelope),
 		createdAt: h.now(),
@@ -476,10 +569,20 @@ func (h *EventHub) Accept(ws *Conn, metadata map[string]string, requestedID stri
 	}
 
 	h.mu.Lock()
+	if h.closed.Load() {
+		h.mu.Unlock()
+		_ = ec.Close(CloseGoingAway, "server shutting down")
+		return nil, ErrEventClosed
+	}
 	if _, exists := h.clients[id]; exists {
 		h.mu.Unlock()
 		_ = ec.Close(ClosePolicyViolation, "duplicate client id")
 		return nil, ErrEventDuplicateClientID
+	}
+	if len(h.clients) >= h.cfg.MaxClients {
+		h.mu.Unlock()
+		_ = ec.Close(CloseTryAgainLater, "hub capacity reached")
+		return nil, ErrEventCapacity
 	}
 	h.clients[id] = ec
 	h.mu.Unlock()
@@ -605,7 +708,8 @@ func (h *EventHub) Serve(c *EventConn) error {
 		if err := h.handleEnvelope(c, env); err != nil {
 			h.reportError(c, err)
 			if env.ID != "" || env.Type != EnvelopeError {
-				_ = c.SendError(env.ID, codeForEventError(err), err.Error())
+				code, message := eventErrorDetails(err)
+				_ = c.SendError(env.ID, code, message)
 			}
 		}
 	}
@@ -712,9 +816,6 @@ func (h *EventHub) dispatch(c *EventConn, env Envelope) error {
 	h.stats.handledEvents.Add(1)
 	if err != nil {
 		h.stats.handlerErrors.Add(1)
-		if env.ID != "" {
-			_ = c.SendError(env.ID, codeForEventError(err), err.Error())
-		}
 		return err
 	}
 	if env.ID != "" {
@@ -770,19 +871,31 @@ func (h *EventHub) Subscribe(c *EventConn, topic, channel string) error {
 	key := subscriptionKey(topic, channel)
 
 	h.mu.Lock()
+	if h.closed.Load() || c.closed.Load() {
+		h.mu.Unlock()
+		return ErrEventClosed
+	}
 	if _, exists := c.subs[key]; !exists && len(c.subs) >= h.cfg.MaxSubscriptions {
 		h.mu.Unlock()
 		return ErrEventTooManySubs
 	}
+	if _, exists := c.subs[key]; !exists && h.totalSubscriptions >= h.cfg.MaxTotalSubscriptions {
+		h.mu.Unlock()
+		return ErrEventCapacity
+	}
+	_, existed := c.subs[key]
 	if h.index[key] == nil {
 		h.index[key] = make(map[string]*EventConn)
 	}
 	h.index[key][c.ID] = c
 	c.subs[key] = Subscription{Topic: topic, Channel: channel, CreatedAt: h.now()}
+	if !existed {
+		h.totalSubscriptions++
+		h.stats.subscriptions.Add(1)
+	}
 	h.mu.Unlock()
 
-	h.stats.subscriptions.Add(1)
-	if h.cfg.OnSubscribe != nil {
+	if !existed && h.cfg.OnSubscribe != nil {
 		h.cfg.OnSubscribe(c, topic, channel)
 	}
 	if h.cfg.EnablePresence {
@@ -801,13 +914,20 @@ func (h *EventHub) Unsubscribe(c *EventConn, topic, channel string) error {
 
 	h.mu.Lock()
 	deleteFromEventIndex(h.index, key, c.ID)
+	_, existed := c.subs[key]
 	delete(c.subs, key)
+	if existed && h.totalSubscriptions > 0 {
+		h.totalSubscriptions--
+	}
+	if existed {
+		h.stats.subscriptions.Add(-1)
+	}
 	h.mu.Unlock()
 
-	if h.cfg.OnUnsubscribe != nil {
+	if existed && h.cfg.OnUnsubscribe != nil {
 		h.cfg.OnUnsubscribe(c, topic, channel)
 	}
-	if h.cfg.EnablePresence {
+	if existed && h.cfg.EnablePresence {
 		_ = h.emitPresence("leave", c.ID, topic, channel)
 	}
 	return nil
@@ -831,7 +951,13 @@ func (h *EventHub) Remove(c *EventConn, cause error) {
 			deleteFromEventIndex(h.index, key, c.ID)
 			subs = append(subs, sub)
 		}
+		if len(c.subs) <= h.totalSubscriptions {
+			h.totalSubscriptions -= len(c.subs)
+		} else {
+			h.totalSubscriptions = 0
+		}
 		c.subs = make(map[string]Subscription)
+		h.stats.subscriptions.Add(-int64(len(subs)))
 		h.mu.Unlock()
 
 		c.closePending()
@@ -876,6 +1002,28 @@ func (h *EventHub) Count() int {
 }
 
 func (h *EventHub) Stats() EventStats { return h.stats.Snapshot() }
+
+func (h *EventHub) reserveQueuedBytes(n int64) bool {
+	if n <= 0 {
+		return true
+	}
+	limit := h.cfg.MaxTotalQueuedBytes
+	for {
+		current := h.queuedBytes.Load()
+		if n > limit-current {
+			return false
+		}
+		if h.queuedBytes.CompareAndSwap(current, current+n) {
+			return true
+		}
+	}
+}
+
+func (h *EventHub) releaseQueuedBytes(n int64) {
+	if n > 0 {
+		h.queuedBytes.Add(-n)
+	}
+}
 
 func (h *EventHub) Clients() []*EventConn {
 	if h == nil {
@@ -1113,6 +1261,9 @@ func (c *EventConn) Send(env Envelope) error {
 	if env.Timestamp == 0 {
 		env.Timestamp = time.Now().UnixMilli()
 	}
+	if c.Hub != nil && !eventEnvelopeInputWithinLimit(env, c.Hub.cfg.MaxEnvelopeBytes) {
+		return ErrEventPayloadTooLarge
+	}
 	b, err := json.Marshal(env)
 	if err != nil {
 		return err
@@ -1133,6 +1284,23 @@ func (c *EventConn) Send(env Envelope) error {
 		c.Hub.stats.outgoingEnvelopes.Add(1)
 	}
 	return nil
+}
+
+// eventEnvelopeInputWithinLimit rejects oversized caller-owned fields before
+// json.Marshal allocates the encoded envelope. The final encoded-size check in
+// Send remains authoritative because JSON escaping can expand strings.
+func eventEnvelopeInputWithinLimit(env Envelope, limit int) bool {
+	if limit <= 0 {
+		return true
+	}
+	remaining := limit
+	for _, value := range []string{env.Type, env.ID, env.ReplyTo, env.Event, env.Topic, env.Channel, env.Error, env.Code} {
+		if len(value) > remaining {
+			return false
+		}
+		remaining -= len(value)
+	}
+	return len(env.Payload) <= remaining
 }
 
 func (c *EventConn) SendRawJSON(raw []byte) error {
@@ -1533,15 +1701,27 @@ func mustRaw(v any) json.RawMessage {
 	return b
 }
 
-func copyStringMap(in map[string]string) map[string]string {
+func boundedEventMetadata(in map[string]string, maxEntries, maxBytes int) (map[string]string, bool) {
+	if len(in) > maxEntries {
+		return nil, false
+	}
 	out := make(map[string]string, len(in))
+	used := 0
 	for k, v := range in {
+		if len(k) > maxBytes-used || len(v) > maxBytes-used-len(k) {
+			return nil, false
+		}
+		used += len(k) + len(v)
 		out[k] = v
 	}
-	return out
+	return out, true
 }
 
 func codeForEventError(err error) string {
+	var publicErr *EventError
+	if errors.As(err, &publicErr) && publicErr != nil {
+		return publicErr.code
+	}
 	switch {
 	case errors.Is(err, ErrEventUnauthorized):
 		return "unauthorized"
@@ -1561,9 +1741,47 @@ func codeForEventError(err error) string {
 		return "ack_timeout"
 	case errors.Is(err, ErrEventClosed):
 		return "closed"
+	case errors.Is(err, ErrEventDuplicateClientID):
+		return "duplicate_client"
+	case errors.Is(err, ErrEventCapacity):
+		return "capacity_exceeded"
 	default:
 		return "internal_error"
 	}
+}
+
+func eventErrorDetails(err error) (string, string) {
+	var publicErr *EventError
+	if errors.As(err, &publicErr) && publicErr != nil {
+		return publicErr.code, publicErr.message
+	}
+	code := codeForEventError(err)
+	message := "Event could not be processed"
+	switch code {
+	case "unauthorized":
+		message = "Authentication required"
+	case "forbidden":
+		message = "Event is not permitted"
+	case "not_found":
+		message = "Event handler not found"
+	case "bad_envelope":
+		message = "Invalid event envelope"
+	case "payload_too_large":
+		message = "Event payload is too large"
+	case "too_many_subscriptions":
+		message = "Subscription limit reached"
+	case "slow_client":
+		message = "Client is temporarily overloaded"
+	case "ack_timeout":
+		message = "Event acknowledgement timed out"
+	case "closed":
+		message = "Connection is closed"
+	case "duplicate_client":
+		message = "Client identifier is already in use"
+	case "capacity_exceeded":
+		message = "Event service is temporarily unavailable"
+	}
+	return code, message
 }
 
 func newEventID() string {

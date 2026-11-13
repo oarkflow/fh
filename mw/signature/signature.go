@@ -47,8 +47,15 @@ func New(config Config) fh.HandlerFunc {
 	if config.Tolerance <= 0 {
 		config.Tolerance = 5 * time.Minute
 	}
+	if config.MaxReplayEntries <= 0 {
+		config.MaxReplayEntries = 100000
+	}
 	if config.Replay == nil {
-		config.Replay = kv.NewMemoryStore(kv.WithShardCount(1))
+		config.Replay = kv.NewMemoryStore(
+			kv.WithShardCount(256),
+			kv.WithMaxEntries(config.MaxReplayEntries),
+			kv.WithRejectWhenFull(),
+		)
 	}
 	var replayMu sync.Mutex
 	return func(c fh.Ctx) error {
@@ -124,6 +131,20 @@ func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxEntr
 	if len(maxEntries) > 0 && maxEntries[0] > 0 {
 		maxSize = maxEntries[0]
 	}
+	if bounded, ok := store.(interface{ CapacityLimit() int }); ok && bounded.CapacityLimit() > 0 && bounded.CapacityLimit() <= maxSize {
+		var seen bool
+		err := store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+			seen = exists
+			if exists {
+				return nil, 0, false, nil
+			}
+			return []byte{1}, ttl, true, nil
+		})
+		if errors.Is(err, kv.ErrCapacityExceeded) {
+			return false, ErrStoreFull
+		}
+		return seen, err
+	}
 	if mu != nil {
 		mu.Lock()
 		defer mu.Unlock()
@@ -140,10 +161,15 @@ func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxEntr
 	if n >= maxSize {
 		return false, ErrStoreFull
 	}
-	if err := store.Set(key, []byte{1}, ttl); err != nil {
-		return false, err
-	}
-	return false, nil
+	var seen bool
+	err = store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		seen = exists
+		if exists {
+			return nil, 0, false, nil
+		}
+		return []byte{1}, ttl, true, nil
+	})
+	return seen, err
 }
 
 var ErrStoreFull = errors.New("signature: replay store full")

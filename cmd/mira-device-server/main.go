@@ -96,7 +96,7 @@ func handle(ctx context.Context, s *mira.Session, st *durable.Store) {
 		go func(c protocol.Channel) {
 			defer c.Close(context.Background())
 			if st != nil {
-				if e := journal.ServeChannel(ctx, c, protocol.Principal{Subject: s.Identity(), Device: s.Identity()}, st); e != nil && ctx.Err() == nil {
+				if e := journal.ServeChannel(ctx, c, protocol.Principal{Subject: s.Identity(), Device: s.Identity()}, st); !errors.Is(e, io.EOF) && !errors.Is(e, protocol.ErrClosed) && ctx.Err() == nil {
 					log.Printf("journal session ended: %v", e)
 				}
 				return
@@ -153,7 +153,7 @@ func main() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != "GET" {
-				http.Error(w, "method not allowed", 405)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")

@@ -191,6 +191,7 @@ func (c *DefaultCtx) beginStream(size ...int64) (*StreamWriter, error) {
 		buf = append(buf, c.contentType...)
 		buf = append(buf, '\r', '\n')
 	}
+	buf = c.appendSecurityHeaders(buf)
 	for i := 0; i < c.chCount; i++ {
 		h := &c.customHeaders[i]
 		buf = append(buf, h.Key...)

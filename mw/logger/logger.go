@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -85,6 +86,13 @@ type Config struct {
 	// fragments are not sent in HTTP requests and therefore cannot be logged.
 	IncludeQueryInPath bool
 
+	// RedactQueryKeys adds sensitive query parameter names to the default
+	// redaction set. Names are matched case-insensitively after URL decoding.
+	RedactQueryKeys []string
+
+	// DisableQueryRedaction opts out of the default sensitive-query filtering.
+	DisableQueryRedaction bool
+
 	// DisableAsync is not recommended.
 	// If true, writes are performed in request path.
 	DisableAsync bool
@@ -116,14 +124,16 @@ var defaultStaticExtensions = []string{
 }
 
 type Middleware struct {
-	cfg       Config
-	tokens    []logToken
-	json      bool
-	output    *asyncOutput
-	skip      skipMatcher
-	recordOn  bool
-	lineOn    bool
-	closeOnce sync.Once
+	cfg             Config
+	tokens          []logToken
+	json            bool
+	output          *asyncOutput
+	skip            skipMatcher
+	redactQueryKeys map[string]struct{}
+	errorRedactor   *fh.Redactor
+	recordOn        bool
+	lineOn          bool
+	closeOnce       sync.Once
 }
 
 func New(config ...Config) fh.HandlerFunc {
@@ -186,6 +196,8 @@ func NewMiddleware(config ...Config) *Middleware {
 		cfg.SkipMethods = user.SkipMethods
 		cfg.SkipStatusCodes = user.SkipStatusCodes
 		cfg.IncludeQueryInPath = user.IncludeQueryInPath
+		cfg.RedactQueryKeys = append([]string(nil), user.RedactQueryKeys...)
+		cfg.DisableQueryRedaction = user.DisableQueryRedaction
 		cfg.DisableAsync = user.DisableAsync
 	}
 
@@ -220,12 +232,37 @@ func NewMiddleware(config ...Config) *Middleware {
 	lineOn := len(cfg.Writers) > 0 || (cfg.Logger != nil && !jsonMode)
 	recordOn := cfg.Slog != nil || (cfg.Logger != nil && jsonMode)
 
+	var redactQueryKeys map[string]struct{}
+	var errorRedactor *fh.Redactor
+	if !cfg.DisableQueryRedaction {
+		redactQueryKeys = make(map[string]struct{})
+		redactionFields := append([]string(nil), fh.DefaultRedactionConfig().Fields...)
+		for _, key := range redactionFields {
+			redactQueryKeys[normalizeQueryKey(key)] = struct{}{}
+		}
+		extraKeys := []string{"state", "code", "code_verifier", "id_token", "jwt", "signature", "sig", "credential", "credentials"}
+		redactionFields = append(redactionFields, extraKeys...)
+		for _, key := range extraKeys {
+			redactQueryKeys[normalizeQueryKey(key)] = struct{}{}
+		}
+		for _, key := range cfg.RedactQueryKeys {
+			if normalized := normalizeQueryKey(key); normalized != "" {
+				redactQueryKeys[normalized] = struct{}{}
+				redactionFields = append(redactionFields, key)
+			}
+		}
+		redactionFields = append(redactionFields, "code_verifier", "id_token", "jwt", "signature", "sig", "credential", "credentials")
+		errorRedactor = &fh.Redactor{Keys: redactionFields, Replacement: "[REDACTED]"}
+	}
+
 	m := &Middleware{
-		cfg:      cfg,
-		json:     jsonMode,
-		skip:     newSkipMatcher(cfg),
-		recordOn: recordOn,
-		lineOn:   lineOn,
+		cfg:             cfg,
+		json:            jsonMode,
+		skip:            newSkipMatcher(cfg),
+		redactQueryKeys: redactQueryKeys,
+		errorRedactor:   errorRedactor,
+		recordOn:        recordOn,
+		lineOn:          lineOn,
 	}
 
 	if !m.json {
@@ -270,13 +307,14 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 			return err
 		}
 
-		path := uriPath(uri, true)
+		loggedURI := redactURIQuery(uri, m.redactQueryKeys)
+		path := uriPath(loggedURI, true)
 		ip := ctx.IP()
 		rid := requestIDFromCtx(ctx)
 
 		var errText string
 		if err != nil {
-			errText = err.Error()
+			errText = m.redactError(err.Error())
 		}
 
 		if m.lineOn {
@@ -286,7 +324,7 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 			if m.json {
 				m.renderJSON(buf, end, ip, method, path, status, lat, errText, rid)
 			} else {
-				m.renderTokens(buf, end, ip, method, path, uriQuery(uri), status, lat, errText, rid)
+				m.renderTokens(buf, end, ip, method, path, uriQuery(loggedURI), status, lat, errText, rid)
 			}
 
 			if m.cfg.MaxLineBytes > 0 && buf.Len() > m.cfg.MaxLineBytes {
@@ -300,7 +338,14 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 			}
 
 			m.output.submitLine(buf.Bytes())
-			buf.Reset()
+			if buf.Cap() > maxPooledRenderBufferBytes {
+				// Truncating the line limits output size, not the backing array's
+				// capacity. Drop one-off large request paths/errors instead of
+				// retaining them in the process-wide render pool.
+				buf = bytes.NewBuffer(make([]byte, 0, 512))
+			} else {
+				buf.Reset()
+			}
 			renderBufPool.Put(buf)
 		}
 
@@ -320,6 +365,14 @@ func (m *Middleware) Handler() fh.HandlerFunc {
 
 		return err
 	}
+}
+
+func (m *Middleware) redactError(message string) string {
+	if m == nil || len(m.redactQueryKeys) == 0 {
+		return message
+	}
+	message = string(redactURIQuery([]byte(message), m.redactQueryKeys))
+	return m.errorRedactor.RedactString(message)
 }
 
 func (m *Middleware) Close() error {
@@ -816,6 +869,80 @@ func uriPath(uri []byte, includeQuery bool) []byte {
 	return uri
 }
 
+var queryKeySeparators = strings.NewReplacer("_", "", "-", "", ".", "")
+
+func normalizeQueryKey(key string) string {
+	return queryKeySeparators.Replace(strings.ToLower(key))
+}
+
+func redactURIQuery(uri []byte, keys map[string]struct{}) []byte {
+	if len(keys) == 0 {
+		return uri
+	}
+	queryMark := bytes.IndexByte(uri, '?')
+	if queryMark < 0 || queryMark+1 >= len(uri) {
+		return uri
+	}
+	queryStart := queryMark + 1
+	queryEnd := len(uri)
+	if fragment := bytes.IndexByte(uri[queryStart:], '#'); fragment >= 0 {
+		queryEnd = queryStart + fragment
+	}
+
+	containsSecret := false
+	for pos := queryStart; pos < queryEnd; {
+		end := pos
+		for end < queryEnd && uri[end] != '&' && uri[end] != ';' {
+			end++
+		}
+		pair := uri[pos:end]
+		if equal := bytes.IndexByte(pair, '='); equal >= 0 && sensitiveQueryKey(pair[:equal], keys) {
+			containsSecret = true
+			break
+		}
+		pos = end + 1
+	}
+	if !containsSecret {
+		return uri
+	}
+
+	out := make([]byte, 0, len(uri)+16)
+	out = append(out, uri[:queryStart]...)
+	for pos := queryStart; pos < queryEnd; {
+		end := pos
+		for end < queryEnd && uri[end] != '&' && uri[end] != ';' {
+			end++
+		}
+		pair := uri[pos:end]
+		if equal := bytes.IndexByte(pair, '='); equal >= 0 && sensitiveQueryKey(pair[:equal], keys) {
+			out = append(out, pair[:equal+1]...)
+			out = append(out, "[REDACTED]"...)
+		} else {
+			out = append(out, pair...)
+		}
+		if end < queryEnd {
+			out = append(out, uri[end])
+		}
+		pos = end + 1
+	}
+	return append(out, uri[queryEnd:]...)
+}
+
+func sensitiveQueryKey(raw []byte, keys map[string]struct{}) bool {
+	decoded := string(raw)
+	if bytes.ContainsAny(raw, "%+") {
+		var err error
+		decoded, err = url.QueryUnescape(decoded)
+		if err != nil {
+			// A malformed key is ambiguous; hide its value rather than risk
+			// logging a secret under a non-canonical spelling.
+			return true
+		}
+	}
+	_, ok := keys[normalizeQueryKey(decoded)]
+	return ok
+}
+
 func uriQuery(uri []byte) []byte {
 	if q := bytes.IndexByte(uri, '?'); q >= 0 && q+1 < len(uri) {
 		return uri[q+1:]
@@ -1091,3 +1218,5 @@ var renderBufPool = sync.Pool{
 		return b
 	},
 }
+
+const maxPooledRenderBufferBytes = 64 << 10

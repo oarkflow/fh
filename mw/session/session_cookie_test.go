@@ -1,6 +1,9 @@
 package session
 
 import (
+	"context"
+	"crypto/sha256"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -96,6 +99,82 @@ func TestSessionTokenRotationTamperingAndBinding(t *testing.T) {
 	if err != nil || bound.ID == s.ID {
 		t.Fatal("token was not bound to its cookie name")
 	}
+}
+
+func TestInvalidSessionCookieCannotBlockValidSessionShard(t *testing.T) {
+	store := kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(defaultMaxSessions))
+	manager := NewSessionManager(store,
+		SessionSecrets([]byte("test-secret-must-be-32-bytes-ok!!")),
+		SessionLockTimeout(10*time.Millisecond),
+	)
+	ctx := newTestCookieCtx()
+	setRequestCookie(ctx, manager.CookieName(), "attacker-controlled-invalid-token")
+	hash := sha256.Sum256([]byte("attacker-controlled-invalid-token"))
+	shard := int(hash[0]) % len(manager.locks)
+	manager.locks[shard].Lock()
+	defer manager.locks[shard].Unlock()
+	if _, _, err := manager.Begin(ctx); err != nil {
+		t.Fatalf("invalid cookie waited on session shard lock: %v", err)
+	}
+}
+
+func TestSessionLockWaitStopsWhenRequestIsCanceled(t *testing.T) {
+	store := kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(defaultMaxSessions))
+	manager := NewSessionManager(store, SessionSecrets([]byte("test-secret-must-be-32-bytes-ok!!")))
+	session := manager.NewSession()
+	response := newTestCookieCtx()
+	if err := manager.Save(response, session); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256([]byte(session.ID))
+	shard := int(hash[0]) % len(manager.locks)
+	manager.locks[shard].Lock()
+	defer manager.locks[shard].Unlock()
+
+	request := newTestCookieCtx()
+	setRequestCookie(request, manager.CookieName(), response.FirstCookie())
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request.SetContext(requestCtx)
+	if _, _, err := manager.Begin(request); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Begin error = %v, want context.Canceled", err)
+	}
+}
+
+type panicSetStore struct{ kv.Store }
+
+func (panicSetStore) Set(string, []byte, time.Duration) error { panic("store panic") }
+
+func TestSessionCompletionUnlocksWhenStorePanics(t *testing.T) {
+	baseStore := kv.NewMemoryStore(kv.WithShardCount(1), kv.WithMaxEntries(defaultMaxSessions))
+	secret := []byte("test-secret-must-be-32-bytes-ok!!")
+	seedManager := NewSessionManager(baseStore, SessionSecrets(secret))
+	session := seedManager.NewSession()
+	response := newTestCookieCtx()
+	if err := seedManager.Save(response, session); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewSessionManager(panicSetStore{Store: baseStore}, SessionSecrets(secret))
+	request := newTestCookieCtx()
+	setRequestCookie(request, manager.CookieName(), response.FirstCookie())
+	loaded, complete, err := manager.Begin(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected store panic")
+			}
+		}()
+		_ = complete(newTestCookieCtx())
+	}()
+	hash := sha256.Sum256([]byte(loaded.ID))
+	shard := int(hash[0]) % len(manager.locks)
+	if !manager.locks[shard].TryLock() {
+		t.Fatal("session shard lock remained held after store panic")
+	}
+	manager.locks[shard].Unlock()
 }
 
 func TestSessionRegenerateDestroyAndStoreSnapshots(t *testing.T) {

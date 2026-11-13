@@ -70,7 +70,7 @@ func TestSignRequestRoundTrip(t *testing.T) {
 		t.Fatalf("VerifyContentDigest failed: %v", err)
 	}
 	// Verify raw signature using public key and reconstructed base
-	rawParams, _, err := parseSignatureInput(input, DefaultLabel)
+	_, _, err = parseSignatureInput(input, DefaultLabel)
 	if err == nil {
 		t.Fatalf("expected parseSignatureInput to reject response params on request input")
 	}
@@ -79,7 +79,7 @@ func TestSignRequestRoundTrip(t *testing.T) {
 	if !bytes.HasPrefix([]byte(input), []byte(prefix)) {
 		t.Fatalf("malformed input: %s", input)
 	}
-	rawParams = input[len(prefix):]
+	rawParams := input[len(prefix):]
 	base, err := RequestSignatureBase("POST", "https://api.example.com/v1/transfer", digest, "application/json", rawParams)
 	if err != nil {
 		t.Fatalf("RequestSignatureBase failed: %v", err)

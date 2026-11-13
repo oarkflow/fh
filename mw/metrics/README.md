@@ -42,4 +42,6 @@ series are counted under `<overflow>`.
 The Prometheus output includes `fh_route_requests_total` and
 `fh_route_request_duration_seconds` by method, route template, and status
 class. The route cap also applies to these series; overflow uses one shared
-`<overflow>` route label. The existing JSON fields are unchanged.
+`<overflow>` route label. Status counters accept standard HTTP status values
+from 100 through 599; out-of-range values are grouped under status `0`, keeping
+status cardinality bounded. The existing JSON fields are unchanged.

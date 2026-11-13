@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/textproto"
 	"reflect"
 	"strconv"
@@ -19,6 +20,31 @@ var (
 	strHTTP10    = []byte("HTTP/1.0")
 	strHeaderEnd = []byte("\r\n\r\n")
 )
+
+const maxHeaderValueLength = 16 << 10
+
+// validHeaderValue and validHeaderValueBytes accept the field-value octets
+// permitted by HTTP: HTAB, visible ASCII, and obs-text. Other control bytes
+// can produce malformed fields and must not reach either HTTP/1 or HTTP/2
+// response encoders.
+func validHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if (b < 0x20 && b != '\t') || b == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func validHeaderValueBytes(value []byte) bool {
+	for _, b := range value {
+		if (b < 0x20 && b != '\t') || b == 0x7f {
+			return false
+		}
+	}
+	return true
+}
 
 // String variants of header/method constants for user-facing APIs.
 const (
@@ -212,13 +238,25 @@ func (h *RequestHeader) Get(name string, defaults ...string) string {
 
 // Values returns every value stored for a request header.
 func (h *RequestHeader) Values(name string) []string {
-	values := make([]string, 0, 1)
+	var values []string
 	for i := 0; i < h.hcount; i++ {
 		if strBytesEqualFold(name, h.headers[i].Key) {
 			values = append(values, string(h.headers[i].Value))
 		}
 	}
 	return values
+}
+
+// VisitAll visits each parsed request header without allocating. The key and
+// value slices are only valid for the duration of the callback and must not be
+// retained or modified.
+func (h *RequestHeader) VisitAll(fn func(key, value []byte)) {
+	if h == nil || fn == nil {
+		return
+	}
+	for i := 0; i < h.hcount; i++ {
+		fn(h.headers[i].Key, h.headers[i].Value)
+	}
 }
 
 // GetHeaders returns all request headers and preserves repeated fields.
@@ -239,6 +277,10 @@ func (h *RequestHeader) GetHeaders() map[string][]string {
 
 // Set replaces all existing values for name with value.
 func (h *RequestHeader) Set(name, value string) {
+	key := []byte(name)
+	if !validToken(key) || !validHeaderValue(value) {
+		return
+	}
 	h.Del(name)
 	h.Add(name, value)
 }
@@ -246,7 +288,7 @@ func (h *RequestHeader) Set(name, value string) {
 // Add appends a request header value without replacing existing values.
 func (h *RequestHeader) Add(name, value string) {
 	key := []byte(name)
-	if !validToken(key) || stringsContainsCTL(value) {
+	if !validToken(key) || !validHeaderValue(value) {
 		return
 	}
 	if h.hcount >= maxHeaders {
@@ -293,15 +335,6 @@ func (h *RequestHeader) syncKnownHeader(name, value string) {
 			h.ContentLength, h.HasContentLength = n, true
 		}
 	}
-}
-
-func stringsContainsCTL(value string) bool {
-	for i := 0; i < len(value); i++ {
-		if value[i] == '\r' || value[i] == '\n' || value[i] == 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func (h *RequestHeader) peekStr(name string) []byte {
@@ -413,16 +446,18 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 				for pathStart < len(target) && target[pathStart] != '/' && target[pathStart] != '?' {
 					pathStart++
 				}
+				authority := target[authStart:pathStart]
+				if !validHostField(authority) {
+					return 0, ErrMalformedRequest
+				}
+				h.targetAuthority = authority
+				h.Host = authority
 				if pathStart < len(target) && target[pathStart] == '/' {
 					routeTarget = target[pathStart:]
 				} else if pathStart < len(target) && target[pathStart] == '?' {
 					routeTarget = target[pathStart:pathStart]
 				} else {
 					routeTarget = target[len(target):]
-				}
-				if pathStart > authStart {
-					h.targetAuthority = target[authStart:pathStart]
-					h.Host = h.targetAuthority
 				}
 			}
 		}
@@ -630,6 +665,10 @@ func validHostField(host []byte) bool {
 	if host[0] == '[' {
 		close := bytes.IndexByte(host, ']')
 		if close <= 1 {
+			return false
+		}
+		ip, err := netip.ParseAddr(string(host[1:close]))
+		if err != nil || !ip.Is6() {
 			return false
 		}
 		rest := host[close+1:]

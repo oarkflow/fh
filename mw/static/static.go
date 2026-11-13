@@ -7,32 +7,42 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
+	"io"
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/oarkflow/fh"
 )
 
 type Config struct {
-	Root         string
-	Prefix       string
-	Index        string
-	Browse       bool
-	ETag         bool
-	LastModified bool
-	CacheControl string
-	MaxAge       time.Duration
-	Immutable    bool
-	SPAFallback  string
-	Download     bool
+	Root             string
+	Prefix           string
+	Index            string
+	Browse           bool
+	MaxBrowseEntries int
+	ETag             bool
+	LastModified     bool
+	CacheControl     string
+	MaxAge           time.Duration
+	Immutable        bool
+	SPAFallback      string
+	Download         bool
 }
+
+const (
+	defaultMaxBrowseEntries = 1000
+	maxBrowseEntries        = 10000
+)
 
 func New(root string, config ...Config) fh.HandlerFunc {
 	cfg := Config{Root: root, Index: "index.html"}
@@ -70,7 +80,7 @@ func New(root string, config ...Config) fh.HandlerFunc {
 			if candidate, statErr := rootFS.Stat(index); statErr == nil {
 				name, info = index, candidate
 			} else if cfg.Browse {
-				return listDir(c, rootFS, name)
+				return listDir(c, rootFS, name, cfg.MaxBrowseEntries)
 			} else {
 				return c.SendStatus(fh.StatusForbidden)
 			}
@@ -78,9 +88,17 @@ func New(root string, config ...Config) fh.HandlerFunc {
 		if info.IsDir() {
 			return c.SendStatus(fh.StatusForbidden)
 		}
-		body, err := rootFS.ReadFile(name)
+		file, err := rootFS.Open(name)
 		if err != nil {
 			return err
+		}
+		defer file.Close()
+		info, err = file.Stat()
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return c.SendStatus(fh.StatusForbidden)
 		}
 		if contentType := mime.TypeByExtension(path.Ext(name)); contentType != "" {
 			c.Type(contentType)
@@ -93,21 +111,101 @@ func New(root string, config ...Config) fh.HandlerFunc {
 			c.Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(cfg.MaxAge.Seconds())))
 		}
 		if cfg.LastModified {
-			c.Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
+			modTime := info.ModTime().UTC()
+			c.Set("Last-Modified", modTime.Format(http.TimeFormat))
 		}
+		etagConditionPresent := false
+		etag := ""
 		if cfg.ETag {
 			sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", name, info.Size(), info.ModTime().UnixNano())))
-			etag := "\"" + hex.EncodeToString(sum[:8]) + "\""
+			etag = "W/\"" + hex.EncodeToString(sum[:8]) + "\""
 			c.Set("ETag", etag)
-			if c.Get("If-None-Match") == etag {
-				return c.SendStatus(fh.StatusNotModified)
+		}
+		if value, present := requestHeaderValue(c, "If-None-Match"); present {
+			etagConditionPresent = true
+			if weakETagMatch(value, etag) {
+				if c.Method() == http.MethodGet || c.Method() == http.MethodHead {
+					return c.SendStatus(fh.StatusNotModified)
+				}
+				return c.SendStatus(fh.StatusPreconditionFailed)
+			}
+		}
+		if cfg.LastModified && !etagConditionPresent && (c.Method() == http.MethodGet || c.Method() == http.MethodHead) {
+			if value, present := requestHeaderValue(c, "If-Modified-Since"); present {
+				if since, parseErr := http.ParseTime(value); parseErr == nil && !info.ModTime().UTC().Truncate(time.Second).After(since) {
+					return c.SendStatus(fh.StatusNotModified)
+				}
 			}
 		}
 		if cfg.Download {
 			c.Set("Content-Disposition", "attachment; filename=\""+sanitizeFilename(path.Base(name))+"\"")
 		}
-		return c.SendBytes(body)
+		return c.SendStreamLength(file, info.Size())
 	}
+}
+
+func requestHeaderValue(c fh.Ctx, name string) (string, bool) {
+	var value strings.Builder
+	found := false
+	c.RequestHeader().VisitAll(func(key, fieldValue []byte) {
+		if !strings.EqualFold(string(key), name) {
+			return
+		}
+		if found {
+			value.WriteByte(',')
+		}
+		_, _ = value.Write(fieldValue)
+		found = true
+	})
+	if !found {
+		return "", false
+	}
+	return value.String(), true
+}
+
+func weakETagMatch(header, current string) bool {
+	header = strings.TrimSpace(header)
+	if header == "*" {
+		return true
+	}
+	current = strings.TrimPrefix(strings.TrimSpace(current), "W/")
+	matched := false
+	for i := 0; i < len(header); {
+		for i < len(header) && (header[i] == ' ' || header[i] == '\t' || header[i] == ',') {
+			i++
+		}
+		if i == len(header) {
+			return matched
+		}
+		start := i
+		if strings.HasPrefix(header[i:], "W/") {
+			i += 2
+		}
+		if i >= len(header) || header[i] != '"' {
+			return false
+		}
+		i++
+		for i < len(header) && header[i] != '"' {
+			if header[i] < 0x21 || header[i] == 0x7f {
+				return false
+			}
+			i++
+		}
+		if i == len(header) {
+			return false
+		}
+		i++
+		if strings.TrimPrefix(header[start:i], "W/") == current {
+			matched = true
+		}
+		for i < len(header) && (header[i] == ' ' || header[i] == '\t') {
+			i++
+		}
+		if i < len(header) && header[i] != ',' {
+			return false
+		}
+	}
+	return matched
 }
 
 func cleanRootName(name string) string {
@@ -135,9 +233,8 @@ func sanitizeFilename(name string) string {
 	return b.String()
 }
 
-func listDir(c fh.Ctx, rootFS *os.Root, dir string) error {
-	fsys := rootFS.FS()
-	entries, err := fs.ReadDir(fsys, dir)
+func listDir(c fh.Ctx, rootFS *os.Root, dir string, limit int) error {
+	entries, truncated, err := readDirBounded(rootFS, dir, limit)
 	if err != nil {
 		return err
 	}
@@ -154,7 +251,7 @@ func listDir(c fh.Ctx, rootFS *os.Root, dir string) error {
 		if entries[i].IsDir() != entries[j].IsDir() {
 			return entries[i].IsDir()
 		}
-		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
+		return compareFolded(entries[i].Name(), entries[j].Name()) < 0
 	})
 
 	safePath := html.EscapeString(dir)
@@ -174,23 +271,87 @@ func listDir(c fh.Ctx, rootFS *os.Root, dir string) error {
 
 	for _, entry := range entries {
 		name := html.EscapeString(entry.Name())
+		href := html.EscapeString("./" + url.PathEscape(entry.Name()))
 		if entry.IsDir() {
 			buf.WriteString("<li><a href=\"")
-			buf.WriteString(name)
+			buf.WriteString(href)
 			buf.WriteString("/\"><strong>")
 			buf.WriteString(name)
 			buf.WriteString("/</strong></a></li>")
 		} else {
 			buf.WriteString("<li><a href=\"")
-			buf.WriteString(name)
+			buf.WriteString(href)
 			buf.WriteString("\">")
 			buf.WriteString(name)
 			buf.WriteString("</a></li>")
 		}
+	}
+	if truncated {
+		buf.WriteString("<li><em>Listing truncated.</em></li>")
 	}
 
 	buf.WriteString("</ul><hr></body></html>")
 
 	c.Type("text/html; charset=utf-8")
 	return c.SendBytes(buf.Bytes())
+}
+
+func compareFolded(a, b string) int {
+	for len(a) > 0 && len(b) > 0 {
+		ra, sizeA := utf8.DecodeRuneInString(a)
+		rb, sizeB := utf8.DecodeRuneInString(b)
+		ra = unicode.ToLower(ra)
+		rb = unicode.ToLower(rb)
+		if ra < rb {
+			return -1
+		}
+		if ra > rb {
+			return 1
+		}
+		a = a[sizeA:]
+		b = b[sizeB:]
+	}
+	if len(a) == 0 {
+		if len(b) == 0 {
+			return 0
+		}
+		return -1
+	}
+	return 1
+}
+
+func readDirBounded(rootFS *os.Root, dir string, limit int) ([]fs.DirEntry, bool, error) {
+	if limit <= 0 {
+		limit = defaultMaxBrowseEntries
+	} else if limit > maxBrowseEntries {
+		limit = maxBrowseEntries
+	}
+	file, err := rootFS.Open(dir)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	entries := make([]fs.DirEntry, 0, min(limit, 128))
+	for len(entries) <= limit {
+		batchSize := min(128, limit+1-len(entries))
+		batch, readErr := file.ReadDir(batchSize)
+		if len(batch) == 0 && readErr == nil {
+			return nil, false, fmt.Errorf("static: directory read made no progress")
+		}
+		remaining := limit + 1 - len(entries)
+		if len(batch) > remaining {
+			batch = batch[:remaining]
+		}
+		entries = append(entries, batch...)
+		if len(entries) > limit {
+			return entries[:limit], true, nil
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				return entries, false, nil
+			}
+			return nil, false, readErr
+		}
+	}
+	return entries, false, nil
 }

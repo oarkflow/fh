@@ -47,18 +47,43 @@ func New(config ...Config) fh.HandlerFunc {
 		if encoding != "gzip" {
 			return fh.NewHTTPError(fh.StatusUnsupportedMediaType, "CONTENT_ENCODING_UNSUPPORTED", "Content-Encoding is not supported").WithCause(ErrUnsupported)
 		}
-		body, err := DecodeGzip(c.Body(), cfg.MaxSize, cfg.MaxExpansionRatio)
-		if err != nil {
-			status := fh.StatusBadRequest
-			code := "COMPRESSED_BODY_INVALID"
-			if errors.Is(err, ErrTooLarge) || errors.Is(err, ErrExpansionRatio) {
-				status = fh.StatusPayloadTooLarge
-				code = "DECOMPRESSED_BODY_TOO_LARGE"
-			}
-			return fh.NewHTTPError(status, code, "Compressed request body was rejected").WithCause(err)
+		requestBody := c.Body()
+		if err := fh.RequestBodyLimitError(c); err != nil {
+			return requestBodyError(err)
 		}
-		if !fh.ReplaceRequestBody(c, body) {
-			return fh.NewHTTPError(fh.StatusInternalServerError, "REQUEST_BODY_REPLACE_UNSUPPORTED", "Request context cannot replace its body")
+		gz, err := gzip.NewReader(bytes.NewReader(requestBody))
+		if err != nil {
+			return compressedBodyError(err)
+		}
+		limit, ratioLimited := expandedLimit(len(requestBody), cfg.MaxSize, cfg.MaxExpansionRatio)
+		var body []byte
+		_, defaultCtx := c.(*fh.DefaultCtx)
+		if !defaultCtx || !fh.ReplaceRequestBodyReader(c, io.LimitReader(gz, int64(limit)+1)) {
+			_ = gz.Close()
+			body, err = DecodeGzip(requestBody, cfg.MaxSize, cfg.MaxExpansionRatio)
+			if err != nil {
+				return compressedBodyError(err)
+			}
+			if !fh.ReplaceRequestBody(c, body) {
+				if err := fh.RequestBodyLimitError(c); err != nil {
+					return requestBodyError(err)
+				}
+				return fh.NewHTTPError(fh.StatusInternalServerError, "REQUEST_BODY_REPLACE_UNSUPPORTED", "Request context cannot replace its body")
+			}
+		} else {
+			body = c.Body()
+			readErr := fh.RequestBodyLimitError(c)
+			_ = gz.Close()
+			if readErr != nil {
+				return requestBodyError(readErr)
+			}
+			if len(body) > limit {
+				decodeErr := ErrTooLarge
+				if ratioLimited {
+					decodeErr = ErrExpansionRatio
+				}
+				return compressedBodyError(decodeErr)
+			}
 		}
 		c.RequestHeader().Del(fh.HeaderContentEncodingStr)
 		c.RequestHeader().Del(fh.HeaderContentLengthStr)
@@ -66,6 +91,38 @@ func New(config ...Config) fh.HandlerFunc {
 		c.RequestHeader().HasContentLength = true
 		return c.Next()
 	}
+}
+
+func expandedLimit(compressedSize, maxSize, maxRatio int) (limit int, ratioLimited bool) {
+	limit = maxSize
+	if maxRatio > 0 && compressedSize > 0 && compressedSize <= maxSize/maxRatio {
+		ratioLimit := compressedSize * maxRatio
+		if ratioLimit < limit {
+			limit = ratioLimit
+			ratioLimited = true
+		}
+	}
+	return limit, ratioLimited
+}
+
+func requestBodyError(err error) error {
+	if errors.Is(err, fh.ErrBufferedBodyBudget) {
+		return fh.NewHTTPError(fh.StatusServiceUnavailable, "REQUEST_BODY_BUDGET_EXCEEDED", "Request body buffer capacity is exhausted").WithCause(err).Temporary()
+	}
+	if errors.Is(err, fh.ErrBodyTooLarge) {
+		return fh.PayloadTooLarge("Decompressed request body exceeds the configured limit").WithCause(err)
+	}
+	return compressedBodyError(fmt.Errorf("%w: %v", ErrMalformedContent, err))
+}
+
+func compressedBodyError(err error) error {
+	status := fh.StatusBadRequest
+	code := "COMPRESSED_BODY_INVALID"
+	if errors.Is(err, ErrTooLarge) || errors.Is(err, ErrExpansionRatio) {
+		status = fh.StatusPayloadTooLarge
+		code = "DECOMPRESSED_BODY_TOO_LARGE"
+	}
+	return fh.NewHTTPError(status, code, "Compressed request body was rejected").WithCause(err)
 }
 
 // DecodeGzip expands src with both an absolute limit and an expansion-ratio

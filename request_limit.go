@@ -61,7 +61,13 @@ func (c *DefaultCtx) limitRequestBody(limit int64) error {
 		if int64(len(c.body)) > limit {
 			return PayloadTooLarge("request body exceeds configured limit")
 		}
+		if c.requestBodyMaxLimit == 0 || limit < c.requestBodyMaxLimit {
+			c.requestBodyMaxLimit = limit
+		}
 		return nil
+	}
+	if c.requestBodyMaxLimit == 0 || limit < c.requestBodyMaxLimit {
+		c.requestBodyMaxLimit = limit
 	}
 	var reader io.Reader
 	if c.requestBodyLimit != nil {
@@ -77,12 +83,15 @@ func (c *DefaultCtx) limitRequestBody(limit int64) error {
 	return nil
 }
 
-// RequestBodyLimitError reports a read-time limit violation after a handler
-// returns, including when that handler ignored an error from Body().
+// RequestBodyLimitError reports a request-body read or limit error after a
+// handler returns, including when it ignored an error from Body().
 func RequestBodyLimitError(c Ctx) error {
 	dc, ok := c.(*DefaultCtx)
 	if !ok {
 		return nil
+	}
+	if dc.requestBodyStreamErr != nil {
+		return dc.requestBodyStreamErr
 	}
 	for r := dc.requestBodyLimit; r != nil; {
 		if r.err != nil {

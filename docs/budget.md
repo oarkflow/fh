@@ -15,6 +15,16 @@ A single request timeout is insufficient for complex workflows. If a request has
 - Memory reservation before large allocations
 - Middleware for automatic budget attachment
 
+`BudgetMiddleware` installs the budget deadline on the request context, so
+context-aware handlers and outbound clients are cancelled when it expires.
+For child operations, call `child.Context(parent)` and defer its returned cancel
+function to attach that child's deadline and budget to the operation context.
+When `MaxUpstreamCalls` is positive, `fh.Client` reserves one call for every
+transport attempt, including retries and redirects. Child budgets enforce
+their split allowance and charge successful reservations against every
+ancestor. A zero upstream limit means unlimited; a zero-fraction child of a
+limited parent is denied upstream calls.
+
 ## Usage
 
 ```go

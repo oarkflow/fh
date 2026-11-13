@@ -59,7 +59,7 @@ func Routes(app *fh.App, hub *fleet.Hub) {
 		case errors.Is(err, fleet.ErrOffline):
 			return c.Status(404).JSON(map[string]string{"error": "device offline"})
 		case err != nil:
-			return c.Status(504).JSON(map[string]string{"error": "device did not confirm: " + err.Error()})
+			return fh.WrapHTTPError(err, fh.StatusGatewayTimeout, "DEVICE_COMMAND_FAILED", "Device did not confirm the command")
 		}
 		return c.JSON(map[string]any{"message_id": id, "processed": true})
 	})

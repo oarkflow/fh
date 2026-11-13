@@ -23,6 +23,15 @@ import (
 
 type Map map[string]any
 
+// ErrorCountOverflowCode identifies the aggregate returned by ErrorCount for
+// error codes omitted after the per-app metric cardinality limit is reached.
+const ErrorCountOverflowCode = "__fh_overflow__"
+
+const (
+	maxTrackedErrorCodes = 256
+	maxErrorCodeBytes    = 128
+)
+
 // ErrorHandler handles errors returned from route handlers and middleware.
 type ErrorHandler func(Ctx, error)
 
@@ -145,7 +154,9 @@ type Config struct {
 	// is implicit in HTTP/1.1; Connection: close is still emitted when needed.
 	SendKeepAliveHeader bool
 	// ServerHeader, when non-empty, is sent as the Server response header.
-	// Empty by default (no Server header sent) for security.
+	// Empty by default (no Server header sent) for security. New and
+	// NewWithConfig panic if the value contains invalid HTTP field bytes or
+	// exceeds 16 KiB.
 	ServerHeader string
 	// AllowedHosts restricts Host/:authority values accepted by the server.
 	// An empty list preserves the historical behavior and accepts any host.
@@ -540,7 +551,10 @@ type App struct {
 	buildMu         sync.Mutex
 	groups          []*Group
 	lastRoute       namedRoute
-	errorCounts     sync.Map // error code -> *atomic.Uint64
+	errorCountsMu   sync.Mutex
+	errorCounts     sync.Map // stable error code -> *atomic.Uint64
+	errorCountSize  int
+	errorOverflow   atomic.Uint64
 	routeMetaMu     sync.RWMutex
 	routeMeta       []RouteInfo
 	healthMu        sync.RWMutex
@@ -562,6 +576,7 @@ type App struct {
 	// supervisor without threading it through every call site.
 	preforkSupervisor     atomic.Pointer[preforkSupervisor]
 	metrics               metricsTracker
+	inFlightRequests      atomic.Int64
 	bufferedRequestBytes  atomic.Int64
 	bufferedResponseBytes atomic.Int64
 	bodyBudgetRejections  atomic.Uint64
@@ -685,6 +700,9 @@ func applyConfigDefaults(cfg *Config) {
 // handlers and initializes the app struct together with the reliability
 // subsystem when enabled.
 func buildApp(cfg Config) *App {
+	if len(cfg.ServerHeader) > maxHeaderValueLength || !validHeaderValue(cfg.ServerHeader) {
+		panic("fh: ServerHeader must be a valid HTTP header value no longer than 16 KiB")
+	}
 	if cfg.DeploymentSecurityGate != nil {
 		gate := *cfg.DeploymentSecurityGate
 		gate.TrustedProxyCIDRs = append([]string(nil), gate.TrustedProxyCIDRs...)
@@ -693,6 +711,7 @@ func buildApp(cfg Config) *App {
 	if err := kernel.NormalizeConfig(&cfg.Kernel); err != nil {
 		panic(err)
 	}
+	cfg.AllowedHosts = normalizeAllowedHosts(cfg.AllowedHosts)
 	applySecureDefaults(&cfg)
 	applyComplianceDefaults(&cfg)
 	if cfg.MaxHeaderCount > maxServerHeaderCount {
@@ -769,7 +788,7 @@ func buildApp(cfg Config) *App {
 		app.middleware = append([]HandlerFunc{hm}, app.middleware...)
 	}
 
-	if rg := defaultResourceGuardMiddleware(cfg); rg != nil {
+	if rg := defaultResourceGuardMiddlewareWithCounter(cfg, &app.inFlightRequests); rg != nil {
 		app.middleware = append([]HandlerFunc{rg}, app.middleware...)
 	}
 
@@ -815,11 +834,6 @@ func (a *App) Add(method, path string, handlers ...HandlerFunc) *App {
 		}
 	}
 	routeHandler := a.chain(handlers)
-	if len(a.middleware) == 0 && a.reliability == nil && len(handlers) == 1 {
-		if pre := prebuiltResponseForHandler(handlers[0]); pre != nil {
-			a.router.registerPrebuiltResponse(method, path, pre)
-		}
-	}
 	a.router.Add(method, path, routeHandler)
 	a.registerRouteInfo(RouteInfo{
 		Method:   strings.ToUpper(strings.TrimSpace(method)),
@@ -1262,6 +1276,23 @@ func (a *App) prepareTLSConfig(config *tls.Config) (*tls.Config, error) {
 		if cfg.MinVersion < tls.VersionTLS13 {
 			return nil, errors.New("fh: SecureByDefault requires TLS 1.3 or newer")
 		}
+		if cfg.GetConfigForClient != nil {
+			getConfig := cfg.GetConfigForClient
+			cfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+				perClient, err := getConfig(hello)
+				if err != nil || perClient == nil {
+					return perClient, err
+				}
+				perClient = perClient.Clone()
+				if perClient.MinVersion == 0 {
+					perClient.MinVersion = tls.VersionTLS13
+				}
+				if perClient.MinVersion < tls.VersionTLS13 || (perClient.MaxVersion != 0 && perClient.MaxVersion < tls.VersionTLS13) {
+					return nil, errors.New("fh: SecureByDefault requires TLS 1.3 or newer")
+				}
+				return perClient, nil
+			}
+		}
 	}
 	if err := validateTLSConfig(cfg); err != nil {
 		return nil, err
@@ -1376,6 +1407,7 @@ func (a *App) ServeContext(ctx context.Context, ln net.Listener) error {
 
 	var acceptErr error
 	var tempDelay time.Duration
+acceptLoop:
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -1398,7 +1430,7 @@ func (a *App) ServeContext(ctx context.Context, ln net.Listener) error {
 				case <-ctx.Done():
 					acceptErr = ctx.Err()
 					_ = a.beginShutdown()
-					break
+					break acceptLoop
 				}
 			}
 			acceptErr = err
@@ -1932,7 +1964,9 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			_ = writeAll(conn, serverError400)
 			return
 		}
-		if !allowedHost(string(ctx.Header.Host), a.cfg.AllowedHosts) {
+		// The allow-list check does not retain the host. Reuse the immutable
+		// request bytes as a temporary string view instead of allocating a copy.
+		if !allowedHost(b2s(ctx.Header.Host), a.cfg.AllowedHosts) {
 			releaseCtx(ctx)
 			_ = writeAll(conn, serverError400)
 			return
@@ -2044,6 +2078,11 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		}
 		bodyStart := headEnd + 4
 		bodyLen := ctx.Header.ContentLength
+		if bodyLen > int(^uint(0)>>1)-bodyStart {
+			releaseCtx(ctx)
+			_ = writeAll(conn, serverError413)
+			return
+		}
 		var nextData []byte
 		chunkedBody := ctx.Header.Chunked
 		var streamedBody *requestBodyStream
@@ -2066,10 +2105,10 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		}
 
 		if a.cfg.StreamRequestBody && (chunkedBody || bodyLen > 0) {
-			streamedBody = newRequestBodyStream(conn, accumulated[bodyStart:], bodyLen, chunkedBody, a.cfg.MaxRequestBodySize)
+			streamedBody = newRequestBodyStream(conn, accumulated[bodyStart:], bodyLen, chunkedBody, a.cfg.MaxRequestBodySize, a.cfg.MaxHeaderListSize)
 			ctx.requestBodyStream = streamedBody
 		} else if chunkedBody {
-			body, leftover, trailers, readErr := readChunkedBodyWithReserve(conn, accumulated[bodyStart:], a.cfg.MaxRequestBodySize, bodyBudget, func(n int) bool {
+			body, leftover, trailers, readErr := readChunkedBodyWithLimits(conn, accumulated[bodyStart:], a.cfg.MaxRequestBodySize, a.cfg.MaxHeaderListSize, bodyBudget, func(n int) bool {
 				if !a.reserveBufferedBody(int64(n)) {
 					return false
 				}
@@ -2167,11 +2206,17 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		}
 		if streamedBody != nil {
 			if !streamedBody.done {
-				_, _ = io.Copy(io.Discard, streamedBody)
+				var bodyReader io.Reader = streamedBody
+				if ctx.requestBodyLimit != nil {
+					bodyReader = ctx.requestBodyLimit
+				}
+				if _, drainErr := io.Copy(io.Discard, bodyReader); drainErr != nil {
+					ctx.forceClose = true
+				}
 			}
 			nextData, ctx.trailers, _ = streamedBody.finish()
 			ctx.upgradeBuffered = nextData
-			if streamedBody.err != nil {
+			if streamedBody.err != nil || RequestBodyLimitError(ctx) != nil {
 				ctx.forceClose = true
 			}
 		}
@@ -2320,17 +2365,34 @@ func (a *App) dispatch(ctx *DefaultCtx) {
 	a.dispatchCore(ctx)
 }
 
+// tryAcquireInFlight reserves one slot from the server-wide request budget.
+// HTTP/2 calls it before starting a handler goroutine; HTTP/1 acquires through
+// the resource-guard middleware after request parsing.
+func (a *App) tryAcquireInFlight() bool {
+	limit := a.cfg.MaxInFlightRequests
+	if limit <= 0 {
+		return true
+	}
+	for {
+		current := a.inFlightRequests.Load()
+		if current >= limit {
+			return false
+		}
+		if a.inFlightRequests.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+func (a *App) releaseInFlight() {
+	if a.cfg.MaxInFlightRequests > 0 {
+		a.inFlightRequests.Add(-1)
+	}
+}
+
 func (a *App) dispatchCore(ctx *DefaultCtx) {
 	ctx.params = ctx.params[:0]
 	path := ctx.path()
-
-	if a.router.hasPrebuilt && ctx.canRouteStaticPrebuilt() {
-		if resp := a.router.FindPrebuiltResponseBytes(ctx.Header.Method, path); resp != nil {
-			ctx.responded = true
-			_ = writeAll(ctx.conn, resp)
-			return
-		}
-	}
 
 	handler := a.router.FindBytes(ctx.Header.Method, path, &ctx.params)
 	if handler == nil && bytesEqualFold(ctx.Header.Method, MethodHEADBytes) {
@@ -2403,6 +2465,19 @@ func (a *App) dispatchCore(ctx *DefaultCtx) {
 				return
 			}
 		}
+	}
+
+	// A handler may ignore an error returned while consuming a bounded body
+	// (for example, by calling Body() and then returning nil). Preserve the
+	// limit violation so it cannot silently become a successful response. Once
+	// response headers are committed they cannot be replaced, so force the
+	// connection closed instead of reusing it after a rejected request body.
+	if bodyErr := RequestBodyLimitError(ctx); bodyErr != nil {
+		if ctx.responded {
+			ctx.forceClose = true
+			return
+		}
+		err = bodyErr
 	}
 
 	if err != nil {
@@ -2481,7 +2556,7 @@ func hasUpgradeH2C(ctx *DefaultCtx) bool {
 func readH2CUpgradeBody(conn net.Conn, ctx *DefaultCtx, buffered []byte, bodyStart, maxBody int, timeout time.Duration, reserve func(int) bool) ([]byte, error) {
 	data := buffered[bodyStart:]
 	if ctx.Header.Chunked {
-		body, leftover, trailers, err := readChunkedBodyWithReserve(conn, data, maxBody, timeout, reserve)
+		body, leftover, trailers, err := readChunkedBodyWithLimits(conn, data, maxBody, ctx.server.cfg.MaxHeaderListSize, timeout, reserve)
 		if err != nil {
 			return nil, err
 		}
@@ -2640,17 +2715,44 @@ func (a *App) recordError(code string) {
 	if code == "" {
 		code = "UNKNOWN"
 	}
-	v, _ := a.errorCounts.LoadOrStore(code, &atomic.Uint64{})
-	v.(*atomic.Uint64).Add(1)
+	if code == ErrorCountOverflowCode || len(code) > maxErrorCodeBytes {
+		a.errorOverflow.Add(1)
+		return
+	}
+	if value, ok := a.errorCounts.Load(code); ok {
+		value.(*atomic.Uint64).Add(1)
+		return
+	}
+	a.errorCountsMu.Lock()
+	if value, ok := a.errorCounts.Load(code); ok {
+		a.errorCountsMu.Unlock()
+		value.(*atomic.Uint64).Add(1)
+		return
+	}
+	if a.errorCountSize >= maxTrackedErrorCodes {
+		a.errorCountsMu.Unlock()
+		a.errorOverflow.Add(1)
+		return
+	}
+	counter := &atomic.Uint64{}
+	a.errorCounts.Store(code, counter)
+	a.errorCountSize++
+	a.errorCountsMu.Unlock()
+	counter.Add(1)
 }
 
 // ErrorCount returns the number of errors rendered for a stable error code.
+// Codes longer than 128 bytes and codes beyond the 256-code per-app limit are
+// aggregated under ErrorCountOverflowCode.
 func (a *App) ErrorCount(code string) uint64 {
-	v, ok := a.errorCounts.Load(code)
+	if code == ErrorCountOverflowCode {
+		return a.errorOverflow.Load()
+	}
+	value, ok := a.errorCounts.Load(code)
 	if !ok {
 		return 0
 	}
-	return v.(*atomic.Uint64).Load()
+	return value.(*atomic.Uint64).Load()
 }
 
 // Reliability returns the configured reliability runtime, if enabled.

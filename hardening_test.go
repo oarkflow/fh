@@ -226,6 +226,37 @@ func TestResourceGuardDisabledWithoutConfig(t *testing.T) {
 	}
 }
 
+func TestResourceGuardConcurrentSnapshotReads(t *testing.T) {
+	app := New(WithStartupBannerDisabled(true))
+	guard := defaultResourceGuardMiddleware(Config{
+		MaxGoroutines:         int(^uint(0) >> 1),
+		MaxHeapBytes:          ^uint64(0),
+		MaxInFlightRequests:   10_000,
+		ResourceCheckInterval: time.Hour,
+	})
+
+	const workers = 32
+	const requestsPerWorker = 100
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn := &benchConn{buf: make([]byte, 256)}
+			ctx := acquireCtx(conn, app)
+			defer releaseCtx(ctx)
+			for j := 0; j < requestsPerWorker; j++ {
+				ctx.reset()
+				if err := guard(ctx); err != nil {
+					t.Errorf("resource guard: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func TestSecureByDefaultEnablesResourceGuard(t *testing.T) {
 	app := New(WithSecureByDefault(true))
 	if defaultResourceGuardMiddleware(app.cfg) == nil {

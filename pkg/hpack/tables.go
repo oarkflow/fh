@@ -25,15 +25,26 @@ func (t *headerFieldTable) init() {
 	t.byNameValue = make(map[pairNameValue]uint64, 64)
 }
 
-// reset clears all dynamic entries while retaining allocated map capacity.
+// reset clears all dynamic entries and releases unusually large allocations.
 func (t *headerFieldTable) reset() {
-	for k := range t.byName {
-		delete(t.byName, k)
+	if t.evictCount > 128 || len(t.byName) > 128 {
+		t.byName = make(map[string]uint64, 64)
+	} else {
+		clear(t.byName)
 	}
-	for k := range t.byNameValue {
-		delete(t.byNameValue, k)
+	if t.evictCount > 128 || len(t.byNameValue) > 128 {
+		t.byNameValue = make(map[pairNameValue]uint64, 64)
+	} else {
+		clear(t.byNameValue)
 	}
-	t.ents = t.ents[:0]
+	if cap(t.ents) > 0 {
+		clear(t.ents[:cap(t.ents)])
+	}
+	if cap(t.ents) > 128 {
+		t.ents = nil
+	} else {
+		t.ents = t.ents[:0]
+	}
 	t.evictCount = 0
 }
 

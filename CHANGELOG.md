@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Supply Chain Integrity**: Added `go mod verify` step to lint pipeline.
 
 ### Changed
-- **Minimum Go Version**: Bumped minimum supported toolchain to Go 1.27.3 in `go.mod` and `README.md` to ensure consumers build with patched crypto/x509 libraries.
+- **Minimum Go Version**: Raised the required toolchain to Go 1.27.4 and `golang.org/x/net` to v0.62.0 for current standard-library, toolchain, and upstream HTML security fixes.
 
 ### Fixed
 - **Cache Store Expiry**: Increased TTL tolerance in `mw/cache/file_store_test.go` to prevent scheduling races under high-concurrency CI environments.

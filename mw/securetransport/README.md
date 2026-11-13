@@ -93,7 +93,7 @@ Application routes protected by `Protect` are still your normal FH routes.
 
 ## Stores
 
-The default `kv.NewMemoryStore` instances are useful for tests and single-process development. Production deployments should use durable or distributed `kv.Store` implementations:
+The default `kv.NewMemoryStore` instances are useful for tests and single-process development. They reject new records when device storage reaches 100,000 entries or session storage reaches 250,000 entries; live devices and sessions are not evicted to make room. Production deployments should use durable or distributed `kv.Store` implementations with equivalent capacity limits:
 
 - `DeviceStore`: persists registered devices and revocation status.
 - `SessionStore`: stores active session keys. Protect this store carefully; do not serialize plaintext keys into an ordinary database.

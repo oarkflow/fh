@@ -16,3 +16,5 @@ app.Use(handler)
 
 Install `mw/realip` first when behind a proxy, and configure only trusted proxy
 CIDRs. Use a shared bounded store when reputation must apply across replicas.
+Custom keys are limited to 256 bytes by default (`MaxKeyBytes`); oversized
+keys are rejected with `400` before store access.

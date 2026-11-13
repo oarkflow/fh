@@ -1,6 +1,6 @@
 module github.com/oarkflow/fh/examples/production-app
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/oarkflow/authz v0.0.6

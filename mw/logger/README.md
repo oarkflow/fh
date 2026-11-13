@@ -2,7 +2,7 @@
 
 ## What it does
 
-Writes access logs with request/response metadata such as method, path, status, latency, IP, request ID, and errors.
+Writes access logs with request/response metadata such as method, path, status, latency, IP, request ID, and errors. Query parameters and key-value pairs in error text whose names match the framework's sensitive-field list (including token, password, cookie, and OAuth credential names) are redacted by default in both text and JSON formats. Add application-specific names with `RedactQueryKeys`; `DisableQueryRedaction` opts out of both filters.
 
 ## How to implement
 
@@ -34,4 +34,4 @@ Run after request/correlation ID and real IP so logs include normalized identifi
 
 ## Production considerations
 
-Redact secrets, authorization headers, cookies, and sensitive query parameters. Use sampling for very high RPS routes.
+Sensitive query and error key-value filtering is on by default. It cannot identify arbitrary application secrets in paths, free-form error text, or custom log fields. Review those sources separately. `DisableQueryRedaction` also disables the default error-string filter. Use sampling for very high RPS routes.

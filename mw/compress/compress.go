@@ -38,6 +38,10 @@ type Config struct {
 	// security-sensitive headers (Set-Cookie, Content-Security-Policy,
 	// Authorization) to mitigate BREACH-style side-channel attacks.
 	BreachProtection bool
+
+	// DisableBreachProtection explicitly opts out of the safe default. Set this
+	// when compression of responses with sensitive headers is intentional.
+	DisableBreachProtection bool
 }
 
 var DefaultConfig = Config{
@@ -64,6 +68,12 @@ func New(config ...Config) fh.HandlerFunc {
 		if cfg.Next != nil && cfg.Next(ctx) {
 			return ctx.Next()
 		}
+		// Ensure the header survives handler code that replaces Vary, even when
+		// this particular request does not negotiate a compressed encoding.
+		ctx.OnBeforeResponse(func(response fh.Ctx) error {
+			response.Vary("Accept-Encoding")
+			return nil
+		})
 
 		ae := ctx.Get("Accept-Encoding")
 
@@ -71,14 +81,19 @@ func New(config ...Config) fh.HandlerFunc {
 		enc := cfg.Encoder
 		if enc == nil {
 			enc = negotiateEncoder(ae, cfg.Level)
-		}
-		if enc == nil || !acceptsEncoding(ae, enc.Encoding()) {
+			if enc == nil {
+				return ctx.Next()
+			}
+		} else if !acceptsEncoding(ae, enc.Encoding()) {
 			return ctx.Next()
 		}
 
 		encoding := enc.Encoding()
 
 		ctx.AddBodyTransform(func(body []byte) ([]byte, error) {
+			// This runs after before-response callbacks, so retain the cache
+			// dimension if a later callback replaced Vary.
+			ctx.Vary("Accept-Encoding")
 			if len(body) < cfg.MinSize {
 				return body, nil
 			}
@@ -88,10 +103,12 @@ func New(config ...Config) fh.HandlerFunc {
 				return body, nil
 			}
 
-			// Skip compression if response has security-sensitive headers
-			// to mitigate BREACH-style compression side-channel attacks.
+			// Skip compression around authenticated or cookie-bearing requests,
+			// and responses with security-sensitive headers, to reduce
+			// BREACH-style compression side-channel exposure.
 			if cfg.BreachProtection {
-				if ctx.ResponseHeader("Set-Cookie") != "" || ctx.ResponseHeader("Content-Security-Policy") != "" || ctx.ResponseHeader("Authorization") != "" {
+				if ctx.Get("Authorization") != "" || ctx.Get("Proxy-Authorization") != "" || ctx.Get("Cookie") != "" ||
+					ctx.ResponseHeader("Set-Cookie") != "" || ctx.ResponseHeader("Content-Security-Policy") != "" || ctx.ResponseHeader("Authorization") != "" {
 					return body, nil
 				}
 			}
@@ -113,7 +130,6 @@ func New(config ...Config) fh.HandlerFunc {
 			}
 
 			ctx.Set("Content-Encoding", encoding)
-			ctx.Append("Vary", "Accept-Encoding")
 			ctx.Set("Content-Length", strconv.Itoa(dst.Len()))
 
 			return dst.Bytes(), nil
@@ -126,8 +142,9 @@ func New(config ...Config) fh.HandlerFunc {
 // negotiateEncoder picks the best available encoder for the given Accept-Encoding header.
 // Prefers gzip over deflate. Returns nil when neither is accepted.
 func negotiateEncoder(acceptEncoding string, level int) Encoder {
-	gzQ := encodingQuality(acceptEncoding, "gzip")
-	deflQ := encodingQuality(acceptEncoding, "deflate")
+	qualities := parseEncodingQualities(acceptEncoding)
+	gzQ := qualityForEncoding(qualities, "gzip")
+	deflQ := qualityForEncoding(qualities, "deflate")
 	if gzQ <= 0 && deflQ <= 0 {
 		return nil
 	}
@@ -139,30 +156,135 @@ func negotiateEncoder(acceptEncoding string, level int) Encoder {
 
 // encodingQuality returns the quality value for a specific encoding in an Accept-Encoding header.
 func encodingQuality(header, encoding string) float64 {
+	return qualityForEncoding(parseEncodingQualities(header), encoding)
+}
+
+type encodingQualities struct {
+	gzip        float64
+	hasGzip     bool
+	deflate     float64
+	hasDeflate  bool
+	other       map[string]float64
+	wildcard    float64
+	hasWildcard bool
+}
+
+func parseEncodingQualities(header string) encodingQualities {
+	var qualities encodingQualities
 	for len(header) > 0 {
-		token := header
+		item := header
 		if i := strings.IndexByte(header, ','); i >= 0 {
-			token = strings.TrimSpace(header[:i])
-			header = header[i+1:]
+			item, header = header[:i], header[i+1:]
 		} else {
 			header = ""
 		}
-		token = strings.TrimSpace(token)
+		namePart, params, hasParams := strings.Cut(item, ";")
+		name := strings.ToLower(trimOWS(namePart))
+		if name == "" || (name != "*" && !isHTTPToken(name)) {
+			continue
+		}
 		q := 1.0
-		if semi := strings.IndexByte(token, ';'); semi >= 0 {
-			params := strings.TrimSpace(token[semi+1:])
-			token = strings.TrimSpace(token[:semi])
-			if strings.HasPrefix(params, "q=") {
-				if v, err := strconv.ParseFloat(params[2:], 64); err == nil {
-					q = v
-				}
+		if hasParams && strings.Contains(params, ";") {
+			q = 0
+		} else if hasParams {
+			key, value, ok := strings.Cut(trimOWS(params), "=")
+			if !ok || !strings.EqualFold(trimOWS(key), "q") {
+				q = 0
+			} else if parsed, ok := parseQValue(trimOWS(value)); ok {
+				q = parsed
+			} else {
+				q = 0
 			}
 		}
-		if strings.EqualFold(token, encoding) || token == "*" {
+		if name == "*" {
+			if !qualities.hasWildcard || q < qualities.wildcard {
+				qualities.wildcard = q
+			}
+			qualities.hasWildcard = true
+			continue
+		}
+		switch name {
+		case "gzip":
+			if !qualities.hasGzip || q < qualities.gzip {
+				qualities.gzip = q
+			}
+			qualities.hasGzip = true
+		case "deflate":
+			if !qualities.hasDeflate || q < qualities.deflate {
+				qualities.deflate = q
+			}
+			qualities.hasDeflate = true
+		default:
+			if qualities.other == nil {
+				qualities.other = make(map[string]float64)
+			}
+			if previous, exists := qualities.other[name]; !exists || q < previous {
+				qualities.other[name] = q
+			}
+		}
+	}
+	return qualities
+}
+
+func trimOWS(value string) string { return strings.Trim(value, " \t") }
+
+func qualityForEncoding(qualities encodingQualities, encoding string) float64 {
+	switch {
+	case strings.EqualFold(encoding, "gzip") && qualities.hasGzip:
+		return qualities.gzip
+	case strings.EqualFold(encoding, "deflate") && qualities.hasDeflate:
+		return qualities.deflate
+	default:
+		if q, exists := qualities.other[strings.ToLower(encoding)]; exists {
 			return q
 		}
 	}
+	if qualities.hasWildcard {
+		return qualities.wildcard
+	}
 	return 0
+}
+
+func parseQValue(value string) (float64, bool) {
+	if value == "0" {
+		return 0, true
+	}
+	if value == "1" {
+		return 1, true
+	}
+	if len(value) < 3 || value[1] != '.' || len(value) > 5 {
+		return 0, false
+	}
+	whole := value[0]
+	if whole != '0' && whole != '1' {
+		return 0, false
+	}
+	frac := value[2:]
+	for i := 0; i < len(frac); i++ {
+		if frac[i] < '0' || frac[i] > '9' || (whole == '1' && frac[i] != '0') {
+			return 0, false
+		}
+	}
+	if whole == '1' {
+		return 1, true
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	return parsed, err == nil
+}
+
+func isHTTPToken(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func mergeConfig(base Config, override Config) Config {
@@ -181,7 +303,12 @@ func mergeConfig(base Config, override Config) Config {
 	if override.Next != nil {
 		base.Next = override.Next
 	}
-	base.BreachProtection = override.BreachProtection
+	if override.BreachProtection {
+		base.BreachProtection = true
+	}
+	if override.DisableBreachProtection {
+		base.BreachProtection = false
+	}
 
 	return base
 }
@@ -228,9 +355,7 @@ type GzipEncoder struct {
 }
 
 func NewGzipEncoder(level int) *GzipEncoder {
-	if level == 0 {
-		level = gzip.BestSpeed
-	}
+	level = normalizeCompressionLevel(level)
 
 	e := &GzipEncoder{
 		level: level,
@@ -274,10 +399,15 @@ type DeflateEncoder struct {
 
 // NewDeflateEncoder creates a new deflate encoder at the given compression level.
 func NewDeflateEncoder(level int) *DeflateEncoder {
-	if level == 0 {
-		level = flate.BestSpeed
-	}
+	level = normalizeCompressionLevel(level)
 	return &DeflateEncoder{level: level}
+}
+
+func normalizeCompressionLevel(level int) int {
+	if level == 0 || level < flate.HuffmanOnly || level > flate.BestCompression {
+		return flate.BestSpeed
+	}
+	return level
 }
 
 func (d *DeflateEncoder) Encoding() string { return EncodingDeflate }
@@ -299,93 +429,5 @@ func (d *DeflateEncoder) Encode(dst *bytes.Buffer, src []byte) error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func acceptsEncoding(header string, want string) bool {
-	if header == "" || want == "" {
-		return false
-	}
-
-	var foundWant bool
-	wantOK := false
-
-	var foundStar bool
-	starOK := false
-
-	i := 0
-	for i < len(header) {
-		for i < len(header) && (header[i] == ',' || header[i] == ' ' || header[i] == '\t') {
-			i++
-		}
-		if i >= len(header) {
-			break
-		}
-
-		start := i
-		for i < len(header) && header[i] != ';' && header[i] != ',' && header[i] != ' ' && header[i] != '\t' {
-			i++
-		}
-
-		name := header[start:i]
-		qOK := true
-
-		for i < len(header) && header[i] != ',' {
-			if header[i] == ';' {
-				i++
-				for i < len(header) && (header[i] == ' ' || header[i] == '\t') {
-					i++
-				}
-				if i+2 <= len(header) && (header[i] == 'q' || header[i] == 'Q') && i+1 < len(header) && header[i+1] == '=' {
-					i += 2
-					qOK = !isQZeroValue(header[i:])
-				}
-			}
-			i++
-		}
-
-		if i < len(header) && header[i] == ',' {
-			i++
-		}
-
-		if strings.EqualFold(name, want) {
-			foundWant = true
-			wantOK = qOK
-		} else if name == "*" {
-			foundStar = true
-			starOK = qOK
-		}
-	}
-
-	if foundWant {
-		return wantOK
-	}
-	if foundStar {
-		return starOK
-	}
-	return false
-}
-
-func isQZeroValue(s string) bool {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
-		s = s[1:]
-	}
-	if len(s) == 0 {
-		return false
-	}
-	if s[0] != '0' {
-		return false
-	}
-	if len(s) == 1 {
-		return true
-	}
-	if s[1] != '.' {
-		return true
-	}
-	for i := 2; i < len(s); i++ {
-		c := s[i]
-		if c == ',' || c == ';' || c == ' ' || c == '\t' {
-			return true
-		}
-		if c != '0' {
-			return false
-		}
-	}
-	return true
+	return header != "" && want != "" && encodingQuality(header, want) > 0
 }

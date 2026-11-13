@@ -113,7 +113,7 @@ func (r *h2Response) pushPromise(path string, method string, headers map[string]
 	requestHeaders := make([]hpack.HeaderField, 0, len(headers))
 	for k, v := range headers {
 		name := strings.ToLower(k)
-		if strings.HasPrefix(name, ":") || !validToken([]byte(name)) || strings.ContainsAny(v, "\x00\r\n") {
+		if strings.HasPrefix(name, ":") || !validToken([]byte(name)) || !validHeaderValue(v) {
 			return false
 		}
 		fields = append(fields, hpackHeaderField{Name: name, Value: v})
@@ -121,7 +121,7 @@ func (r *h2Response) pushPromise(path string, method string, headers map[string]
 	}
 
 	for _, field := range fields {
-		if strings.ContainsAny(field.Value, "\r\n") {
+		if !validHeaderValue(field.Value) {
 			return false
 		}
 	}
@@ -321,7 +321,7 @@ func (c *DefaultCtx) SendInformational(status int, headers map[string]string) bo
 	}
 	resp := []byte("HTTP/1.1 " + strconv.Itoa(status) + " " + StatusReason(status) + "\r\n")
 	for name, value := range headers {
-		if !validToken([]byte(name)) || strings.ContainsAny(name+value, "\x00\r\n") {
+		if !validToken([]byte(name)) || !validHeaderValue(value) {
 			return false
 		}
 		resp = append(resp, name+": "+value+"\r\n"...)
@@ -350,7 +350,7 @@ func validLinkTarget(uri string) bool {
 }
 
 func validLinkParam(name, value string) bool {
-	return validToken([]byte(name)) && !strings.ContainsAny(value, "\x00\r\n")
+	return validToken([]byte(name)) && validHeaderValue(value)
 }
 
 // PushResource pushes resources during HTTP/2 or early hints during HTTP/1.1.

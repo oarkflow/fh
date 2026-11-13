@@ -39,3 +39,9 @@ The default cookie is `Secure` and unsafe requests must include a valid
 `AllowMissingOrigin` are explicit compatibility opt-outs and should not be used
 on public browser-session routes. Use SameSite cookies and HTTPS. APIs using
 bearer tokens generally do not need CSRF, but browser cookie flows do.
+Origin hosts are restricted to valid ASCII DNS labels or IP literals, and
+application session bindings are limited to 1 KiB before signing. Multipart
+token extraction examines at most 128 parts; forms exceeding that limit are
+rejected. Duplicate token fields in a multipart form are rejected as ambiguous.
+`AutoRotateOnChange` requires a `SessionBinding`; configuration fails at
+startup rather than silently skipping session-change rotation.

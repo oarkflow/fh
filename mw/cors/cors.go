@@ -31,32 +31,44 @@ type Config struct {
 	Next func(ctx fh.Ctx) bool
 }
 
-var DefaultConfig = Config{
-	AllowOrigins: []string{"*"},
-	AllowMethods: []string{
-		"GET",
-		"POST",
-		"PUT",
-		"PATCH",
-		"DELETE",
-		"OPTIONS",
-	},
-	AllowHeaders: []string{
-		"Origin",
-		"Content-Type",
-		"Accept",
-		"Authorization",
-		"X-Request-ID",
-	},
-	ExposeHeaders: []string{
-		"X-Request-ID",
-	},
-	MaxAge:          86400,
-	PreflightStatus: 204,
+// DefaultConfig is a compatibility snapshot of the package defaults.
+//
+// Deprecated: New does not read this mutable variable. Pass a Config to New
+// when you need explicit settings; mutating this value does not change the
+// defaults used by future middleware instances.
+var DefaultConfig = defaultConfig()
+
+func defaultConfig() Config {
+	return Config{
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{
+			"GET",
+			"POST",
+			"PUT",
+			"PATCH",
+			"DELETE",
+			"OPTIONS",
+		},
+		AllowHeaders: []string{
+			"Origin",
+			"Content-Type",
+			"Accept",
+			"Authorization",
+			"X-Request-ID",
+		},
+		ExposeHeaders: []string{
+			"X-Request-ID",
+		},
+		MaxAge:          86400,
+		PreflightStatus: 204,
+	}
 }
 
 func New(config ...Config) fh.HandlerFunc {
-	cfg := DefaultConfig
+	if len(config) > 1 {
+		panic("cors: expected at most one Config")
+	}
+	cfg := defaultConfig()
 	if len(config) > 0 {
 		cfg = mergeConfig(cfg, config[0])
 	}
@@ -79,8 +91,8 @@ func New(config ...Config) fh.HandlerFunc {
 			return ctx.Next()
 		}
 
-		origin := ctx.Get("Origin")
-		if origin == "" {
+		origin, present, ambiguous := singleRequestHeader(ctx, "Origin")
+		if ambiguous || !present || origin == "" {
 			return ctx.Next()
 		}
 
@@ -114,8 +126,18 @@ func New(config ...Config) fh.HandlerFunc {
 		}
 
 		if isPreflight(ctx) {
+			for _, name := range []string{
+				"Access-Control-Request-Method",
+				"Access-Control-Request-Headers",
+				"Access-Control-Request-Private-Network",
+			} {
+				if _, _, ambiguous := singleRequestHeader(ctx, name); ambiguous {
+					return ctx.Status(403).SendString("CORS preflight contains duplicate metadata")
+				}
+			}
 			ctx.Append("Vary", "Access-Control-Request-Method")
 			ctx.Append("Vary", "Access-Control-Request-Headers")
+			ctx.Append("Vary", "Access-Control-Request-Private-Network")
 			requestedMethod := ctx.Get("Access-Control-Request-Method")
 			if !containsFold(cfg.AllowMethods, requestedMethod) {
 				return ctx.Status(403).SendString("CORS preflight method denied")
@@ -146,6 +168,41 @@ func New(config ...Config) fh.HandlerFunc {
 
 		return ctx.Next()
 	}
+}
+
+func singleRequestHeader(ctx fh.Ctx, name string) (value string, present, ambiguous bool) {
+	ctx.RequestHeader().VisitAll(func(key, fieldValue []byte) {
+		if !equalHeaderName(key, name) {
+			return
+		}
+		if present {
+			ambiguous = true
+			return
+		}
+		present = true
+		value = string(fieldValue)
+	})
+	return value, present, ambiguous
+}
+
+func equalHeaderName(key []byte, name string) bool {
+	if len(key) != len(name) {
+		return false
+	}
+	for i := range key {
+		b := key[i]
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		n := name[i]
+		if n >= 'A' && n <= 'Z' {
+			n += 'a' - 'A'
+		}
+		if b != n {
+			return false
+		}
+	}
+	return true
 }
 
 func validateConfig(cfg Config) error {
@@ -237,7 +294,7 @@ func isPreflight(ctx fh.Ctx) bool {
 		m[4] == 'O' &&
 		m[5] == 'N' &&
 		m[6] == 'S' &&
-		ctx.Get("Access-Control-Request-Method") != ""
+		len(ctx.RequestHeader().Values("Access-Control-Request-Method")) != 0
 }
 
 func validOrigin(origin string) bool {
@@ -259,8 +316,15 @@ func validOrigin(origin string) bool {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return false
 	}
-
-	return u.Host != ""
+	if u.Host == "" || u.Hostname() == "" || strings.HasSuffix(u.Host, ":") || u.Opaque != "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" {
+		return false
+	}
+	if port := u.Port(); port != "" {
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // -----------------------------------------------------------------------------

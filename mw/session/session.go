@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oarkflow/fh"
@@ -169,12 +171,92 @@ type SessionManager struct {
 	path           string
 	domain         string
 	autoRegenerate bool
-	locks          [64]sync.Mutex
+	locks          [64]sessionShardLock
 	// LockTimeout is the maximum duration Begin() will wait to acquire the
 	// per-shard lock before returning an error. Zero means wait indefinitely.
 	// Set this when the session store is remote (database, Redis) to prevent
 	// goroutine pile-up under slow backends.
 	LockTimeout time.Duration
+}
+
+type sessionShardLock struct {
+	mu      sync.Mutex
+	waitMu  sync.Mutex
+	waitCh  chan struct{}
+	waiters atomic.Int32
+}
+
+func (l *sessionShardLock) Lock() { _ = l.LockContext(context.Background(), 0) }
+
+func (l *sessionShardLock) Unlock() {
+	l.mu.Unlock()
+	if l.waiters.Load() == 0 {
+		return
+	}
+	l.waitMu.Lock()
+	if l.waitCh != nil {
+		close(l.waitCh)
+		l.waitCh = nil
+	}
+	l.waitMu.Unlock()
+}
+
+func (l *sessionShardLock) TryLock() bool { return l.mu.TryLock() }
+
+func (l *sessionShardLock) LockContext(ctx context.Context, timeout time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if l.TryLock() {
+		return nil
+	}
+	var timer *time.Timer
+	var timeoutCh <-chan time.Time
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		timeoutCh = timer.C
+		defer timer.Stop()
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		l.waitMu.Lock()
+		if l.mu.TryLock() {
+			l.waitMu.Unlock()
+			return nil
+		}
+		if l.waitCh == nil {
+			l.waitCh = make(chan struct{})
+		}
+		waitCh := l.waitCh
+		l.waiters.Add(1)
+		l.waitMu.Unlock()
+		// Unlock may observe zero waiters and return just before this waiter
+		// registers. Recheck after registration so that missed release cannot
+		// leave us asleep on a channel no owner will close.
+		if err := ctx.Err(); err != nil {
+			l.waiters.Add(-1)
+			return err
+		}
+		if l.mu.TryLock() {
+			l.waiters.Add(-1)
+			return nil
+		}
+		select {
+		case <-waitCh:
+			l.waiters.Add(-1)
+		case <-ctx.Done():
+			l.waiters.Add(-1)
+			return ctx.Err()
+		case <-timeoutCh:
+			l.waiters.Add(-1)
+			return errors.New("fh: session lock timeout")
+		}
+	}
 }
 
 // SessionOption configures a SessionManager.
@@ -227,8 +309,9 @@ func SessionLockTimeout(d time.Duration) SessionOption {
 	return func(m *SessionManager) { m.LockTimeout = d }
 }
 
-// SessionAutoRegenerate automatically regenerates the session ID on the first
-// write to prevent session fixation attacks.
+// SessionAutoRegenerate is deprecated. Automatic per-request rotation can
+// split session state across concurrent requests. Regenerate the session
+// explicitly at authentication transitions with SessionManager.Regenerate.
 func SessionAutoRegenerate(v bool) SessionOption {
 	return func(m *SessionManager) { m.autoRegenerate = v }
 }
@@ -248,6 +331,9 @@ func NewSessionManager(store kv.Store, opts ...SessionOption) *SessionManager {
 	}
 	for _, opt := range opts {
 		opt(m)
+	}
+	if m.autoRegenerate {
+		panic("fh: SessionAutoRegenerate is unsafe with concurrent requests; call SessionManager.Regenerate after authentication")
 	}
 	if len(m.secrets) == 0 {
 		b := make([]byte, 32)
@@ -291,49 +377,48 @@ func (m *SessionManager) Store() kv.Store { return m.store }
 func (m *SessionManager) Begin(ctx fh.Ctx) (*Session, func(fh.Ctx) error, error) {
 	raw := ctx.GetCookie(m.cookieName)
 	if raw == "" {
-		session := m.NewSession()
-		var once sync.Once
-		var completeErr error
-		return session, func(responseCtx fh.Ctx) error {
-			once.Do(func() { completeErr = m.Save(responseCtx, session) })
-			return completeErr
-		}, nil
+		session, complete := m.beginNewSession()
+		return session, complete, nil
 	}
-	lockKey := raw
-	if id, ok := m.verifyToken(raw); ok {
-		lockKey = id
+	id, ok := m.verifyToken(raw)
+	if !ok || !validSessionID(id) {
+		// Unverified cookie values are attacker-controlled. Do not let them
+		// select a lock shard or block requests for a valid session.
+		session, complete := m.beginNewSession()
+		return session, complete, nil
 	}
-	hash := sha256.Sum256([]byte(lockKey))
+	hash := sha256.Sum256([]byte(id))
 	lock := &m.locks[int(hash[0])%len(m.locks)]
-	if m.LockTimeout > 0 {
-		deadline := time.Now().Add(m.LockTimeout)
-		for !lock.TryLock() {
-			if time.Now().After(deadline) {
-				return nil, nil, errors.New("fh: session lock timeout")
-			}
-			time.Sleep(time.Millisecond)
-		}
-	} else {
-		lock.Lock()
+	requestCtx := ctx.Context()
+	if err := lock.LockContext(requestCtx, m.LockTimeout); err != nil {
+		return nil, nil, err
 	}
 	session, err := m.Load(ctx)
 	if err != nil {
 		lock.Unlock()
 		return nil, nil, err
 	}
-	if m.autoRegenerate {
-		if err := m.Regenerate(ctx, session); err != nil {
-			lock.Unlock()
-			return nil, nil, err
-		}
-	}
 	var once sync.Once
 	var completeErr error
 	complete := func(responseCtx fh.Ctx) error {
-		once.Do(func() { completeErr = m.Save(responseCtx, session); lock.Unlock() })
+		once.Do(func() {
+			defer lock.Unlock()
+			completeErr = m.Save(responseCtx, session)
+		})
 		return completeErr
 	}
 	return session, complete, nil
+}
+
+func (m *SessionManager) beginNewSession() (*Session, func(fh.Ctx) error) {
+	session := m.NewSession()
+	var once sync.Once
+	var completeErr error
+	complete := func(responseCtx fh.Ctx) error {
+		once.Do(func() { completeErr = m.Save(responseCtx, session) })
+		return completeErr
+	}
+	return session, complete
 }
 
 // NewSession creates a new session with a unique ID and the configured max age.
@@ -372,6 +457,16 @@ func (m *SessionManager) Load(ctx fh.Ctx) (*Session, error) {
 	session, err := GetSession(m.store, id)
 	if err != nil {
 		return nil, fmt.Errorf("fh: load session %s: %w", id[:8], err)
+	}
+	if session != nil && session.ID != id {
+		// The store key is derived from the verified cookie, so a different ID
+		// inside the value indicates corruption or a mis-keyed record. Never
+		// load that other identity, and remove only the record at the requested
+		// key rather than deleting by the untrusted embedded ID.
+		if err := DeleteSession(m.store, id); err != nil {
+			return nil, fmt.Errorf("fh: delete mismatched session %s: %w", id[:8], err)
+		}
+		return m.NewSession(), nil
 	}
 	if session == nil || session.Expired() {
 		if session != nil {

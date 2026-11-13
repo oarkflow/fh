@@ -24,6 +24,7 @@ app.Static("/static", "./public", fh.StaticConfig{
     ShowHidden:    false,    // never list dotfiles by default
     PreCompressed: true,     // serve .br/.gz sidecars when accepted
     MaxRanges:     16,       // maximum ranges in one request
+    MaxBrowseEntries: 1000,  // cap directory listing memory and output
 })
 ```
 
@@ -43,6 +44,7 @@ app.Static("/static", "./public", fh.StaticConfig{
 | `NotFoundHandler` | nil | Custom not-found/SPA fallback handler |
 | `PreCompressed` | false | Serve precompressed Brotli/gzip sidecars |
 | `MaxRanges` | 16 | Maximum byte ranges accepted per request; zero uses 16 |
+| `MaxBrowseEntries` | 1000 | Maximum directory entries rendered; zero uses 1000, values above 10000 are clamped |
 
 ## From `embed.FS`
 
@@ -75,7 +77,11 @@ app.StaticFS("/static", publicFiles, fh.StaticConfig{
 
 ### ETag
 
-Auto-generated ETags based on file modification time and size. Conditional requests with `If-None-Match` return 304 Not Modified.
+Auto-generated weak ETags based on file modification time and size. They are
+cache validators, not content hashes: `If-None-Match` uses weak comparison and
+returns 304 when the representation is equivalent. Weak tags do not satisfy
+strong `If-Match` or ETag-based `If-Range` comparisons; date validators remain
+available for range requests.
 
 ### Cache-Control
 

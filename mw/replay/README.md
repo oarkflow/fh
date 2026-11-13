@@ -28,6 +28,11 @@ func main() {
 ## Impact
 
 Prevents replay attacks. Store cardinality and TTL affect memory/storage usage.
+The built-in store retains up to 100,000 markers by default. At capacity it
+rejects new nonces and preserves existing markers until expiry.
+Replay keys are limited to 256 bytes by default (`MaxKeyBytes`), including
+when a custom store is supplied. Oversized request keys receive `400` before
+they reach the store.
 
 ## Ordering guidance
 

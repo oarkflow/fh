@@ -2,7 +2,8 @@
 
 ## What it does
 
-Derives an actor key for the request and stores it in request context. It is useful for audit trails, policy decisions, rate limiting, and tenant/user-aware logging.
+Serializes downstream work by actor key across this process. Requests with the
+same key wait for one another, while different keys run concurrently.
 
 ## How to implement
 
@@ -35,3 +36,8 @@ Run after authentication or header normalization middleware if the actor is deri
 ## Production considerations
 
 Do not trust public actor headers unless they are set by a trusted gateway. Prefer deriving the actor from `fh.Principal`, JWT claims, mTLS identity, or a verified API key.
+
+Keys are limited to 256 bytes and the process-wide lock registry tracks at
+most 65,536 simultaneously active or waiting keys. Oversized keys receive
+`400`; new keys receive `503` when the registry is full. Idle lock entries are
+removed as soon as their final waiter exits.

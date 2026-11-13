@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/bits"
 	"net/url"
-	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -49,13 +48,9 @@ type Router struct {
 	staticGET, staticPOST, staticPUT, staticDELETE, staticPATCH, staticHEAD, staticOPTIONS, staticCONNECT, staticTRACE, staticQUERY                                                                                 map[string]HandlerFunc
 	paramGET, paramPOST, paramPUT, paramDELETE, paramPATCH, paramHEAD, paramOPTIONS, paramCONNECT, paramTRACE, paramQUERY                                                                                           []paramShortcut
 	staticShortcutGET, staticShortcutPOST, staticShortcutPUT, staticShortcutDELETE, staticShortcutPATCH, staticShortcutHEAD, staticShortcutOPTIONS, staticShortcutCONNECT, staticShortcutTRACE, staticShortcutQUERY []staticShortcut
-	prebuiltGET, prebuiltPOST, prebuiltPUT, prebuiltDELETE, prebuiltPATCH, prebuiltHEAD, prebuiltOPTIONS, prebuiltCONNECT, prebuiltTRACE, prebuiltQUERY                                                             []prebuiltResponse
-
-	hasPrebuilt bool
-
-	named      map[string]namedRoute
-	routeNames map[string]string
-	routes     map[string]struct{}
+	named                                                                                                                                                                                                           map[string]namedRoute
+	routeNames                                                                                                                                                                                                      map[string]string
+	routes                                                                                                                                                                                                          map[string]struct{}
 
 	// Built once by Freeze. Canonical methods fit in a bitset; only custom
 	// methods require cache storage. Methods always returns a fresh slice.
@@ -216,15 +211,6 @@ type paramShortcut struct {
 type staticShortcut struct {
 	path string
 	fn   HandlerFunc
-}
-
-// prebuiltResponse is a prebuilt immutable HTTP/1.1 response for exact static
-// routes. It bypasses handler dispatch and response header assembly in the
-// common immutable-response hot path while preserving normal handlers as a
-// fallback when per-request response features are enabled.
-type prebuiltResponse struct {
-	path string
-	resp []byte
 }
 
 // Linear matching beats a hash lookup for very small route tables, but its
@@ -882,99 +868,6 @@ func appendStaticShortcut(routes []staticShortcut, route staticShortcut) []stati
 	return append(routes, route)
 }
 
-func (r *Router) addPrebuiltResponse(method, path string, resp []byte) {
-	r.hasPrebuilt = true
-	fr := prebuiltResponse{path: path, resp: resp}
-	switch method {
-	case "GET":
-		r.prebuiltGET = append(r.prebuiltGET, fr)
-	case "POST":
-		r.prebuiltPOST = append(r.prebuiltPOST, fr)
-	case "PUT":
-		r.prebuiltPUT = append(r.prebuiltPUT, fr)
-	case "DELETE":
-		r.prebuiltDELETE = append(r.prebuiltDELETE, fr)
-	case "PATCH":
-		r.prebuiltPATCH = append(r.prebuiltPATCH, fr)
-	case "HEAD":
-		r.prebuiltHEAD = append(r.prebuiltHEAD, fr)
-	case "OPTIONS":
-		r.prebuiltOPTIONS = append(r.prebuiltOPTIONS, fr)
-	case "CONNECT":
-		r.prebuiltCONNECT = append(r.prebuiltCONNECT, fr)
-	case "TRACE":
-		r.prebuiltTRACE = append(r.prebuiltTRACE, fr)
-	case "QUERY":
-		r.prebuiltQUERY = append(r.prebuiltQUERY, fr)
-	}
-}
-
-func (r *Router) registerPrebuiltResponse(method, path string, resp []byte) {
-	method = strings.ToUpper(strings.TrimSpace(method))
-	path = normalizeRoutePath(method, path)
-	stable := append([]byte(nil), resp...)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.frozen.Load() {
-		panic("fh: cannot add static response after router is frozen")
-	}
-	r.addPrebuiltResponse(method, path, stable)
-}
-
-func (r *Router) FindPrebuiltResponseBytes(method, path []byte) []byte {
-	switch len(method) {
-	case 3:
-		if method[0] == 'G' && method[1] == 'E' && method[2] == 'T' {
-			return matchPrebuiltResponse(r.prebuiltGET, path)
-		}
-		if method[0] == 'P' && method[1] == 'U' && method[2] == 'T' {
-			return matchPrebuiltResponse(r.prebuiltPUT, path)
-		}
-	case 4:
-		if method[0] == 'P' && method[1] == 'O' && method[2] == 'S' && method[3] == 'T' {
-			return matchPrebuiltResponse(r.prebuiltPOST, path)
-		}
-		if method[0] == 'H' && method[1] == 'E' && method[2] == 'A' && method[3] == 'D' {
-			if resp := matchPrebuiltResponse(r.prebuiltHEAD, path); resp != nil {
-				return resp
-			}
-			return nil
-		}
-	case 5:
-		if method[0] == 'P' && method[1] == 'A' && method[2] == 'T' && method[3] == 'C' && method[4] == 'H' {
-			return matchPrebuiltResponse(r.prebuiltPATCH, path)
-		}
-		if method[0] == 'T' && method[1] == 'R' && method[2] == 'A' && method[3] == 'C' && method[4] == 'E' {
-			return matchPrebuiltResponse(r.prebuiltTRACE, path)
-		}
-		if method[0] == 'Q' && method[1] == 'U' && method[2] == 'E' && method[3] == 'R' && method[4] == 'Y' {
-			return matchPrebuiltResponse(r.prebuiltQUERY, path)
-		}
-	case 6:
-		if method[0] == 'D' && method[1] == 'E' && method[2] == 'L' && method[3] == 'E' && method[4] == 'T' && method[5] == 'E' {
-			return matchPrebuiltResponse(r.prebuiltDELETE, path)
-		}
-	case 7:
-		if method[0] == 'O' && method[1] == 'P' && method[2] == 'T' && method[3] == 'I' && method[4] == 'O' && method[5] == 'N' && method[6] == 'S' {
-			return matchPrebuiltResponse(r.prebuiltOPTIONS, path)
-		}
-		if method[0] == 'C' && method[1] == 'O' && method[2] == 'N' && method[3] == 'N' && method[4] == 'E' && method[5] == 'C' && method[6] == 'T' {
-			return matchPrebuiltResponse(r.prebuiltCONNECT, path)
-		}
-	}
-	return nil
-}
-
-func matchPrebuiltResponse(routes []prebuiltResponse, path []byte) []byte {
-	for i := range routes {
-		r := &routes[i]
-		if byteStringEqual(path, r.path) {
-			return r.resp
-		}
-	}
-	return nil
-}
-
 func matchStaticShortcuts(routes []staticShortcut, path []byte, params *[]Param) HandlerFunc {
 	for i := range routes {
 		r := &routes[i]
@@ -1622,23 +1515,6 @@ func paramValue(b []byte, unsafeMode bool) string {
 	return string(b)
 }
 
-var staticHandlerResponses sync.Map // map[uintptr][]byte
-
-func registerStaticHandler(h HandlerFunc, response []byte) HandlerFunc {
-	staticHandlerResponses.Store(reflect.ValueOf(h).Pointer(), append([]byte(nil), response...))
-	return h
-}
-
-func prebuiltResponseForHandler(h HandlerFunc) []byte {
-	if h == nil {
-		return nil
-	}
-	if v, ok := staticHandlerResponses.Load(reflect.ValueOf(h).Pointer()); ok {
-		return v.([]byte)
-	}
-	return nil
-}
-
 // StaticText returns a handler for immutable text/plain responses.
 func StaticText(body string) HandlerFunc {
 	pre := prebuildStatic200(plainTextCT, []byte(body))
@@ -1649,7 +1525,7 @@ func StaticText(body string) HandlerFunc {
 		}
 		return c.SendString(body)
 	}
-	return registerStaticHandler(h, pre)
+	return h
 }
 
 // StaticJSON returns a handler for immutable application/json responses.
@@ -1662,7 +1538,7 @@ func StaticJSON(body string) HandlerFunc {
 		}
 		return c.JSONString(body)
 	}
-	return registerStaticHandler(h, pre)
+	return h
 }
 
 // StaticJSONBytes returns a handler for immutable pre-encoded JSON bytes.
@@ -1676,7 +1552,7 @@ func StaticJSONBytes(body []byte) HandlerFunc {
 		}
 		return c.JSONBytes(stable)
 	}
-	return registerStaticHandler(h, pre)
+	return h
 }
 
 func prebuildStatic200(contentType, body []byte) []byte {
@@ -1694,13 +1570,6 @@ func (c *DefaultCtx) canStaticPrebuilt() bool {
 	return c.status == StatusOK &&
 		!c.responded &&
 		c.flags == 0 &&
-		c.Header.KeepAlive &&
-		!c.forceClose &&
-		!c.server.cfg.SendDateHeader && !c.server.cfg.SendKeepAliveHeader
-}
-
-func (c *DefaultCtx) canRouteStaticPrebuilt() bool {
-	return c.flags == 0 &&
 		c.Header.KeepAlive &&
 		!c.forceClose &&
 		!c.server.cfg.SendDateHeader && !c.server.cfg.SendKeepAliveHeader

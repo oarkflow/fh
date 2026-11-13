@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"strconv"
@@ -25,12 +26,20 @@ type Config struct {
 	Header           string
 	TimestampHeader  string
 	Tolerance        time.Duration
+	MaxReplayEntries int
 	Prefix           string
 	Algorithm        string
 	Replay           kv.Store
 	Error            ErrorHandler
 	RequireTimestamp bool
 }
+
+var (
+	ErrReplayStoreFull        = errors.New("webhook: replay store capacity exhausted")
+	ErrReplayStoreUnavailable = errors.New("webhook: replay store unavailable")
+	ErrSecretUnavailable      = errors.New("webhook: secret unavailable")
+	ErrVerifierUnavailable    = errors.New("webhook: verifier unavailable")
+)
 
 func New(cfg Config) fh.HandlerFunc {
 	if cfg.Header == "" {
@@ -42,25 +51,41 @@ func New(cfg Config) fh.HandlerFunc {
 	if cfg.Tolerance == 0 {
 		cfg.Tolerance = 5 * time.Minute
 	}
+	if cfg.MaxReplayEntries <= 0 {
+		cfg.MaxReplayEntries = 100_000
+	}
 	if cfg.Algorithm == "" {
 		cfg.Algorithm = "sha256"
 	}
 	if cfg.Replay == nil {
-		cfg.Replay = kv.NewMemoryStore()
+		cfg.Replay = kv.NewMemoryStore(
+			kv.WithShardCount(256),
+			kv.WithMaxEntries(cfg.MaxReplayEntries),
+			kv.WithRejectWhenFull(),
+		)
 	}
+	var replayMu sync.Mutex
 	if cfg.Error == nil {
 		cfg.Error = func(c fh.Ctx, err error) error {
-			return c.Status(fh.StatusUnauthorized).JSON(fh.Map{"error": "webhook_signature_invalid", "message": err.Error()})
+			if errors.Is(err, ErrReplayStoreFull) || errors.Is(err, ErrReplayStoreUnavailable) ||
+				errors.Is(err, ErrSecretUnavailable) || errors.Is(err, ErrVerifierUnavailable) {
+				return c.Status(fh.StatusServiceUnavailable).JSON(fh.Map{"error": "webhook_verification_unavailable", "message": "Webhook verification is temporarily unavailable"})
+			}
+			return c.Status(fh.StatusUnauthorized).JSON(fh.Map{"error": "webhook_signature_invalid", "message": "Signature verification failed"})
 		}
 	}
 	return func(c fh.Ctx) error {
-		if err := Verify(c, cfg); err != nil {
+		if err := verify(c, cfg, &replayMu); err != nil {
 			return cfg.Error(c, err)
 		}
 		return c.Next()
 	}
 }
 func Verify(c fh.Ctx, cfg Config) error {
+	return verify(c, cfg, nil)
+}
+
+func verify(c fh.Ctx, cfg Config, replayMu *sync.Mutex) error {
 	sig := strings.TrimSpace(c.Get(cfg.Header))
 	if sig == "" {
 		return fmt.Errorf("missing signature in header %q", cfg.Header)
@@ -79,11 +104,11 @@ func Verify(c fh.Ctx, cfg Config) error {
 	if cfg.SecretFunc != nil {
 		key, err = cfg.SecretFunc(c)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrSecretUnavailable, err)
 		}
 	}
 	if len(key) == 0 {
-		return fmt.Errorf("missing secret: both Secret and SecretFunc are empty")
+		return ErrSecretUnavailable
 	}
 	body := c.BodyRaw()
 	ts := c.Get(cfg.TimestampHeader)
@@ -107,7 +132,7 @@ func Verify(c fh.Ctx, cfg Config) error {
 	}
 	h, ok := algo(cfg.Algorithm)
 	if !ok {
-		return fmt.Errorf("unsupported algorithm %s", cfg.Algorithm)
+		return fmt.Errorf("%w: unsupported algorithm", ErrVerifierUnavailable)
 	}
 	mac := hmac.New(h, key)
 	mac.Write(msg)
@@ -116,15 +141,65 @@ func Verify(c fh.Ctx, cfg Config) error {
 		return fmt.Errorf("signature mismatch for algorithm %s", cfg.Algorithm)
 	}
 	if cfg.Replay != nil && ts != "" {
-		replayed, err := Seen(cfg.Replay, nil, sig+":"+ts, cfg.Tolerance)
+		replayed, err := SeenBounded(cfg.Replay, replayMu, sig+":"+ts, cfg.Tolerance, cfg.MaxReplayEntries)
 		if err != nil {
-			return fmt.Errorf("replay store error: %w", err)
+			if errors.Is(err, ErrReplayStoreFull) {
+				return err
+			}
+			return fmt.Errorf("%w: %w", ErrReplayStoreUnavailable, err)
 		}
 		if replayed {
 			return fmt.Errorf("signature replayed: seen within %v tolerance", cfg.Tolerance)
 		}
 	}
 	return nil
+}
+
+// SeenBounded rejects new markers when the store is full, keeping existing
+// replay markers until their TTL expires.
+func SeenBounded(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxEntries int) (bool, error) {
+	if bounded, ok := store.(interface{ CapacityLimit() int }); ok && bounded.CapacityLimit() > 0 && bounded.CapacityLimit() <= maxEntries {
+		var seen bool
+		err := store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+			seen = exists
+			if exists {
+				return nil, 0, false, nil
+			}
+			return replayMarker, ttl, true, nil
+		})
+		if errors.Is(err, kv.ErrCapacityExceeded) {
+			return false, ErrReplayStoreFull
+		}
+		return seen, err
+	}
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	if _, exists, err := store.Get(key); err != nil {
+		return false, err
+	} else if exists {
+		return true, nil
+	}
+	count, err := store.Len()
+	if err != nil {
+		return false, err
+	}
+	if maxEntries <= 0 {
+		maxEntries = 100_000
+	}
+	if count >= maxEntries {
+		return false, ErrReplayStoreFull
+	}
+	var seen bool
+	err = store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		seen = exists
+		if exists {
+			return nil, 0, false, nil
+		}
+		return replayMarker, ttl, true, nil
+	})
+	return seen, err
 }
 
 // replayMarker is the placeholder value written for a replay marker; only

@@ -286,6 +286,47 @@ func TestSecureTLSRequiresTLS13(t *testing.T) {
 	}
 }
 
+func TestSecureTLSChecksPerClientConfigs(t *testing.T) {
+	app := New(WithSecureByDefault(true))
+	weak := &tls.Config{MinVersion: tls.VersionTLS12}
+	cfg, err := app.prepareTLSConfig(&tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		return weak, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.GetConfigForClient(&tls.ClientHelloInfo{}); err == nil {
+		t.Fatal("secure app accepted a per-client TLS 1.2 config")
+	}
+	if weak.MinVersion != tls.VersionTLS12 {
+		t.Fatal("prepareTLSConfig mutated the callback's config")
+	}
+
+	cfg, err = app.prepareTLSConfig(&tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		return &tls.Config{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	perClient, err := cfg.GetConfigForClient(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perClient.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("callback MinVersion = %x, want TLS 1.3", perClient.MinVersion)
+	}
+
+	cfg, err = app.prepareTLSConfig(&tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		return &tls.Config{MaxVersion: tls.VersionTLS12}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.GetConfigForClient(&tls.ClientHelloInfo{}); err == nil {
+		t.Fatal("secure app accepted a per-client maximum below TLS 1.3")
+	}
+}
+
 func TestOutboundClientRejectsImplicitInsecureTLS(t *testing.T) {
 	defer func() {
 		if recover() == nil {

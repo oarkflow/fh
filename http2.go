@@ -59,10 +59,11 @@ const (
 	stateHalfClosedLocal  = 3
 	stateClosed           = 4
 
-	h2InitialWindow   = int64(65535)
-	h2DefaultFrame    = uint32(16384)
-	h2MaxWindow       = int64(1<<31 - 1)
-	h2SettingsTimeout = 10 * time.Second
+	h2InitialWindow          = int64(65535)
+	h2DefaultFrame           = uint32(16384)
+	h2MaxWindow              = int64(1<<31 - 1)
+	h2SettingsTimeout        = 10 * time.Second
+	maxH2HeaderListSizeLimit = 256 << 10
 
 	maxContinuationFrames  = 64
 	maxRSTStreamPerMinute  = 60
@@ -210,7 +211,7 @@ func newH2Conn(app *App, conn net.Conn, bases ...context.Context) *h2Conn {
 	h.peerMaxConcurrentStreams.Store(^uint32(0))
 	h.flowCond = sync.NewCond(&h.flowMu)
 	h.enc = hpack.NewEncoder(&h.encBuf)
-	h.dec = hpack.NewDecoder(4096, func(hpack.HeaderField) {})
+	h.dec = hpack.NewDecoder(4096, discardH2HeaderField)
 	h.dec.SetMaxStringLength(maxH2HeaderListSize(app))
 	h.pushState = newPushState(maxH2ConcurrentStreams(app))
 	h.peerEnablePush.Store(true) // default: client allows push
@@ -229,6 +230,9 @@ func maxH2HeaderListSize(app *App) int {
 	n := app.cfg.MaxHeaderListSize
 	if n <= 0 {
 		return 64 << 10
+	}
+	if n > maxH2HeaderListSizeLimit {
+		return maxH2HeaderListSizeLimit
 	}
 	return n
 }
@@ -257,17 +261,27 @@ func (h *h2Conn) closeAllStreams() {
 	h.mu.Unlock()
 
 	for _, s := range streams {
-		if !s.handlerStarted.Load() {
-			h.app.releaseBufferedBody(s.bodyReserved.Swap(0))
-		}
 		s.reset.Store(true)
 		s.bodyMu.Lock()
+		var releaseBytes int64
+		if h.app.cfg.StreamRequestBody && s.connectConn == nil {
+			s.bodyChunks = nil
+			s.bodyQueued = 0
+			s.bodyChunkOffset = 0
+			releaseBytes = s.bodyReserved.Swap(0)
+		} else if !s.handlerStarted.Load() {
+			releaseBytes = s.bodyReserved.Swap(0)
+		}
 		s.bodyErr = net.ErrClosed
 		s.bodyEOF = true
 		if s.bodyCond != nil {
 			s.bodyCond.Broadcast()
 		}
 		s.bodyMu.Unlock()
+		h.app.releaseBufferedBody(releaseBytes)
+		if s.connectConn != nil {
+			s.connectConn.discardInbound()
+		}
 		if s.bodyTimer != nil {
 			s.bodyTimer.Stop()
 		}
@@ -603,11 +617,11 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 		// bit position used by END_STREAM on HEADERS, must be ignored.
 		f.flags |= continuationFlags(next.flags)
 	}
-	fields, err := h.dec.DecodeFull(block)
+	fields, headerListExceeded, err := h.decodeHeaderBlock(block)
 	if err != nil {
 		return h2ConnError{h2CompressionError}
 	}
-	if headerListSize(fields) > maxH2HeaderListSize(h.app) {
+	if headerListExceeded {
 		h.sendRST(f.streamID, h2EnhanceYourCalm)
 		return nil
 	}
@@ -776,6 +790,42 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 	return nil
 }
 
+// decodeHeaderBlock bounds retained decompressed headers as HPACK emits them.
+// Once the RFC header-list size is exceeded, decoding continues with emission
+// disabled so the connection's dynamic table remains synchronized without
+// allocating the rest of an attacker-controlled expanded field slice.
+func (h *h2Conn) decodeHeaderBlock(block []byte) ([]hpack.HeaderField, bool, error) {
+	limit := maxH2HeaderListSize(h.app)
+	maxCount := h.app.cfg.MaxHeaderCount
+	fields := make([]hpack.HeaderField, 0, min(len(block)/8, 32))
+	listSize := 0
+	exceeded := false
+	h.dec.SetEmitEnabled(true)
+	defer h.dec.SetEmitFunc(discardH2HeaderField)
+	h.dec.SetEmitFunc(func(field hpack.HeaderField) {
+		if exceeded {
+			return
+		}
+		fieldSize := len(field.Name) + len(field.Value) + 32
+		if fieldSize > limit-listSize || maxCount > 0 && len(fields) >= maxCount {
+			exceeded = true
+			h.dec.SetEmitEnabled(false)
+			return
+		}
+		listSize += fieldSize
+		fields = append(fields, field)
+	})
+	if _, err := h.dec.Write(block); err != nil {
+		return nil, false, err
+	}
+	if err := h.dec.Close(); err != nil {
+		return nil, false, err
+	}
+	return fields, exceeded, nil
+}
+
+func discardH2HeaderField(hpack.HeaderField) {}
+
 func continuationFlags(flags uint8) uint8 { return flags & h2FlagEndHeaders }
 
 func headerFragment(f h2Frame) ([]byte, error) {
@@ -813,31 +863,8 @@ func (h *h2Conn) handleData(f h2Frame) error {
 		}
 		p = p[1 : len(p)-int(p[0])]
 	}
-	h.mu.Lock()
-	s := h.streams[f.streamID]
-	if s == nil {
-		idle := f.streamID > h.lastStream
-		h.mu.Unlock()
-		if idle {
-			return h2ConnError{h2ProtocolError}
-		}
-		h.sendRST(f.streamID, h2ErrStreamClosed)
-		return nil
-	}
-	st := s.state.Load()
-	if st != int32(stateOpen) && st != int32(stateHalfClosedLocal) {
-		h.mu.Unlock()
-		h.sendRST(f.streamID, h2ErrStreamClosed)
-		return nil
-	}
-	isConnect := s.connectConn != nil
-	streaming := !isConnect && h.app.cfg.StreamRequestBody && s.dispatched
-	if !isConnect && s.bodyReceived+len(p) > maxH2RequestBodySize(h.app) {
-		h.mu.Unlock()
-		h.sendRST(f.streamID, h2Cancel)
-		return nil
-	}
 	flowControlled := len(f.payload)
+	h.mu.Lock()
 	if flowControlled > 0 {
 		h.connRecvWindowRemaining -= int64(flowControlled)
 		if h.connRecvWindowRemaining < 0 {
@@ -845,32 +872,111 @@ func (h *h2Conn) handleData(f h2Frame) error {
 			return h2ConnError{h2FlowControlError}
 		}
 	}
+	s := h.streams[f.streamID]
+	if s == nil {
+		idle := f.streamID > h.lastStream
+		if !idle && flowControlled > 0 {
+			// DATA on a closed stream is discarded, but it still consumed
+			// connection-level flow-control credit while arriving.
+			h.connRecvWindowRemaining += int64(flowControlled)
+		}
+		h.mu.Unlock()
+		if idle {
+			return h2ConnError{h2ProtocolError}
+		}
+		h.sendRST(f.streamID, h2ErrStreamClosed)
+		if flowControlled > 0 {
+			_ = h.sendWindowUpdate(0, uint32(flowControlled))
+		}
+		return nil
+	}
+	st := s.state.Load()
+	if st != int32(stateOpen) && st != int32(stateHalfClosedLocal) {
+		if flowControlled > 0 {
+			h.connRecvWindowRemaining += int64(flowControlled)
+		}
+		h.mu.Unlock()
+		h.sendRST(f.streamID, h2ErrStreamClosed)
+		if flowControlled > 0 {
+			_ = h.sendWindowUpdate(0, uint32(flowControlled))
+		}
+		return nil
+	}
+	isConnect := s.connectConn != nil
+	streaming := !isConnect && h.app.cfg.StreamRequestBody && s.dispatched
+	if !isConnect && s.bodyReceived+len(p) > maxH2RequestBodySize(h.app) {
+		if flowControlled > 0 {
+			h.connRecvWindowRemaining += int64(flowControlled)
+		}
+		h.mu.Unlock()
+		h.sendRST(f.streamID, h2Cancel)
+		if flowControlled > 0 {
+			_ = h.sendWindowUpdate(0, uint32(flowControlled))
+		}
+		return nil
+	}
+	if int64(flowControlled) > s.recvWindow {
+		if flowControlled > 0 {
+			h.connRecvWindowRemaining += int64(flowControlled)
+		}
+		h.mu.Unlock()
+		h.sendRST(f.streamID, h2FlowControlError)
+		if flowControlled > 0 {
+			_ = h.sendWindowUpdate(0, uint32(flowControlled))
+		}
+		return nil
+	}
+	s.recvWindow -= int64(flowControlled)
 	var connectPayload []byte
 	if isConnect {
 		// Extended CONNECT tunnels credit the receive window back at consume
 		// time (h2StreamConn.Read), not at arrival, so the advertised window
 		// itself bounds how much unread data can be outstanding — no separate
-		// buffering cap is needed on top of it.
-		connectPayload = append([]byte(nil), p...)
+		// buffering cap is needed on top of it. The frame buffer remains valid
+		// until handleData returns; deliver copies or coalesces it synchronously.
+		connectPayload = p
 	} else if streaming {
-		if !h.app.reserveBufferedBody(int64(len(p))) {
+		if len(p) > 0 && !h.app.reserveBufferedBody(int64(len(p))) {
+			if flowControlled > 0 {
+				h.connRecvWindowRemaining += int64(flowControlled)
+			}
 			h.mu.Unlock()
 			h.sendRST(f.streamID, h2EnhanceYourCalm)
+			if flowControlled > 0 {
+				_ = h.sendWindowUpdate(0, uint32(flowControlled))
+			}
 			return nil
 		}
-		s.bodyReserved.Add(int64(len(p)))
-		chunk := append([]byte(nil), p...)
-		s.bodyMu.Lock()
-		s.bodyChunks = append(s.bodyChunks, chunk)
-		s.bodyQueued += len(chunk)
-		if s.bodyCond != nil {
-			s.bodyCond.Signal()
+		if len(p) > 0 {
+			s.bodyReserved.Add(int64(len(p)))
+			s.bodyMu.Lock()
+			queued := len(s.bodyChunks)
+			if queued > 0 {
+				last := s.bodyChunks[queued-1]
+				if cap(last) <= int(h2DefaultFrame) && cap(last)-len(last) >= len(p) {
+					s.bodyChunks[queued-1] = append(last, p...)
+				} else {
+					s.bodyChunks = append(s.bodyChunks, append([]byte(nil), p...))
+				}
+			} else {
+				s.bodyChunks = append(s.bodyChunks, append([]byte(nil), p...))
+			}
+			s.bodyQueued += len(p)
+			if s.bodyCond != nil {
+				s.bodyCond.Signal()
+			}
+			s.bodyMu.Unlock()
 		}
-		s.bodyMu.Unlock()
 	} else {
 		if !h.app.reserveBufferedBody(int64(len(p))) {
+			if flowControlled > 0 {
+				h.connRecvWindowRemaining += int64(flowControlled)
+			}
 			h.mu.Unlock()
 			h.sendRST(f.streamID, h2EnhanceYourCalm)
+			if flowControlled > 0 {
+				_ = h.sendWindowUpdate(0, uint32(flowControlled))
+			}
 			return nil
 		}
 		s.bodyReserved.Add(int64(len(p)))
@@ -878,11 +984,6 @@ func (h *h2Conn) handleData(f h2Frame) error {
 	}
 	if !isConnect {
 		s.bodyReceived += len(p)
-	}
-	s.recvWindow -= int64(flowControlled)
-	if s.recvWindow < 0 {
-		h.mu.Unlock()
-		return h2ConnError{h2FlowControlError}
 	}
 	// Batched flow control: accumulate consumed bytes and send WINDOW_UPDATE
 	// at threshold to avoid per-frame updates (RFC 9113 §6.9.1).
@@ -940,11 +1041,16 @@ func (h *h2Conn) handleData(f h2Frame) error {
 	if streamWU > 0 {
 		_ = h.sendWindowUpdate(f.streamID, streamWU)
 	}
+	if (isConnect || streaming) && flowControlled > len(p) {
+		// Padding bytes are discarded as soon as the frame is parsed; only the
+		// unpadded DATA bytes remain subject to application backpressure.
+		h.consumeH2Body(s, flowControlled-len(p))
+	}
 	if isConnect {
 		// Deliver (and possibly close) the tunnel outside h.mu — never send or
 		// notify while holding the connection-wide stream-registry lock.
-		if len(connectPayload) > 0 {
-			s.connectConn.deliver(connectPayload)
+		if !s.connectConn.deliver(connectPayload) {
+			h.returnConnReceiveCredit(len(connectPayload))
 		}
 		if end {
 			s.connectConn.closeRemote()
@@ -1019,19 +1125,27 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 		h.sendRST(s.id, h2RefusedStream)
 		return
 	}
+	if !h.app.tryAcquireInFlight() {
+		<-h.streamSem
+		h.sendRST(s.id, h2RefusedStream)
+		return
+	}
 
 	h.mu.Lock()
 	if s.reset.Load() {
 		h.mu.Unlock()
 		<-h.streamSem
+		h.app.releaseInFlight()
 		return
 	}
 	s.handlerStarted.Store(true)
 	h.mu.Unlock()
 	go func() {
-		defer h.app.releaseBufferedBody(s.bodyReserved.Swap(0))
+		defer h.releaseStreamBodyReservation(s)
 		defer func() { <-h.streamSem }()
+		defer h.app.releaseInFlight()
 		ctx := h.acquireRequestCtx(s)
+		ctx.inFlightReserved = h.app.cfg.MaxInFlightRequests > 0
 		cancelHandler := func() {}
 		if h.app.cfg.HandlerTimeout > 0 {
 			var handlerCtx context.Context
@@ -1041,17 +1155,30 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 		defer func() {
 			cancelHandler()
 			if r := recover(); r != nil {
+				// If application panic recovery is disabled (or recovery itself
+				// panics), the stream has no response path left. Reset it so it is
+				// removed from the connection's stream table and its body/context
+				// resources are released instead of waiting for connection close.
+				h.resetStream(s.id)
 				releaseCtx(ctx)
 			}
+			s.cancel()
 		}()
 		s.trailerMu.Lock()
 		if h.app.cfg.StreamRequestBody && s.connectConn == nil {
-			ctx.requestBodyReader = &h2RequestBodyReader{conn: h, stream: s}
+			ctx.requestBodyReader = &h2RequestBodyReader{conn: h, stream: s, ctx: ctx.Context()}
 		} else {
 			ctx.body, ctx.trailers = s.body, s.trailers
 		}
 		s.trailerMu.Unlock()
 		h.app.dispatch(ctx)
+		if bodyErr := RequestBodyLimitError(ctx); bodyErr != nil {
+			if ctx.responded {
+				h.resetStream(s.id)
+			} else {
+				h.app.cfg.ErrorHandler(ctx, bodyErr)
+			}
+		}
 		if !ctx.responded && !s.reset.Load() {
 			_ = ctx.SendStatus(200)
 		}
@@ -1061,11 +1188,42 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 			h.mu.Unlock()
 			if unfinished {
 				h.sendRST(s.id, h2Cancel)
+			} else if !s.reset.Load() {
+				h.discardStreamRequestBody(s)
+			}
+		} else if s.connectConn != nil {
+			h.mu.Lock()
+			remoteOpen := !s.ended && !s.reset.Load()
+			h.mu.Unlock()
+			if remoteOpen {
+				h.sendRST(s.id, h2Cancel)
+			} else if !s.reset.Load() {
+				h.returnConnReceiveCredit(s.connectConn.discardInbound())
 			}
 		}
-		s.cancel()
 		releaseCtx(ctx)
 	}()
+}
+
+func (h *h2Conn) releaseStreamBodyReservation(s *h2Stream) {
+	s.bodyMu.Lock()
+	reserved := s.bodyReserved.Swap(0)
+	s.bodyMu.Unlock()
+	h.app.releaseBufferedBody(reserved)
+}
+
+func (h *h2Conn) discardStreamRequestBody(s *h2Stream) {
+	s.bodyMu.Lock()
+	unread := s.bodyQueued
+	s.bodyChunks = nil
+	s.bodyQueued = 0
+	s.bodyChunkOffset = 0
+	reserved := s.bodyReserved.Swap(0)
+	s.bodyMu.Unlock()
+	h.app.releaseBufferedBody(reserved)
+	if unread > 0 {
+		h.returnConnReceiveCredit(unread)
+	}
 }
 
 func (h *h2Conn) acquireRequestCtx(s *h2Stream) *DefaultCtx {
@@ -1137,7 +1295,10 @@ func (h *h2Conn) runRequestHeadHandler(s *h2Stream) bool {
 			s.bodyTimer = nil
 		}
 		h.mu.Unlock()
-		s.cancel()
+		// The request head handler has already produced the early response.
+		// Retire the stream now so later DATA cannot be buffered or dispatched
+		// through the normal request path after the rejection.
+		h.resetStream(s.id)
 	}
 	return accepted
 }
@@ -1153,7 +1314,7 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 	seenHost := false
 	cookies := ""
 	for _, f := range fields {
-		if f.Name == "" || strings.ToLower(f.Name) != f.Name || !validH2FieldValue(f.Value) {
+		if f.Name == "" || strings.ToLower(f.Name) != f.Name || !validHeaderValue(f.Value) {
 			return fmt.Errorf("h2: uppercase header name %q", f.Name)
 		}
 		if strings.HasPrefix(f.Name, ":") {
@@ -1282,16 +1443,6 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCou
 	return nil
 }
 
-func validH2FieldValue(value string) bool {
-	for i := 0; i < len(value); i++ {
-		c := value[i]
-		if (c < 0x20 && c != '\t') || c == 0x7f {
-			return false
-		}
-	}
-	return true
-}
-
 func validateRequestTrailers(fields []hpack.HeaderField) ([]Header, error) {
 	trailers := make([]Header, 0, len(fields))
 	for _, f := range fields {
@@ -1301,7 +1452,7 @@ func validateRequestTrailers(fields []hpack.HeaderField) ([]Header, error) {
 		if strings.ToLower(f.Name) != f.Name || !validToken([]byte(f.Name)) {
 			return nil, errors.New("invalid trailer name")
 		}
-		if strings.ContainsAny(f.Value, "\x00\r\n") {
+		if !validHeaderValue(f.Value) {
 			return nil, errors.New("invalid trailer value")
 		}
 		switch f.Name {
@@ -1348,7 +1499,7 @@ func validResponseField(name string, value []byte) bool {
 	if strings.ToLower(name) != name || !validToken([]byte(name)) {
 		return false
 	}
-	return !bytes.ContainsAny(value, "\x00\r\n")
+	return validHeaderValueBytes(value)
 }
 
 func forbiddenH2ResponseHeader(name string) bool {
@@ -1545,7 +1696,10 @@ func (h *h2Conn) sendResponseHeaders(s *h2Stream, c *DefaultCtx, contentLength *
 		fields = append(fields, hpack.HeaderField{Name: name, Value: string(c.extraHeaders[i].Value)})
 	}
 	for i := range c.responseCookies {
-		fields = append(fields, hpack.HeaderField{Name: "set-cookie", Value: c.responseCookies[i].String()})
+		value := c.responseCookies[i].String()
+		if value != "" && validResponseField("set-cookie", []byte(value)) {
+			fields = append(fields, hpack.HeaderField{Name: "set-cookie", Value: value})
+		}
 	}
 	if headerListSize(fields) > int(h.peerMaxHeaderList.Load()) {
 		return h2ConnError{h2InternalError}
@@ -1800,14 +1954,22 @@ func (h *h2Conn) allowControlFrame() bool {
 }
 
 func (h *h2Conn) resetStream(id uint32) {
+	discardedConnBytes := 0
+	var releaseBytes int64
 	h.mu.Lock()
 	s := h.streams[id]
 	if s != nil {
-		if !s.handlerStarted.Load() {
-			h.app.releaseBufferedBody(s.bodyReserved.Swap(0))
-		}
 		s.reset.Store(true)
 		s.bodyMu.Lock()
+		if h.app.cfg.StreamRequestBody && s.connectConn == nil {
+			discardedConnBytes = s.bodyQueued
+			s.bodyChunks = nil
+			s.bodyQueued = 0
+			s.bodyChunkOffset = 0
+			releaseBytes = s.bodyReserved.Swap(0)
+		} else if !s.handlerStarted.Load() {
+			releaseBytes = s.bodyReserved.Swap(0)
+		}
 		s.bodyErr = net.ErrClosed
 		s.bodyEOF = true
 		if s.bodyCond != nil {
@@ -1824,6 +1986,13 @@ func (h *h2Conn) resetStream(id uint32) {
 		}
 	}
 	h.mu.Unlock()
+	h.app.releaseBufferedBody(releaseBytes)
+	if s != nil && s.connectConn != nil {
+		discardedConnBytes += s.connectConn.discardInbound()
+	}
+	if discardedConnBytes > 0 {
+		h.returnConnReceiveCredit(discardedConnBytes)
+	}
 	if id&1 == 0 && h.pushState != nil {
 		h.pushState.mu.Lock()
 		delete(h.pushState.streams, id)
@@ -1832,6 +2001,20 @@ func (h *h2Conn) resetStream(id uint32) {
 	h.flowMu.Lock()
 	h.flowCond.Broadcast()
 	h.flowMu.Unlock()
+}
+
+func (h *h2Conn) returnConnReceiveCredit(n int) {
+	if n <= 0 {
+		return
+	}
+	h.mu.Lock()
+	increment := int64(n) + h.connRecvWindowAccum
+	h.connRecvWindowAccum = 0
+	h.connRecvWindowRemaining += increment
+	h.mu.Unlock()
+	if increment > 0 {
+		_ = h.sendWindowUpdate(0, uint32(increment))
+	}
 }
 
 func (h *h2Conn) connectionError(code uint32) { h.sendGoAway(code); h.markClosed(); _ = h.conn.Close() }

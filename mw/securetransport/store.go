@@ -443,6 +443,25 @@ func checkAndStoreReplay(store kv.Store, mu *sync.Mutex, maxEntries int, key str
 	if maxEntries <= 0 {
 		maxEntries = defaultMaxReplayEntries
 	}
+	if bounded, ok := store.(interface{ CapacityLimit() int }); ok && bounded.CapacityLimit() > 0 && bounded.CapacityLimit() <= maxEntries {
+		var accepted bool
+		err := store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+			if exists {
+				return nil, 0, false, nil
+			}
+			ttl := time.Until(expiresAt)
+			if ttl <= 0 {
+				accepted = true
+				return nil, 0, false, nil
+			}
+			accepted = true
+			return []byte{1}, ttl, true, nil
+		})
+		if errors.Is(err, kv.ErrCapacityExceeded) {
+			return false, errReplayCapacityExhausted
+		}
+		return accepted, err
+	}
 
 	mu.Lock()
 	defer mu.Unlock()

@@ -19,6 +19,14 @@ must authorize the browser principal and each channel operation at the backend.
 The bridge does not provide end-to-end transport confidentiality from the
 browser to the backend.
 
+Gateway event history is bounded by both event count and retained bytes. By
+default, each session retains at most 1 MiB and the gateway retains at most
+64 MiB across all sessions. `gateway.Config.MaxHistoryBytes` and
+`MaxTotalHistoryBytes` tune those limits. If a message cannot fit or a cursor
+falls behind evicted history, pull requests and streams with a stale initial
+cursor return HTTP 409 so the application can recover from its durable backend.
+An already-started stream closes if it later overruns retained history.
+
 ## Minimal native server
 
 MIRA's TLS bootstrap accepts a standard `*tls.Config`, so callers can build the

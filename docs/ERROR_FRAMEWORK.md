@@ -10,6 +10,7 @@ FH now includes an environment-aware error framework for professional HTTP APIs 
 - Error severity values for operations and logging.
 - Retryable flag and automatic `Retry-After` support for transient failures.
 - Typed `HTTPError` with safe public message and private wrapped cause.
+- Typed-handler body and query parsing failures, typed-route parser failures, and untyped validator errors use generic client messages. Malformed typed-handler queries fail with 400 instead of reaching the handler with zero-value fields. Return `fh.ValidationError` when clients should receive structured field details.
 - `ValidationError` and `FieldError` support with field-level response details.
 - `PanicError` with stack capture, safe client masking, and optional debug stack exposure.
 - Environment-aware rendering: production masks internals, development/test can expose redacted diagnostics.
@@ -71,6 +72,21 @@ app := fh.NewWithConfig(fh.Config{
 ```
 
 Debug output is still passed through `RedactSecrets`, so values such as `password=...`, tokens, cookies, and API keys are masked.
+
+`HTTPError.Error()` returns its client-safe `Message`; the private cause remains
+available through `Unwrap()` for `errors.Is` and `errors.As`. Use
+`WrapHTTPError(cause, status, code, safeMessage)` when a cause must be retained
+without exposing its text in ordinary error formatting.
+
+## Public problem extensions
+
+`HTTPError.WithDetails` and `HTTPError.WithMeta` add fields to the client-visible
+RFC 9457 response. Supply only data that is safe for the caller to see. FH
+recursively masks common secret-bearing field names and recognized credential
+strings when the problem is marshaled, but that filtering is a defense in depth
+and cannot recognize every application-specific secret or private record.
+Keep database errors, internal identifiers, and authorization decisions in the
+wrapped cause or server-side logs instead of `Details` or `Meta`.
 
 ## Returning errors from handlers
 

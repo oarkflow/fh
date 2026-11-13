@@ -42,24 +42,26 @@ import (
 )
 
 const (
-	tokenVersion         = "v1"
-	defaultKeyID         = "default"
-	defaultTokenLocalKey = "csrf_token"
-	defaultCookieName    = "__Host-csrf"
-	defaultBindingName   = "__Host-csrf-bind"
-	insecureCookieName   = "csrf_token"
-	insecureBindingName  = "csrf_bind"
-	defaultHeaderName    = "X-CSRF-Token"
-	defaultFormField     = "_csrf"
-	bindingFpName        = "__Host-csrf-fp"
-	insecureFpName       = "csrf_fp"
-	nonceSize            = 32
-	bindingSize          = 32
-	macSize              = sha256.Size
-	minimumSecretSize    = 32
-	maximumTokenLength   = 512
-	maximumBindingLength = 128
-	maximumKeyIDLength   = 32
+	tokenVersion          = "v1"
+	defaultKeyID          = "default"
+	defaultTokenLocalKey  = "csrf_token"
+	defaultCookieName     = "__Host-csrf"
+	defaultBindingName    = "__Host-csrf-bind"
+	insecureCookieName    = "csrf_token"
+	insecureBindingName   = "csrf_bind"
+	defaultHeaderName     = "X-CSRF-Token"
+	defaultFormField      = "_csrf"
+	bindingFpName         = "__Host-csrf-fp"
+	insecureFpName        = "csrf_fp"
+	nonceSize             = 32
+	bindingSize           = 32
+	macSize               = sha256.Size
+	minimumSecretSize     = 32
+	maximumTokenLength    = 512
+	maximumBindingLength  = 128
+	maximumAppBindingSize = 1024
+	maximumKeyIDLength    = 32
+	maximumMultipartParts = 128
 )
 
 var (
@@ -352,10 +354,17 @@ func (p *Protector) Middleware(c fh.Ctx) error {
 		return fh.InternalError(fmt.Errorf("csrf: session binding: %w", err))
 	}
 
-	p.rotateOnBindingChange(c, appBinding)
+	rotatedToken, rotated, err := p.rotateOnBindingChange(c, binding, appBinding)
+	if err != nil {
+		return fh.InternalError(err)
+	}
 
-	token := c.GetCookie(p.cfg.CookieName)
-	validCookieToken := token != "" && p.verifyToken(token, binding, appBinding)
+	token := rotatedToken
+	validCookieToken := rotated
+	if !rotated {
+		token = c.GetCookie(p.cfg.CookieName)
+		validCookieToken = token != "" && p.verifyToken(token, binding, appBinding)
+	}
 	if !validCookieToken {
 		token, err = p.issueToken(c, binding, appBinding)
 		if err != nil {
@@ -515,6 +524,9 @@ func validateConfig(cfg Config) error {
 	if cfg.TargetOrigin != "" && cfg.TargetOriginResolver != nil {
 		return fmt.Errorf("%w: configure only one of TargetOrigin and TargetOriginResolver", ErrInvalidConfig)
 	}
+	if cfg.AutoRotateOnChange && cfg.SessionBinding == nil {
+		return fmt.Errorf("%w: AutoRotateOnChange requires SessionBinding", ErrInvalidConfig)
+	}
 	if len(cfg.Secret) > 0 && len(cfg.Keys) > 0 {
 		return fmt.Errorf("%w: configure only one of Secret and Keys", ErrInvalidConfig)
 	}
@@ -669,6 +681,9 @@ func (p *Protector) applicationBinding(c fh.Ctx) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(binding) > maximumAppBindingSize {
+		return nil, fmt.Errorf("csrf: session binding exceeds %d bytes", maximumAppBindingSize)
+	}
 	// Empty is permitted so applications can support an anonymous pre-login
 	// state, but authenticated integrations should return a stable session ID.
 	return append([]byte(nil), binding...), nil
@@ -685,24 +700,26 @@ func (p *Protector) fingerprintCookieName() string {
 // after login/logout) and transparently re-issues the CSRF token. This
 // prevents a pre-authentication token from surviving an authentication
 // transition.
-func (p *Protector) rotateOnBindingChange(c fh.Ctx, appBinding []byte) {
+func (p *Protector) rotateOnBindingChange(c fh.Ctx, browserBinding, appBinding []byte) (string, bool, error) {
 	if !p.cfg.AutoRotateOnChange || p.cfg.SessionBinding == nil {
-		return
+		return "", false, nil
 	}
 	fpName := p.fingerprintCookieName()
 	prev := c.GetCookie(fpName)
 	cur := bindingFingerprint(appBinding)
 	if prev == "" || prev == cur {
-		return
+		return "", false, nil
 	}
 	// Binding changed — clear old token and issue a fresh one.
 	p.expireCookie(c, p.cfg.CookieName, false)
-	browserBinding, err := p.ensureBrowserBinding(c)
+	token, err := p.issueToken(c, browserBinding, appBinding)
 	if err != nil {
-		return
+		return "", false, err
 	}
-	p.issueToken(c, browserBinding, appBinding)
-	_ = p.setCookie(c, fpName, cur, true)
+	if err := p.setCookie(c, fpName, cur, true); err != nil {
+		return "", false, err
+	}
+	return token, true, nil
 }
 
 func bindingFingerprint(binding []byte) string {
@@ -828,6 +845,10 @@ func (p *Protector) extractRequestToken(c fh.Ctx) (string, error) {
 		return token, nil
 	}
 
+	headerTokens := c.RequestHeader().Values(p.cfg.HeaderName)
+	if len(headerTokens) > 1 {
+		return "", ErrInvalidToken
+	}
 	if token := strings.TrimSpace(c.Get(p.cfg.HeaderName)); token != "" {
 		if len(token) > maximumTokenLength {
 			return "", ErrInvalidToken
@@ -847,7 +868,14 @@ func (p *Protector) extractRequestToken(c fh.Ctx) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		token := values.Get(p.cfg.FormField)
+		tokens := values[p.cfg.FormField]
+		if len(tokens) > 1 {
+			return "", ErrInvalidToken
+		}
+		var token string
+		if len(tokens) == 1 {
+			token = tokens[0]
+		}
 		if len(token) > maximumTokenLength {
 			return "", ErrInvalidToken
 		}
@@ -866,17 +894,33 @@ func (p *Protector) extractRequestToken(c fh.Ctx) (string, error) {
 
 func extractMultipartToken(body []byte, boundary, field string) (string, error) {
 	r := multipart.NewReader(bytes.NewReader(body), boundary)
+	parts := 0
+	found := false
+	token := ""
 	for {
 		part, err := r.NextPart()
 		if errors.Is(err, io.EOF) {
-			return "", nil
+			return token, nil
 		}
 		if err != nil {
 			return "", err
 		}
-		if part.FormName() != field || part.FileName() != "" {
+		parts++
+		if parts > maximumMultipartParts {
+			_ = part.Close()
+			return "", ErrInvalidToken
+		}
+		if part.FormName() != field {
 			_ = part.Close()
 			continue
+		}
+		if part.FileName() != "" {
+			_ = part.Close()
+			return "", ErrInvalidToken
+		}
+		if found {
+			_ = part.Close()
+			return "", ErrInvalidToken
 		}
 		data, err := io.ReadAll(io.LimitReader(part, maximumTokenLength+1))
 		_ = part.Close()
@@ -886,11 +930,17 @@ func extractMultipartToken(body []byte, boundary, field string) (string, error) 
 		if len(data) > maximumTokenLength {
 			return "", ErrInvalidToken
 		}
-		return string(data), nil
+		token = string(data)
+		found = true
 	}
 }
 
 func (p *Protector) validateRequestOrigin(c fh.Ctx) (explicitlyTrusted bool, err error) {
+	origins := c.RequestHeader().Values("Origin")
+	referers := c.RequestHeader().Values("Referer")
+	if len(origins) > 1 || len(referers) > 1 {
+		return false, errors.New("csrf: duplicate origin provenance header")
+	}
 	rawOrigin := strings.TrimSpace(c.Get("Origin"))
 	rawReferer := strings.TrimSpace(c.Get("Referer"))
 
@@ -941,6 +991,10 @@ func (p *Protector) resolveTargetOrigin(c fh.Ctx) (string, error) {
 }
 
 func (p *Protector) validateFetchMetadata(c fh.Ctx, explicitlyTrusted bool) bool {
+	values := c.RequestHeader().Values("Sec-Fetch-Site")
+	if len(values) > 1 {
+		return false
+	}
 	site := strings.ToLower(strings.TrimSpace(c.Get("Sec-Fetch-Site")))
 	if site == "" {
 		// Older browsers and non-browser clients may not send Fetch Metadata.
@@ -976,7 +1030,7 @@ func canonicalConfiguredOrigin(raw string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" {
+	if u.User != nil || u.Opaque != "" || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" {
 		return "", errors.New("origin must not contain userinfo, path, query, or fragment")
 	}
 	return canonicalURLOrigin(u)
@@ -998,7 +1052,7 @@ func canonicalRequestOrigin(raw string, allowPath bool) (string, error) {
 	if u.User != nil {
 		return "", errors.New("origin contains userinfo")
 	}
-	if !allowPath && (u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "") {
+	if u.Opaque != "" || u.ForceQuery || u.RawFragment != "" || !allowPath && (u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "") {
 		return "", errors.New("origin header contains path/query/fragment")
 	}
 	return canonicalURLOrigin(u)
@@ -1041,9 +1095,11 @@ func canonicalHostPort(scheme, rawHost string) (string, error) {
 			}
 			port = rest[1:]
 		}
-		if ip := net.ParseIP(host); ip == nil || !strings.Contains(host, ":") {
+		ip := net.ParseIP(host)
+		if ip == nil || !strings.Contains(host, ":") {
 			return "", errors.New("invalid bracketed IPv6 host")
 		}
+		host = ip.String()
 	} else {
 		colonCount := strings.Count(rawHost, ":")
 		switch colonCount {
@@ -1065,6 +1121,11 @@ func canonicalHostPort(scheme, rawHost string) (string, error) {
 	}
 	host = strings.ToLower(host)
 	if port != "" {
+		for i := 0; i < len(port); i++ {
+			if port[i] < '0' || port[i] > '9' {
+				return "", errors.New("invalid port")
+			}
+		}
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 {
 			return "", errors.New("invalid port")
@@ -1086,13 +1147,25 @@ func canonicalHostPort(scheme, rawHost string) (string, error) {
 }
 
 func asciiHost(host string) bool {
-	if host == "" || len(host) > 253 && net.ParseIP(host) == nil {
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if host == "" || len(host) > 253 {
 		return false
 	}
-	for i := 0; i < len(host); i++ {
-		c := host[i]
-		if c >= 0x80 || c <= 0x20 || c == '/' || c == '\\' || c == '%' || c == '@' {
+	name := strings.TrimSuffix(host, ".")
+	if name == "" {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !('a' <= c && c <= 'z') && !('A' <= c && c <= 'Z') && !('0' <= c && c <= '9') && c != '-' {
+				return false
+			}
 		}
 	}
 	return true

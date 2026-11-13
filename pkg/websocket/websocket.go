@@ -1298,22 +1298,40 @@ type OutboundMessage struct {
 }
 
 type Writer struct {
-	Conn   *Conn
-	Queue  chan OutboundMessage
-	Done   chan struct{}
-	closed atomic.Bool
-	once   sync.Once
+	Conn            *Conn
+	Queue           chan OutboundMessage
+	Done            chan struct{}
+	closed          atomic.Bool
+	once            sync.Once
+	sendMu          sync.RWMutex
+	maxQueuedBytes  int64
+	queuedBytes     atomic.Int64
+	reserveExternal func(int64) bool
+	releaseExternal func(int64)
 }
 
 func NewWriter(conn *Conn, queueSize int) *Writer {
+	return newWriter(conn, queueSize, 0, nil, nil)
+}
+
+// NewWriterWithByteBudget bounds queued payload bytes for this writer. The
+// optional reserve/release callbacks apply a shared budget across writers.
+func NewWriterWithByteBudget(conn *Conn, queueSize int, maxQueuedBytes int64, reserve func(int64) bool, release func(int64)) *Writer {
+	return newWriter(conn, queueSize, maxQueuedBytes, reserve, release)
+}
+
+func newWriter(conn *Conn, queueSize int, maxQueuedBytes int64, reserve func(int64) bool, release func(int64)) *Writer {
 	if queueSize <= 0 {
 		queueSize = 64
 	}
 
 	w := &Writer{
-		Conn:  conn,
-		Queue: make(chan OutboundMessage, queueSize),
-		Done:  make(chan struct{}),
+		Conn:            conn,
+		Queue:           make(chan OutboundMessage, queueSize),
+		Done:            make(chan struct{}),
+		maxQueuedBytes:  maxQueuedBytes,
+		reserveExternal: reserve,
+		releaseExternal: release,
 	}
 
 	go w.loop()
@@ -1322,7 +1340,21 @@ func NewWriter(conn *Conn, queueSize int) *Writer {
 }
 
 func (w *Writer) Send(opcode byte, payload []byte) bool {
+	w.sendMu.RLock()
 	if w.closed.Load() {
+		w.sendMu.RUnlock()
+		return false
+	}
+	n := int64(len(payload))
+	if !w.reserveBytes(n) {
+		w.sendMu.RUnlock()
+		_ = w.CloseWithStatus(ClosePolicyViolation, "queued byte limit exceeded")
+		return false
+	}
+	if n > 0 && w.reserveExternal != nil && !w.reserveExternal(n) {
+		w.releaseBytes(n, false)
+		w.sendMu.RUnlock()
+		_ = w.CloseWithStatus(ClosePolicyViolation, "queued byte limit exceeded")
 		return false
 	}
 
@@ -1331,11 +1363,42 @@ func (w *Writer) Send(opcode byte, payload []byte) bool {
 
 	select {
 	case w.Queue <- OutboundMessage{Opcode: opcode, Payload: cp}:
+		w.sendMu.RUnlock()
 		return true
 
 	default:
+		clear(cp)
+		w.releaseBytes(n, true)
+		w.sendMu.RUnlock()
 		_ = w.CloseWithStatus(ClosePolicyViolation, "slow client")
 		return false
+	}
+}
+
+func (w *Writer) reserveBytes(n int64) bool {
+	if n <= 0 || w.maxQueuedBytes <= 0 {
+		return true
+	}
+	for {
+		current := w.queuedBytes.Load()
+		if n > w.maxQueuedBytes-current {
+			return false
+		}
+		if w.queuedBytes.CompareAndSwap(current, current+n) {
+			return true
+		}
+	}
+}
+
+func (w *Writer) releaseBytes(n int64, external bool) {
+	if n <= 0 {
+		return
+	}
+	if w.maxQueuedBytes > 0 {
+		w.queuedBytes.Add(-n)
+	}
+	if external && w.releaseExternal != nil {
+		w.releaseExternal(n)
 	}
 }
 
@@ -1354,10 +1417,13 @@ func (w *Writer) SendJSON(v any) bool {
 
 func (w *Writer) CloseWithStatus(code uint16, reason string) error {
 	w.once.Do(func() {
+		w.sendMu.Lock()
 		w.closed.Store(true)
+		close(w.Done)
+		w.sendMu.Unlock()
 		_ = w.Conn.CloseWithStatus(code, reason)
 		_ = w.Conn.Close()
-		close(w.Done)
+		w.discardQueued()
 	})
 
 	return nil
@@ -1366,18 +1432,46 @@ func (w *Writer) CloseWithStatus(code uint16, reason string) error {
 func (w *Writer) loop() {
 	defer func() {
 		if r := recover(); r != nil {
-			_ = w.Conn.Close()
+			// Treat an unexpected write panic like any other terminal writer
+			// failure so queued buffers are cleared and shared byte budgets are
+			// returned. writeMessage releases the in-flight message on unwind.
+			_ = w.CloseWithStatus(CloseInternalServerErr, "writer panic")
 		}
 	}()
 	for {
 		select {
 		case msg := <-w.Queue:
-			if err := w.Conn.WriteMessage(msg.Opcode, msg.Payload); err != nil {
+			err := w.writeMessage(msg)
+			if err != nil {
 				_ = w.CloseWithStatus(CloseGoingAway, "write failed")
 				return
 			}
 
 		case <-w.Done:
+			w.discardQueued()
+			return
+		}
+	}
+}
+
+func (w *Writer) writeMessage(msg OutboundMessage) (err error) {
+	// Keep accounting correct even if a connection implementation panics.
+	defer func() {
+		n := int64(len(msg.Payload))
+		clear(msg.Payload)
+		w.releaseBytes(n, true)
+	}()
+	return w.Conn.WriteMessage(msg.Opcode, msg.Payload)
+}
+
+func (w *Writer) discardQueued() {
+	for {
+		select {
+		case msg := <-w.Queue:
+			n := int64(len(msg.Payload))
+			clear(msg.Payload)
+			w.releaseBytes(n, true)
+		default:
 			return
 		}
 	}

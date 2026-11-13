@@ -8,6 +8,16 @@ var ErrResponseBodyTooLarge = errors.New("fh: buffered response exceeds configur
 // unread HTTP/2 streaming chunks. Bytes are released when consumed or when
 // their stream ends.
 func (a *App) reserveBufferedBody(n int64) bool {
+	if a.tryReserveBufferedBody(n) {
+		return true
+	}
+	if n > 0 && a.cfg.MaxBufferedRequestBytes > 0 {
+		a.bodyBudgetRejections.Add(1)
+	}
+	return false
+}
+
+func (a *App) tryReserveBufferedBody(n int64) bool {
 	limit := a.cfg.MaxBufferedRequestBytes
 	if limit <= 0 || n <= 0 {
 		return true
@@ -15,7 +25,6 @@ func (a *App) reserveBufferedBody(n int64) bool {
 	for {
 		current := a.bufferedRequestBytes.Load()
 		if n > limit-current {
-			a.bodyBudgetRejections.Add(1)
 			return false
 		}
 		if a.bufferedRequestBytes.CompareAndSwap(current, current+n) {
@@ -64,6 +73,23 @@ func (c *DefaultCtx) releaseResponseBody() {
 		c.server.releaseBufferedResponse(c.bufferedResponseReserved)
 		c.bufferedResponseReserved = 0
 	}
+}
+
+// reserveRequestBody accounts for bytes retained by a context after consuming
+// a streaming or middleware-provided reader. HTTP/1's prebuffered body and
+// unread HTTP/2 frames are accounted for by their transport owners instead.
+func (c *DefaultCtx) reserveRequestBody(n int64) bool {
+	if c.server == nil || n <= 0 {
+		return true
+	}
+	return c.server.reserveBufferedBody(n)
+}
+
+func (c *DefaultCtx) releaseRequestBody() {
+	if c.server != nil && c.requestBodyBufferedReserved > 0 {
+		c.server.releaseBufferedBody(c.requestBodyBufferedReserved)
+	}
+	c.requestBodyBufferedReserved = 0
 }
 
 func (a *App) releaseBufferedBody(n int64) {

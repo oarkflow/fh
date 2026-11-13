@@ -372,9 +372,10 @@ func BenchmarkAppendContentLengthLarge(b *testing.B) {
 // ── Full request-response benchmarks ──────────────────────────────────────
 
 func BenchmarkFullRequestJSON(b *testing.B) {
+	response := map[string]string{"message": "Hello, World!"}
 	app := New()
 	app.Get("/json", func(c Ctx) error {
-		return c.JSON(map[string]string{"message": "Hello, World!"})
+		return c.JSON(response)
 	})
 	app.router.Freeze()
 
@@ -383,13 +384,14 @@ func BenchmarkFullRequestJSON(b *testing.B) {
 	defer releaseCtx(ctx)
 
 	req := []byte("GET /json HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n\r\n")
+	method, path := []byte("GET"), []byte("/json")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		ctx.reset()
 		conn.Reset()
 		consumed, _ := parseRequestLine(req, &ctx.Header, 8192)
 		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64)
-		handler := app.router.FindBytes([]byte("GET"), []byte("/json"), &ctx.params)
+		handler := app.router.FindBytes(method, path, &ctx.params)
 		if handler != nil {
 			_ = handler(ctx)
 		}
@@ -398,9 +400,10 @@ func BenchmarkFullRequestJSON(b *testing.B) {
 }
 
 func BenchmarkFullRequestPlaintext(b *testing.B) {
+	response := []byte("Hello, World!")
 	app := New()
 	app.Get("/plaintext", func(c Ctx) error {
-		return c.SendBytes([]byte("Hello, World!"))
+		return c.SendBytes(response)
 	})
 	app.router.Freeze()
 
@@ -409,13 +412,14 @@ func BenchmarkFullRequestPlaintext(b *testing.B) {
 	defer releaseCtx(ctx)
 
 	req := []byte("GET /plaintext HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	method, path := []byte("GET"), []byte("/plaintext")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		ctx.reset()
 		conn.Reset()
 		consumed, _ := parseRequestLine(req, &ctx.Header, 8192)
 		_, _ = parseHeadersLimit(req[consumed:], &ctx.Header, 64)
-		handler := app.router.FindBytes([]byte("GET"), []byte("/plaintext"), &ctx.params)
+		handler := app.router.FindBytes(method, path, &ctx.params)
 		if handler != nil {
 			_ = handler(ctx)
 		}
@@ -438,6 +442,7 @@ func BenchmarkFullRequestEcho(b *testing.B) {
 	req := append([]byte("POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: "), []byte(fmt.Sprintf("%d", len(body)))...)
 	req = append(req, []byte("\r\n\r\n")...)
 	req = append(req, body...)
+	method, path := []byte("POST"), []byte("/echo")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -446,7 +451,7 @@ func BenchmarkFullRequestEcho(b *testing.B) {
 		consumed, _ := parseRequestLine(req, &ctx.Header, 8192)
 		_, _ = parseHeadersLimit(req[consumed:bytes.Index(req, []byte("\r\n\r\n"))+4], &ctx.Header, 64)
 		ctx.body = body
-		handler := app.router.FindBytes([]byte("POST"), []byte("/echo"), &ctx.params)
+		handler := app.router.FindBytes(method, path, &ctx.params)
 		if handler != nil {
 			_ = handler(ctx)
 		}

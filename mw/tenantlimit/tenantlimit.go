@@ -1,9 +1,13 @@
 package tenantlimit
 
 import (
-	"github.com/oarkflow/fh"
 	"sync"
+
+	"github.com/oarkflow/fh"
 )
+
+const defaultMaxTenantIDBytes = 256
+const defaultMaxTenants = 10_000
 
 type TenantFunc func(fh.Ctx) string
 
@@ -12,7 +16,12 @@ type Config struct {
 	Tenant   TenantFunc
 	Header   string
 	LocalKey string
-	Error    func(fh.Ctx, string) error
+	// MaxTenantIDBytes bounds tenant identifiers retained in the active map.
+	// Zero uses the 256-byte default.
+	MaxTenantIDBytes int
+	// MaxTenants bounds distinct tenants with active requests. Zero uses 10000.
+	MaxTenants int
+	Error      func(fh.Ctx, string) error
 }
 
 type limiter struct {
@@ -28,12 +37,18 @@ func New(cfg Config) fh.HandlerFunc {
 	if cfg.Header == "" {
 		cfg.Header = "X-Tenant-ID"
 	}
+	if cfg.MaxTenantIDBytes <= 0 {
+		cfg.MaxTenantIDBytes = defaultMaxTenantIDBytes
+	}
+	if cfg.MaxTenants <= 0 {
+		cfg.MaxTenants = defaultMaxTenants
+	}
 	if cfg.Error == nil {
 		cfg.Error = func(c fh.Ctx, t string) error {
 			return c.Status(fh.StatusTooManyRequests).JSON(fh.Map{"error": "tenant_limit_exceeded", "tenant": t})
 		}
 	}
-	l := &limiter{active: map[string]int{}, cfg: cfg}
+	l := &limiter{active: make(map[string]int, min(cfg.MaxTenants, 256)), cfg: cfg}
 	return l.Handle
 }
 func (l *limiter) Handle(c fh.Ctx) error {
@@ -41,10 +56,18 @@ func (l *limiter) Handle(c fh.Ctx) error {
 	if tenant == "" {
 		tenant = "default"
 	}
+	if len(tenant) > l.cfg.MaxTenantIDBytes {
+		return fh.NewHTTPError(fh.StatusBadRequest, "TENANT_ID_TOO_LARGE", "tenant identifier is too long")
+	}
 	l.mu.Lock()
-	if l.active[tenant] >= l.cfg.Limit {
+	active := l.active[tenant]
+	if active >= l.cfg.Limit {
 		l.mu.Unlock()
 		return l.cfg.Error(c, tenant)
+	}
+	if active == 0 && len(l.active) >= l.cfg.MaxTenants {
+		l.mu.Unlock()
+		return fh.NewHTTPError(fh.StatusServiceUnavailable, "TENANT_CAPACITY", "active tenant capacity reached")
 	}
 	l.active[tenant]++
 	l.mu.Unlock()

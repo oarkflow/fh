@@ -22,6 +22,8 @@ type Config struct {
 	MaxConcurrent int
 	Queue         int
 	Timeout       time.Duration
+	MaxBuckets    int
+	MaxKeyBytes   int
 	KeyFunc       KeyFunc
 	Reject        RejectHandler
 	Headers       bool
@@ -31,6 +33,12 @@ func New(cfg Config) fh.HandlerFunc {
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 1024
 	}
+	if cfg.MaxBuckets <= 0 {
+		cfg.MaxBuckets = 1024
+	}
+	if cfg.MaxKeyBytes <= 0 {
+		cfg.MaxKeyBytes = 256
+	}
 	if cfg.Reject == nil {
 		cfg.Reject = DefaultReject
 	}
@@ -38,15 +46,33 @@ func New(cfg Config) fh.HandlerFunc {
 		sem    chan struct{}
 		mu     sync.Mutex
 		queued int
+		refs   int
 	}
-	var buckets sync.Map
+	var buckets = struct {
+		sync.Mutex
+		items map[string]*bucket
+	}{items: make(map[string]*bucket, min(cfg.MaxBuckets, 256))}
 	getBucket := func(key string) *bucket {
-		if value, ok := buckets.Load(key); ok {
-			return value.(*bucket)
+		buckets.Lock()
+		defer buckets.Unlock()
+		if value, ok := buckets.items[key]; ok {
+			value.refs++
+			return value
 		}
-		created := &bucket{sem: make(chan struct{}, cfg.MaxConcurrent)}
-		actual, _ := buckets.LoadOrStore(key, created)
-		return actual.(*bucket)
+		if len(buckets.items) >= cfg.MaxBuckets {
+			return nil
+		}
+		created := &bucket{sem: make(chan struct{}, cfg.MaxConcurrent), refs: 1}
+		buckets.items[key] = created
+		return created
+	}
+	releaseBucket := func(key string, b *bucket) {
+		buckets.Lock()
+		b.refs--
+		if b.refs == 0 && buckets.items[key] == b {
+			delete(buckets.items, key)
+		}
+		buckets.Unlock()
 	}
 	return func(c fh.Ctx) error {
 		key := "global"
@@ -56,7 +82,14 @@ func New(cfg Config) fh.HandlerFunc {
 				key = "global"
 			}
 		}
+		if len(key) > cfg.MaxKeyBytes {
+			return fh.NewHTTPError(fh.StatusBadRequest, "BULKHEAD_KEY_TOO_LARGE", "bulkhead key is too long")
+		}
 		b := getBucket(key)
+		if b == nil {
+			return cfg.Reject(c, Result{Key: key, Limit: cfg.MaxConcurrent, RetryAfter: time.Second})
+		}
+		defer releaseBucket(key, b)
 		if cfg.Timeout <= 0 {
 			select {
 			case b.sem <- struct{}{}:

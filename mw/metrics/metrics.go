@@ -78,8 +78,14 @@ func (m *Metrics) Middleware() fh.HandlerFunc {
 			} else if code == 0 {
 				code = fh.StatusOK
 			}
-			if code >= 500 {
+			if code >= 500 && code <= 599 {
 				m.errors.Add(1)
+			}
+			// Status is normally an HTTP status code, but handler code can set an
+			// arbitrary integer. Keep the label space finite even if that value is
+			// influenced by request data.
+			if code < 100 || code > 599 {
+				code = 0
 			}
 			v, _ := m.status.LoadOrStore(strconv.Itoa(code), &atomic.Uint64{})
 			v.(*atomic.Uint64).Add(1)

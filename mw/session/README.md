@@ -37,4 +37,8 @@ Run after security/real IP and before CSRF/auth/handlers that need session state
 
 ## Production considerations
 
-Use secure, HttpOnly, SameSite cookies. Rotate session IDs after login. Use Redis/SQL or sticky sessions for multi-node deployments.
+Use Secure, HttpOnly, SameSite cookies. Call `SessionManager.Regenerate` after
+authentication to prevent fixation. `SessionAutoRegenerate(true)` is deprecated
+and fails at manager construction because rotating on every request can split
+state across concurrent requests. Use Redis/SQL or sticky sessions for
+multi-node deployments.

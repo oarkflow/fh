@@ -443,6 +443,16 @@ var (
 	jsonBytePool  = sync.Pool{New: func() any { b := make([]byte, 0, 1024); return &b }}
 )
 
+const maxJSONPoolBytes = 64 << 10
+
+func putJSONBuffer(buffer *[]byte, data []byte) {
+	if cap(data) > maxJSONPoolBytes {
+		return
+	}
+	*buffer = data[:0]
+	jsonBytePool.Put(buffer)
+}
+
 func init() {
 	jsonEnginePtr.Store(&jsonEngineBox{engine: stdJSONEngine{}})
 }
@@ -522,16 +532,12 @@ func (jsonCodec) Marshal(v any) ([]byte, error) {
 		buf := (*bp)[:0]
 		out, err := app.AppendJSON(buf)
 		if err != nil {
-			*bp = buf[:0]
-			jsonBytePool.Put(bp)
+			putJSONBuffer(bp, buf)
 			return nil, fmt.Errorf("json: %w", err)
 		}
 		res := make([]byte, len(out))
 		copy(res, out)
-		if cap(out) <= 64<<10 {
-			*bp = out[:0]
-			jsonBytePool.Put(bp)
-		}
+		putJSONBuffer(bp, out)
 		return res, nil
 	}
 	if m, ok := v.(JSONMarshaler); ok {

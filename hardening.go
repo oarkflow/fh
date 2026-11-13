@@ -18,6 +18,10 @@ import (
 // through many such connections or expensive handlers. Returns nil when no
 // ceiling is configured, so a server that opts out pays no request-path cost.
 func defaultResourceGuardMiddleware(cfg Config) HandlerFunc {
+	return defaultResourceGuardMiddlewareWithCounter(cfg, &atomic.Int64{})
+}
+
+func defaultResourceGuardMiddlewareWithCounter(cfg Config, inFlight *atomic.Int64) HandlerFunc {
 	maxInFlight := cfg.MaxInFlightRequests
 	maxGoroutines := cfg.MaxGoroutines
 	maxHeap := cfg.MaxHeapBytes
@@ -29,31 +33,58 @@ func defaultResourceGuardMiddleware(cfg Config) HandlerFunc {
 		interval = 250 * time.Millisecond
 	}
 
-	var inFlight atomic.Int64
 	var sampleMu sync.Mutex
-	var sampledAt time.Time
-	var goroutines int
-	var heapAlloc uint64
+	type resourceSample struct {
+		at         time.Time
+		goroutines int
+		heapAlloc  uint64
+	}
+	var latestSample atomic.Pointer[resourceSample]
 
 	sample := func() (int, uint64) {
-		sampleMu.Lock()
-		defer sampleMu.Unlock()
-		if time.Since(sampledAt) >= interval {
-			if maxGoroutines > 0 {
-				goroutines = runtime.NumGoroutine()
+		now := time.Now()
+		cached := latestSample.Load()
+		if cached != nil {
+			if now.Sub(cached.at) < interval {
+				return cached.goroutines, cached.heapAlloc
 			}
-			if maxHeap > 0 {
-				var ms runtime.MemStats
-				runtime.ReadMemStats(&ms)
-				heapAlloc = ms.HeapAlloc
+			// A single request refreshes an expired snapshot. Other requests use
+			// the last sample instead of queueing behind runtime.ReadMemStats at
+			// the refresh boundary; the exact in-flight limit remains independent.
+			if !sampleMu.TryLock() {
+				return cached.goroutines, cached.heapAlloc
 			}
-			sampledAt = time.Now()
+		} else {
+			sampleMu.Lock()
 		}
-		return goroutines, heapAlloc
+
+		// Requests between samples read the immutable snapshot without locking.
+		defer sampleMu.Unlock()
+		now = time.Now()
+		if cached := latestSample.Load(); cached != nil && now.Sub(cached.at) < interval {
+			return cached.goroutines, cached.heapAlloc
+		}
+
+		current := &resourceSample{}
+		if maxGoroutines > 0 {
+			current.goroutines = runtime.NumGoroutine()
+		}
+		if maxHeap > 0 {
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			current.heapAlloc = ms.HeapAlloc
+		}
+		current.at = time.Now()
+		latestSample.Store(current)
+		return current.goroutines, current.heapAlloc
 	}
 
 	return func(c Ctx) error {
-		if maxInFlight > 0 {
+		reserved := false
+		if dc, ok := c.(*DefaultCtx); ok {
+			reserved = dc.inFlightReserved
+		}
+		if maxInFlight > 0 && !reserved {
 			cur := inFlight.Add(1)
 			defer inFlight.Add(-1)
 			if cur > maxInFlight {
@@ -107,8 +138,11 @@ func defaultHardeningMiddleware(cfg Config) HandlerFunc {
 			[2]string{"Cross-Origin-Resource-Policy", "same-origin"},
 		)
 	}
-	if strings.TrimSpace(cfg.ContentSecurityPolicy) != "" {
-		headers = append(headers, [2]string{"Content-Security-Policy", cfg.ContentSecurityPolicy})
+	// CSP is caller-configured, unlike the fixed policy values above. It is
+	// stored through setStaticHeader below, which skips per-request validation,
+	// so validate it once while building the middleware.
+	if csp := strings.TrimSpace(cfg.ContentSecurityPolicy); csp != "" && len(csp) <= 16<<10 && validHeaderValue(csp) {
+		headers = append(headers, [2]string{"Content-Security-Policy", csp})
 	}
 
 	// Pre-encode the fixed header set once at build time. These names/values
@@ -134,24 +168,43 @@ func defaultHardeningMiddleware(cfg Config) HandlerFunc {
 	}
 }
 
+func normalizeAllowedHosts(hosts []string) []string {
+	if len(hosts) == 0 {
+		return hosts
+	}
+	normalized := make([]string, len(hosts))
+	for i, host := range hosts {
+		normalized[i] = strings.ToLower(strings.TrimSpace(host))
+	}
+	return normalized
+}
+
+// allowedHost expects the allow-list to have been normalized once at app
+// construction. Keeping policy normalization out of this request-time helper
+// avoids repeating work for every HTTP/1.1 request and HTTP/2 stream.
 func allowedHost(host string, allowed []string) bool {
 	if len(allowed) == 0 {
 		return true
 	}
-	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimSpace(host)
 	if host == "" {
 		return false
 	}
+	hostWithoutPort := ""
+	if strings.Contains(host, ":") {
+		if name, _, err := net.SplitHostPort(host); err == nil {
+			hostWithoutPort = name
+		}
+	}
 	for _, candidate := range allowed {
-		candidate = strings.ToLower(strings.TrimSpace(candidate))
 		if candidate == "" {
 			continue
 		}
-		if host == candidate {
+		if host == candidate || strings.EqualFold(host, candidate) {
 			return true
 		}
 		// Allow a host-only policy entry to match the same host with a port.
-		if name, _, err := net.SplitHostPort(host); err == nil && name == candidate {
+		if hostWithoutPort != "" && (hostWithoutPort == candidate || strings.EqualFold(hostWithoutPort, candidate)) {
 			return true
 		}
 	}

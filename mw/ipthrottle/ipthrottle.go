@@ -91,7 +91,11 @@ func normalize(cfg Config) Config {
 		}
 	}
 	if cfg.Store == nil {
-		cfg.Store = kv.NewMemoryStore()
+		cfg.Store = kv.NewMemoryStore(
+			kv.WithShardCount(256),
+			kv.WithMaxEntries(cfg.MaxIPs),
+			kv.WithRejectWhenFull(),
+		)
 	}
 	return cfg
 }
@@ -136,7 +140,11 @@ type bucketState struct {
 // does not extend to a store-wide cardinality decision, so this is a
 // deliberate, documented trade-off rather than an oversight.
 func Increment(store kv.Store, key string, window time.Duration, maxKeys int, now time.Time) (int, error) {
-	if maxKeys > 0 {
+	capacityIsStrict := false
+	if bounded, ok := store.(interface{ CapacityLimit() int }); ok {
+		capacityIsStrict = bounded.CapacityLimit() > 0 && bounded.CapacityLimit() <= maxKeys
+	}
+	if maxKeys > 0 && !capacityIsStrict {
 		if _, exists, err := store.Get(key); err != nil {
 			return 0, err
 		} else if !exists {
@@ -171,6 +179,9 @@ func Increment(store kv.Store, key string, window time.Duration, maxKeys int, no
 		return next, window, true, nil
 	})
 	if err != nil {
+		if errors.Is(err, kv.ErrCapacityExceeded) {
+			return 0, ErrCapacityExceeded
+		}
 		return 0, err
 	}
 	return count, nil

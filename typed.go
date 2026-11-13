@@ -44,14 +44,14 @@ func TypedHandler[Req any, Res any](fn func(Ctx, Req) (Res, error)) HandlerFunc 
 			if len(body) > 0 {
 				contentType := ctx.Get("Content-Type")
 				if err := parseTypedBody(body, contentType, &req); err != nil {
-					return NewHTTPError(StatusBadRequest, "INVALID_BODY", "Failed to parse request body: "+err.Error())
+					return NewHTTPError(StatusBadRequest, "INVALID_BODY", "Invalid request body")
 				}
 			}
 		}
 
 		// Parse query parameters into the request struct.
 		if err := ctx.QueryParser(&req); err != nil {
-			// Query parser errors are non-fatal — some fields may not have query params.
+			return NewHTTPError(StatusBadRequest, "INVALID_QUERY", "Invalid query parameters")
 		}
 
 		res, err := fn(ctx, req)

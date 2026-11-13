@@ -39,7 +39,7 @@ Full reference documentation lives in [`docs/`](docs/README.md).
 go get github.com/oarkflow/fh
 ```
 
-Requires Go 1.27.3 or later.
+Requires Go 1.27.4 or later.
 
 ## Quick Start
 
@@ -547,6 +547,10 @@ app.Post("/payments", fh.RequireAuth(), fh.RequireScope("payments:create"), crea
 ```
 
 When `Compliance.ExposeEndpoints` is enabled, fh registers `/_fh/compliance`, `/_fh/compliance/controls`, `/_fh/compliance/findings`, `/_fh/config/safe`, `/_fh/runtime`, `/_fh/routes`, `/_fh/health`, `/_fh/live`, `/_fh/ready`, and (when the queue is enabled) `/_fh/queue/stats` and admin queue ops endpoints.
+
+The built-in readiness route returns aggregate status without health-check
+error details. `App.HealthStatus` and runtime diagnostics include detailed
+check errors; keep endpoints that expose those values behind authentication.
 
 ## Shared State & Key-Value Storage
 

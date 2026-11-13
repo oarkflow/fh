@@ -26,6 +26,9 @@ const (
 	LocalSession  = "fh.secure.session"
 	LocalDevice   = "fh.secure.device"
 	LocalRequest  = "fh.secure.request_id"
+
+	defaultMaxDevices  = 100_000
+	defaultMaxSessions = 250_000
 )
 
 type SecurityEvent struct {
@@ -120,14 +123,29 @@ func New(config Config) (*Transport, error) {
 	if config.MaxClockSkew <= 0 {
 		config.MaxClockSkew = 30 * time.Second
 	}
+	if config.MaxReplayEntries <= 0 {
+		config.MaxReplayEntries = defaultMaxReplayEntries
+	}
 	if config.DeviceStore == nil {
-		config.DeviceStore = kv.NewMemoryStore()
+		config.DeviceStore = kv.NewMemoryStore(
+			kv.WithShardCount(256),
+			kv.WithMaxEntries(defaultMaxDevices),
+			kv.WithRejectWhenFull(),
+		)
 	}
 	if config.SessionStore == nil {
-		config.SessionStore = kv.NewMemoryStore()
+		config.SessionStore = kv.NewMemoryStore(
+			kv.WithShardCount(256),
+			kv.WithMaxEntries(defaultMaxSessions),
+			kv.WithRejectWhenFull(),
+		)
 	}
 	if config.ReplayStore == nil {
-		config.ReplayStore = kv.NewMemoryStore()
+		config.ReplayStore = kv.NewMemoryStore(
+			kv.WithShardCount(256),
+			kv.WithMaxEntries(config.MaxReplayEntries),
+			kv.WithRejectWhenFull(),
+		)
 	}
 	// Hiding application metadata is the safe default. ExposeResponseHeaders
 	// is an explicit compatibility escape hatch.

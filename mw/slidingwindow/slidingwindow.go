@@ -17,6 +17,7 @@ package slidingwindow
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"strconv"
 	"time"
@@ -50,7 +51,9 @@ type Config struct {
 	// MaxKeys is the maximum number of tracked keys. Default: 65536.
 	MaxKeys int
 
-	// CleanupInterval is how often to clean expired keys. Default: 1 minute.
+	// CleanupInterval is retained for source compatibility. Expired entries
+	// are reclaimed lazily to avoid a background goroutine per limiter.
+	// Deprecated: it no longer controls cleanup timing.
 	CleanupInterval time.Duration
 
 	// Message is the error message for rate-limited requests.
@@ -107,24 +110,24 @@ func NewLimiter(config ...Config) *Limiter {
 		if c.CleanupInterval > 0 {
 			cfg.CleanupInterval = c.CleanupInterval
 		}
+		if c.Store != nil {
+			cfg.Store = c.Store
+		}
 	}
 
 	return &Limiter{
-		// A single shard (rather than kv.MemoryStore's default 16) is
-		// deliberate: WithMaxEntries splits its cap evenly across shards, so
-		// a small, user-configured MaxKeys (as in this package's tests, e.g.
-		// 10) would round down to a fractional per-shard cap and let the
-		// aggregate size overshoot the configured bound across shards. One
-		// shard makes the cap exact, matching the single-mutex, exact-bound
-		// behavior this package had before this retrofit; the trade-off is
-		// giving up kv.MemoryStore's per-shard lock concurrency, which the
-		// pre-retrofit implementation never had anyway (it used one mutex
-		// for everything).
-		store: kv.NewMemoryStore(
-			kv.WithShardCount(1),
-			kv.WithMaxEntries(cfg.MaxKeys),
-			kv.WithGCInterval(cfg.CleanupInterval),
-		),
+		// A single shard keeps MaxKeys exact and ensures that a full store
+		// rejects new identities instead of evicting live rate-limit state.
+		store: func() kv.Store {
+			if cfg.Store != nil {
+				return cfg.Store
+			}
+			return kv.NewMemoryStore(
+				kv.WithShardCount(1),
+				kv.WithMaxEntries(cfg.MaxKeys),
+				kv.WithRejectWhenFull(),
+			)
+		}(),
 		windowSize: cfg.Window,
 		rate:       cfg.Rate,
 		burst:      cfg.Burst,
@@ -261,7 +264,7 @@ func New(config ...Config) fh.HandlerFunc {
 		store = kv.NewMemoryStore(
 			kv.WithShardCount(1),
 			kv.WithMaxEntries(cfg.MaxKeys),
-			kv.WithGCInterval(cfg.CleanupInterval),
+			kv.WithRejectWhenFull(),
 		)
 	}
 
@@ -283,7 +286,10 @@ func New(config ...Config) fh.HandlerFunc {
 
 		allowed, remaining, retryAfter, err := Allow(store, key, cfg.Rate, cfg.Burst, cfg.Window)
 		if err != nil {
-			return err
+			if !errors.Is(err, kv.ErrCapacityExceeded) {
+				return err
+			}
+			allowed, remaining, retryAfter = false, 0, cfg.Window
 		}
 
 		// Always set rate limit headers.

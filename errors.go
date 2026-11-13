@@ -103,8 +103,9 @@ func (o ErrorOptions) normalize(appDebug bool) ErrorOptions {
 	return o
 }
 
-// HTTPError is a typed handler error. Message is safe to expose to clients;
-// Err retains the private cause for logging and errors.Is/errors.As.
+// HTTPError is a typed handler error. Error returns the client-safe Message;
+// Err retains the private cause for errors.Is/errors.As and controlled,
+// redacted diagnostics.
 type HTTPError struct {
 	Status    int
 	Code      string
@@ -121,9 +122,6 @@ type HTTPError struct {
 func (e *HTTPError) Error() string {
 	if e == nil {
 		return "<nil>"
-	}
-	if e.Err != nil {
-		return e.Err.Error()
 	}
 	if e.Message != "" {
 		return e.Message
@@ -327,7 +325,12 @@ func (p Problem) MarshalJSON() ([]byte, error) {
 	if p.Code != "" {
 		m["code"] = p.Code
 	}
-	for k, v := range p.Extensions {
+	// Problem extensions may contain caller supplied details or metadata. Keep
+	// the response useful while masking common secret-bearing keys and values.
+	// Apply this at serialization so directly marshaled Problem values get the
+	// same protection as framework-generated error responses.
+	extensions := cachedDefaultRedactor.RedactMap(p.Extensions)
+	for k, v := range extensions {
 		switch k {
 		case "type", "title", "status", "detail", "instance", "code":
 			continue
@@ -406,6 +409,10 @@ func classifyError(err error, opts ErrorOptions) (*HTTPError, Problem, []byte) {
 		he = NotFound("Resource not found")
 		return he, Problem{Status: he.Status, Code: he.Code, Detail: he.Message}, nil
 	}
+	if errors.Is(err, ErrBufferedBodyBudget) {
+		he = NewHTTPError(StatusServiceUnavailable, "REQUEST_BODY_BUDGET_EXCEEDED", "Request body buffer capacity is exhausted").WithCause(err).Temporary()
+		return he, Problem{Status: he.Status, Code: he.Code, Detail: he.Message}, nil
+	}
 	if errors.Is(err, ErrBodyTooLarge) {
 		he = PayloadTooLarge("Request body too large")
 		return he, Problem{Status: he.Status, Code: he.Code, Detail: he.Message}, nil
@@ -448,7 +455,7 @@ func (c *DefaultCtx) ErrorReport(err error) ErrorReport {
 	decorateProblem(c, &p, he, err, opts, stack)
 	cause := he.Message
 	if opts.ExposeDebug || opts.LogInternal {
-		cause = opts.Redact(he.Error())
+		cause = opts.Redact(privateErrorCause(err).Error())
 	}
 	return ErrorReport{Error: he, Problem: p, RequestID: errorRequestIDFromCtx(c), Timestamp: time.Now().UTC(), Path: c.Path(), Method: c.Method(), RemoteIP: c.IP(), Stack: stack, Cause: cause}
 }
@@ -471,7 +478,7 @@ func (c *DefaultCtx) SafeErrorResponse(err error) error {
 	if c.server != nil && c.server.logger != nil {
 		loggedError := he.Message
 		if he.Status < 500 || opts.ExposeDebug || opts.LogInternal {
-			loggedError = opts.Redact(err.Error())
+			loggedError = opts.Redact(privateErrorCause(err).Error())
 		}
 		args := []any{
 			"request_id", errorRequestIDFromCtx(c),
@@ -543,12 +550,20 @@ func decorateProblem(c *DefaultCtx, p *Problem, he *HTTPError, raw error, opts E
 	if opts.ExposeDebug {
 		p.Extensions["debug"] = map[string]any{"error": opts.Redact(raw.Error())}
 		if opts.ExposeCauses {
-			p.Extensions["cause"] = opts.Redact(he.Error())
+			p.Extensions["cause"] = opts.Redact(privateErrorCause(he).Error())
 		}
 		if opts.ExposeStackTrace && len(stack) != 0 {
 			p.Extensions["stack"] = opts.Redact(string(stack))
 		}
 	}
+}
+
+func privateErrorCause(err error) error {
+	var he *HTTPError
+	if errors.As(err, &he) && he.Err != nil {
+		return he.Err
+	}
+	return err
 }
 
 func (c *DefaultCtx) fallbackErrorResponse(status int, code, title string) error {
@@ -619,7 +634,7 @@ func severityForStatus(status int) ErrorSeverity {
 
 // RedactSecrets removes common secret-bearing values from debug strings.
 func RedactSecrets(s string) string {
-	keys := []string{"password", "passwd", "pwd", "secret", "token", "authorization", "api_key", "apikey", "access_token", "refresh_token", "cookie", "set-cookie", "jwt", "bearer", "credential", "private_key", "client_secret", "ssn", "card_number", "cvv", "otp", "mfa_code", "auth_token", "session_id"}
+	keys := []string{"password", "passwd", "pwd", "secret", "token", "authorization", "api_key", "api-key", "apikey", "access_token", "access-token", "refresh_token", "refresh-token", "cookie", "set-cookie", "jwt", "bearer", "credential", "private_key", "private-key", "client_secret", "client-secret", "ssn", "card_number", "cvv", "otp", "mfa_code", "auth_token", "auth-token", "session_id", "session-id"}
 	lower := strings.ToLower(s)
 	out := s
 	for _, key := range keys {

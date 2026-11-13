@@ -23,11 +23,46 @@ Run:
 ./run.sh
 ```
 
+The launcher builds the servers in a temporary directory and removes them on
+exit, preserving checked-in or locally built binaries. The harness also accepts
+`-bin-dir=/path/to/binaries` when launching a custom set of prebuilt servers.
+
 Useful options:
 
 ```bash
 ./run.sh -duration=10s -warmup=2s -concurrency=64 -output=results/10s.json
 ```
+
+Use `-fh-port`, `-fiber-port`, and `-fasthttp-port` to choose alternate server
+ports when the defaults are occupied. Locally launched child servers bind to
+loopback, and the harness passes each selected address through `FH_BENCH_ADDR`.
+
+To keep client CPU and server CPU on separate machines, start all three server
+binaries on the target host, bound to a server address reachable from the
+benchmark client, then run the harness with `-nostart -host=<server-host>`:
+
+```bash
+cd benchmarks/servers/go
+go build -o /tmp/fh-server ./fh
+go build -o /tmp/fiber-server ./fiber
+go build -o /tmp/fasthttp-server ./fasthttp
+FH_BENCH_ADDR=10.0.0.12:3001 /tmp/fh-server &
+fh_pid=$!
+FH_BENCH_ADDR=10.0.0.12:3003 /tmp/fiber-server &
+fiber_pid=$!
+FH_BENCH_ADDR=10.0.0.12:3004 /tmp/fasthttp-server &
+fasthttp_pid=$!
+trap 'kill "$fh_pid" "$fiber_pid" "$fasthttp_pid"; wait' EXIT
+wait
+```
+
+On the client host, run `go run main.go -nostart -host=10.0.0.12` from
+`benchmarks`. The harness probes the remote ports, checks each server's runtime
+stats endpoint, and records the target host in the result metadata. `-host`
+accepts an unbracketed IPv4 address, IPv6 address, or hostname. Remote mode
+cannot report server RSS because the harness does not own those processes; Go
+heap, GC and CPU stats remain available through the benchmark endpoint. Keep
+that endpoint reachable only from the benchmark client.
 
 To isolate a suspected route and rotate scenario order between runs:
 
@@ -44,8 +79,27 @@ Set `FH_BENCH_WRITE_BUFFER_SIZE` to a positive byte count to compare an
 explicit fh write-buffer size against its lazy default.
 
 The output JSON contains request rate, average latency, p50/p95/p99 latency,
-and errors. Benchmark numbers are machine- and kernel-dependent; compare
-servers from the same run rather than treating them as universal rankings.
+errors, Go allocated bytes per completed request, heap allocation before and
+after the timed window, GC count delta, estimated Go CPU milliseconds per
+request, and process RSS snapshots before and after the window. Runtime
+statistics are fetched through an unmeasured `__bench/stats` route. RSS is
+sampled with `ps` outside the measured window. The Go CPU estimate sums runtime
+user, GC, and scavenger counters; it excludes kernel CPU and is not total
+process CPU. If the runtime user CPU counter does not advance, the harness
+reports Go CPU as unavailable rather than 0 ms/request. RSS is a point-in-time
+reading, not peak memory or retained heap. RSS is unavailable with `-nostart`
+because the harness does not own those server processes. Each row also carries
+run metadata:
+UTC start time, Go version, operating system, architecture, logical CPU count,
+`GOMAXPROCS`, workload settings, server order, randomization seeds, selected
+server/scenarios, `-nostart` mode, the fh write-buffer override, and the source
+revision/dirty state when Go build information includes VCS data.
+Each row also records the measured server binary's Go version, OS/architecture,
+CPU settings, main module/version, and embedded VCS revision/dirty state. This
+lets `-nostart` results reveal when the supplied server process is stale or was
+built from a different revision.
+Benchmark numbers are machine- and kernel-dependent; compare servers from the
+same run rather than treating them as universal rankings.
 The Go client, server processes, and percentile collection all share the
 benchmark host's CPU and memory. A short run can therefore show transient
 throughput dips unrelated to one handler's serialization cost.

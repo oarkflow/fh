@@ -28,6 +28,7 @@ var ErrReplayStoreFull = errors.New("timestamp: replay store capacity exhausted"
 
 func New(cfg Config) (fh.HandlerFunc, func()) {
 	cfg = normalize(cfg)
+	var seenMu sync.Mutex
 	stop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -86,8 +87,11 @@ func New(cfg Config) (fh.HandlerFunc, func()) {
 			if ttl <= 0 {
 				return cfg.Reject(c, "request timestamp outside acceptable window")
 			}
-			seen, err := Seen(cfg.Store, key, ttl, cfg.MaxSize)
+			seen, err := seenWithLock(cfg.Store, &seenMu, key, ttl, cfg.MaxSize)
 			if err != nil {
+				if errors.Is(err, kv.ErrCapacityExceeded) {
+					return ErrReplayStoreFull
+				}
 				return err
 			}
 			if seen {
@@ -124,7 +128,11 @@ func normalize(cfg Config) Config {
 		// accounting for Seen's reject-when-full policy is exact via Len()
 		// regardless of shard count, but a single shard keeps every access
 		// serialized the same way the original's own mutex did.
-		cfg.Store = kv.NewMemoryStore(kv.WithShardCount(1))
+		cfg.Store = kv.NewMemoryStore(
+			kv.WithShardCount(1),
+			kv.WithMaxEntries(cfg.MaxSize),
+			kv.WithRejectWhenFull(),
+		)
 	}
 	if cfg.KeyFunc == nil {
 		cfg.KeyFunc = func(c fh.Ctx) string {
@@ -147,8 +155,30 @@ func normalize(cfg Config) Config {
 var seenMarker = []byte{1}
 
 func Seen(store kv.Store, key string, ttl time.Duration, maxSize int) (bool, error) {
+	return seenWithLock(store, nil, key, ttl, maxSize)
+}
+
+func seenWithLock(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxSize int) (bool, error) {
 	if maxSize <= 0 {
 		maxSize = 100000
+	}
+	if bounded, ok := store.(interface{ CapacityLimit() int }); ok && bounded.CapacityLimit() > 0 && bounded.CapacityLimit() <= maxSize {
+		var seen bool
+		err := store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+			seen = exists
+			if exists {
+				return nil, 0, false, nil
+			}
+			return seenMarker, ttl, true, nil
+		})
+		if errors.Is(err, kv.ErrCapacityExceeded) {
+			return false, ErrReplayStoreFull
+		}
+		return seen, err
+	}
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
 	}
 	_, exists, err := store.Get(key)
 	if err != nil {
@@ -168,8 +198,16 @@ func Seen(store kv.Store, key string, ttl time.Duration, maxSize int) (bool, err
 		return false, ErrReplayStoreFull
 	}
 
-	if err := store.Set(key, seenMarker, ttl); err != nil {
-		return false, err
+	var seen bool
+	err = store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		seen = exists
+		if exists {
+			return nil, 0, false, nil
+		}
+		return seenMarker, ttl, true, nil
+	})
+	if errors.Is(err, kv.ErrCapacityExceeded) {
+		return false, ErrReplayStoreFull
 	}
-	return false, nil
+	return seen, err
 }

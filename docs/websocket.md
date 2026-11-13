@@ -87,6 +87,14 @@ setters and `SetReadLimit`.
 subscriptions, request/ack correlation, bounded writer queues, authorization,
 presence and metrics.
 
+The hub defaults to at most 10,000 clients and 100,000 total subscriptions,
+in addition to the per-client subscription cap. Per-client metadata is limited
+to 64 entries and 16 KiB total. Configure `MaxClients`,
+`MaxTotalSubscriptions`, `MaxMetadataEntries`, and `MaxMetadataBytes` for the
+expected workload; capacity exhaustion rejects a new client or subscription.
+Outbound payload buffering is limited to 1 MiB per client and 64 MiB across
+the hub by default (`MaxQueuedBytesPerClient` and `MaxTotalQueuedBytes`).
+
 ```go
 hub := websocket.NewEventHub(websocket.EventHubConfig{
     Auth: func(client *websocket.EventConn, env websocket.Envelope) error {
@@ -122,6 +130,15 @@ app.Get("/ws", hub.Handler(wsCfg, func(c fh.Ctx) map[string]string {
 _ = hub.BroadcastEvent("chat", "general", "chat.message", map[string]any{
     "text": "maintenance starts soon",
 })
+```
+
+Handler errors are reported to clients with a generic message by default so
+backend details stay private. To return an intentional client-safe message,
+use `websocket.NewEventError`; its optional cause remains available through
+`errors.Is` and `errors.As` without being sent in the error frame:
+
+```go
+return nil, websocket.NewEventError("invalid_message", "Text is required", nil)
 ```
 
 The client envelope protocol supports emit, subscribe, unsubscribe, ack,

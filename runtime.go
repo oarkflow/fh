@@ -36,10 +36,9 @@ func (a *App) RuntimeInfo() RuntimeInfo {
 
 func (a *App) IsDraining() bool { return a != nil && a.draining.Load() }
 
-// EnableHealth mounts liveness/readiness routes. /ready surfaces raw
-// health-check error strings (which can include DSNs or internal
-// hostnames), so in deployments reachable from outside a trusted network,
-// pass an auth middleware.
+// EnableHealth mounts liveness/readiness routes. The built-in readiness
+// response reports aggregate status only; use HealthStatus directly for
+// detailed diagnostics and protect any endpoint that exposes those details.
 func (a *App) EnableHealth(prefix string, middleware ...HandlerFunc) *App {
 	if prefix == "" {
 		prefix = "/_fh"
@@ -51,19 +50,19 @@ func (a *App) EnableHealth(prefix string, middleware ...HandlerFunc) *App {
 		if a.IsDraining() {
 			return c.Status(StatusServiceUnavailable).JSON(Map{"status": "draining"})
 		}
-		ready, checks := a.HealthStatus(c.Context())
+		ready, _ := a.HealthStatus(c.Context())
 		if !ready {
-			return c.Status(StatusServiceUnavailable).JSON(Map{"status": "unready", "checks": checks})
+			return c.Status(StatusServiceUnavailable).JSON(Map{"status": "unready"})
 		}
-		return c.JSON(Map{"status": "ready", "checks": checks})
+		return c.JSON(Map{"status": "ready"})
 	})...)
 	return a
 }
 
 // EnableRuntime mounts runtime/route-table/queue-stats introspection routes.
-// /routes exposes the full route table annotated with which routes require
-// auth — a reconnaissance map for an attacker — so pass an auth middleware
-// in any deployment reachable from outside a trusted network.
+// /runtime and /routes expose operational details, including health-check
+// diagnostics and the route table, so pass an auth middleware in deployments
+// reachable from outside a trusted network.
 func (a *App) EnableRuntime(prefix string, middleware ...HandlerFunc) *App {
 	if prefix == "" {
 		prefix = "/_fh"

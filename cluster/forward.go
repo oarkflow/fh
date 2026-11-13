@@ -35,51 +35,51 @@ func (f *AuthenticatedForwarder) Handler() http.Handler {
 			return
 		}
 		if f.NodeID == "" || f.Store == nil || f.HandlerFunc == nil {
-			http.Error(w, "not configured", 503)
+			http.Error(w, "not configured", http.StatusServiceUnavailable)
 			return
 		}
 		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
-			http.Error(w, "mutual TLS required", 401)
+			http.Error(w, "mutual TLS required", http.StatusUnauthorized)
 			return
 		}
 		source := r.Header.Get("X-MIRA-Source")
 		if source == "" || source != r.TLS.PeerCertificates[0].Subject.CommonName {
-			http.Error(w, "untrusted forwarding identity", 403)
+			http.Error(w, "untrusted forwarding identity", http.StatusForbidden)
 			return
 		}
 		if _, ok := f.Peers[source]; !ok {
-			http.Error(w, "unknown node", 403)
+			http.Error(w, "unknown node", http.StatusForbidden)
 			return
 		}
 		identity := r.Header.Get("X-MIRA-Identity")
 		operation := r.Header.Get("X-MIRA-Operation")
 		if identity == "" || len(identity) > 256 || len(operation) < 8 || len(operation) > 256 {
-			http.Error(w, "invalid routing metadata", 400)
+			http.Error(w, "invalid routing metadata", http.StatusBadRequest)
 			return
 		}
 		fence, err := strconv.ParseUint(r.Header.Get("X-MIRA-Fence"), 10, 64)
 		if err != nil || fence == 0 {
-			http.Error(w, "invalid fence", 400)
+			http.Error(w, "invalid fence", http.StatusBadRequest)
 			return
 		}
 		lease, err := f.Store.Current(r.Context(), identity)
 		if err != nil || lease.Owner != f.NodeID || lease.Fence != fence {
-			http.Error(w, "ownership changed", 409)
+			http.Error(w, "ownership changed", http.StatusConflict)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxForward)
 		payload, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "oversized forwarding request", 413)
+			http.Error(w, "oversized forwarding request", http.StatusRequestEntityTooLarge)
 			return
 		}
 		out, err := f.HandlerFunc(r.Context(), identity, operation, payload)
 		if err != nil {
-			http.Error(w, "forwarded operation failed", 502)
+			http.Error(w, "forwarded operation failed", http.StatusBadGateway)
 			return
 		}
 		if len(out) > maxForward {
-			http.Error(w, "oversized response", 502)
+			http.Error(w, "oversized response", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")

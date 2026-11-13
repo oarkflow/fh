@@ -136,13 +136,13 @@ public pins but must still be distributed with integrity.
 ## Build a trusted production bundle
 
 Requires [TinyGo](https://tinygo.org) and Binaryen's `wasm-opt` (`brew install
-tinygo binaryen`). This project requires Go 1.27.3. Use a TinyGo release whose
-compatibility matrix includes Go 1.27 (TinyGo 0.44.x) and put Go 1.27.3 first
+tinygo binaryen`). This project requires Go 1.27.4. Use a TinyGo release whose
+compatibility matrix includes Go 1.27 (TinyGo 0.44.x) and put Go 1.27.4 first
 on PATH for this target:
 
 ```sh
-go install golang.org/dl/go1.27.3@latest && go1.27.3 download
-PATH="$(go1.27.3 env GOROOT)/bin:$PATH"
+go install golang.org/dl/go1.27.4@latest && go1.27.4 download
+PATH="$(go1.27.4 env GOROOT)/bin:$PATH"
 ```
 
 Use the external browser origin and key IDs that exactly match the server:

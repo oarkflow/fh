@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -325,29 +326,31 @@ type DefaultCtx struct {
 	// contexts from the HTTP/1 connection-owned buffer. A keep-alive connection
 	// processes requests serially, so its response buffer can be reused without
 	// a sync.Pool round trip on every request.
-	writeBufPooled  bool
-	connectionOwned bool
+	writeBufPooled   bool
+	connectionOwned  bool
+	poolClean        bool
+	inFlightReserved bool
 
 	queryParsed bool
 	queryParams []Param
 	qcount      int
 
-	responseCookies      []Cookie
-	responseTime         time.Time
-	beforeResponse       []func(Ctx) error
-	beforeRan            bool
-	multipartForm        *MultipartForm
-	multipartErr         error
-	multipartParsed      bool
-	captureResponseBody  bool
-	bodyParserMapPtr     uintptr
-	bodyParserRawJSON    []byte
-	requestBodyStream    *requestBodyStream
-	requestBodyStreamErr error
-	requestBodyReader    io.Reader
-	requestBodyOverride  io.Reader
-	requestBodyLimit     *boundedRequestReader
-	flags                uint32
+	responseCookies             []Cookie
+	responseTime                time.Time
+	beforeResponse              []func(Ctx) error
+	beforeRan                   bool
+	multipartForm               *MultipartForm
+	multipartErr                error
+	multipartParsed             bool
+	captureResponseBody         bool
+	requestBodyStream           *requestBodyStream
+	requestBodyStreamErr        error
+	requestBodyReader           io.Reader
+	requestBodyOverride         io.Reader
+	requestBodyLimit            *boundedRequestReader
+	requestBodyMaxLimit         int64
+	requestBodyBufferedReserved int64
+	flags                       uint32
 }
 
 type localEntry struct {
@@ -373,12 +376,22 @@ var ctxPool = sync.Pool{
 	},
 }
 
+const maxPooledOriginalURLBytes = 16 << 10
+
 func acquireCtx(conn net.Conn, app *App) *DefaultCtx {
 	c := ctxPool.Get().(*DefaultCtx)
 	c.conn = conn
 	c.server = app
 	c.connectionOwned = false
-	c.reset()
+	if c.poolClean {
+		c.poolClean = false
+		c.captureResponseBody = app != nil && app.cfg.CaptureResponseBody
+		if c.captureResponseBody {
+			c.flags |= ctxFlagCaptureBody
+		}
+	} else {
+		c.reset()
+	}
 	return c
 }
 
@@ -407,6 +420,8 @@ func acquireHTTP1Ctx(conn net.Conn, app *App, state *connState) *DefaultCtx {
 
 func releaseCtx(c *DefaultCtx) {
 	c.releaseResponseBody()
+	c.releaseRequestBody()
+	c.clearRequestBody()
 	if c.writeBuf != nil {
 		if c.writeBufPooled {
 			putBytes(c.writeBuf)
@@ -415,55 +430,208 @@ func releaseCtx(c *DefaultCtx) {
 		c.writeBufPooled = false
 	}
 	if !c.connectionOwned {
+		// A context may sit in sync.Pool until the next request (or be dropped
+		// nondeterministically by the runtime). Do not let the idle pool retain
+		// request bodies, a closed socket, TLS state, or an entire App graph.
+		c.clearForPool()
+		c.conn = nil
+		c.server = nil
 		ctxPool.Put(c)
 	}
 }
 
+func (c *DefaultCtx) clearRequestBody() {
+	c.body = nil
+	c.requestBodyStream = nil
+	c.requestBodyStreamErr = nil
+	c.requestBodyReader = nil
+	c.requestBodyOverride = nil
+	c.requestBodyLimit = nil
+	c.requestBodyMaxLimit = 0
+	c.requestBodyBufferedReserved = 0
+}
+
+func (c *DefaultCtx) clearForPool() {
+	c.Header.reset()
+	c.clearRequestBody()
+	if cap(c.responseBody) > maxPooledBytesCap {
+		c.responseBody = nil
+	} else {
+		c.responseBody = c.responseBody[:0]
+	}
+	c.contentType = nil
+	c.upgradeBuffered = nil
+	c.originalURI = nil
+	c.bodyTransform = nil
+	c.streamTransform = nil
+	c.h2 = nil
+	c.requestContext = context.Background()
+	c.multipartForm = nil
+	c.multipartErr = nil
+	c.multipartParsed = false
+	c.handlers = nil
+	c.handlerIndex = 0
+	c.cachedIP = ""
+	c.flags = 0
+	c.inFlightReserved = false
+	c.captureResponseBody = false
+	c.queryParsed = false
+	c.qcount = 0
+	c.responseTime = time.Time{}
+	c.beforeRan = false
+	c.status = 200
+	c.responded = false
+	c.forceClose = false
+	c.upgraded = false
+	clear(c.params)
+	if cap(c.params) > 64 {
+		c.params = nil
+	} else {
+		c.params = c.params[:0]
+	}
+	clear(c.queryParams)
+	if cap(c.queryParams) > 256 {
+		c.queryParams = nil
+	} else {
+		c.queryParams = c.queryParams[:0]
+	}
+	clear(c.customHeaders[:c.chCount])
+	c.chCount = 0
+	clear(c.extraHeaders)
+	if cap(c.extraHeaders) > 64 {
+		c.extraHeaders = nil
+	} else {
+		c.extraHeaders = c.extraHeaders[:0]
+	}
+	clear(c.trailers)
+	if cap(c.trailers) > 64 {
+		c.trailers = nil
+	} else {
+		c.trailers = c.trailers[:0]
+	}
+	clear(c.responseTrailers)
+	if cap(c.responseTrailers) > 64 {
+		c.responseTrailers = nil
+	} else {
+		c.responseTrailers = c.responseTrailers[:0]
+	}
+	clear(c.responseCookies)
+	if cap(c.responseCookies) > 32 {
+		c.responseCookies = nil
+	} else {
+		c.responseCookies = c.responseCookies[:0]
+	}
+	clear(c.beforeResponse)
+	if cap(c.beforeResponse) > 64 {
+		c.beforeResponse = nil
+	} else {
+		c.beforeResponse = c.beforeResponse[:0]
+	}
+	clear(c.locals[:c.lcount])
+	c.lcount = 0
+	if len(c.localOverflow) > 64 {
+		c.localOverflow = nil
+	} else {
+		clear(c.localOverflow)
+	}
+	c.poolClean = true
+}
+
 func (c *DefaultCtx) reset() {
+	c.poolClean = false
 	c.releaseResponseBody()
+	c.releaseRequestBody()
 	retainConnectionRefs := c.connectionOwned && c.server != nil && c.server.fastHTTP1
 	if retainConnectionRefs {
 		c.Header.resetRetained()
 	} else {
 		c.Header.reset()
 	}
-	c.params = c.params[:0]
+	clear(c.params)
+	if cap(c.params) > 64 {
+		c.params = nil
+	} else {
+		c.params = c.params[:0]
+	}
 	c.status = 200
-	if c.chCount > 0 && !retainConnectionRefs {
+	if c.chCount > 0 {
 		clear(c.customHeaders[:c.chCount])
 	}
 	c.chCount = 0
-	c.extraHeaders = c.extraHeaders[:0]
-	c.body = nil
-	c.responseBody = c.responseBody[:0]
+	clear(c.extraHeaders)
+	if cap(c.extraHeaders) > 64 {
+		c.extraHeaders = nil
+	} else {
+		c.extraHeaders = c.extraHeaders[:0]
+	}
+	c.clearRequestBody()
+	if cap(c.responseBody) > maxPooledBytesCap {
+		c.responseBody = nil
+	} else {
+		c.responseBody = c.responseBody[:0]
+	}
 	c.contentType = nil
 	c.responded = false
 	c.forceClose = false
 	c.upgraded = false
+	c.inFlightReserved = false
 	c.upgradeBuffered = nil
-	c.trailers = c.trailers[:0]
-	c.responseTrailers = c.responseTrailers[:0]
+	clear(c.trailers)
+	if cap(c.trailers) > 64 {
+		c.trailers = nil
+	} else {
+		c.trailers = c.trailers[:0]
+	}
+	clear(c.responseTrailers)
+	if cap(c.responseTrailers) > 64 {
+		c.responseTrailers = nil
+	} else {
+		c.responseTrailers = c.responseTrailers[:0]
+	}
 	c.requestContext = context.Background()
-	c.originalURI = c.originalURI[:0]
+	if cap(c.originalURI) > maxPooledOriginalURLBytes {
+		c.originalURI = nil
+	} else {
+		c.originalURI = c.originalURI[:0]
+	}
 	c.bodyTransform = nil
 	c.streamTransform = nil
 	c.h2 = nil
-	if c.lcount > 0 && !retainConnectionRefs {
+	if c.lcount > 0 {
 		clear(c.locals[:c.lcount])
 	}
 	c.lcount = 0
 	if len(c.localOverflow) > 0 {
-		clear(c.localOverflow)
+		if len(c.localOverflow) > 64 {
+			c.localOverflow = nil
+		} else {
+			clear(c.localOverflow)
+		}
 	}
 	c.queryParsed = false
 	c.qcount = 0
-	c.queryParams = c.queryParams[:0]
+	clear(c.queryParams)
+	if cap(c.queryParams) > 256 {
+		c.queryParams = nil
+	} else {
+		c.queryParams = c.queryParams[:0]
+	}
 	c.handlers = nil
 	c.handlerIndex = 0
 	c.cachedIP = ""
-	c.responseCookies = c.responseCookies[:0]
+	clear(c.responseCookies)
+	if cap(c.responseCookies) > 32 {
+		c.responseCookies = nil
+	} else {
+		c.responseCookies = c.responseCookies[:0]
+	}
 	c.responseTime = time.Time{}
-	c.beforeResponse = c.beforeResponse[:0]
+	clear(c.beforeResponse)
+	if cap(c.beforeResponse) > 64 {
+		c.beforeResponse = nil
+	} else {
+		c.beforeResponse = c.beforeResponse[:0]
+	}
 	c.beforeRan = false
 	c.multipartForm = nil
 	c.multipartErr = nil
@@ -473,13 +641,6 @@ func (c *DefaultCtx) reset() {
 	if c.captureResponseBody {
 		c.flags |= ctxFlagCaptureBody
 	}
-	c.bodyParserMapPtr = 0
-	c.bodyParserRawJSON = nil
-	c.requestBodyStream = nil
-	c.requestBodyStreamErr = nil
-	c.requestBodyReader = nil
-	c.requestBodyOverride = nil
-	c.requestBodyLimit = nil
 }
 
 // CaptureResponseBody enables a stable in-request response body snapshot for
@@ -716,15 +877,38 @@ func (c *DefaultCtx) peekQuery(name string) (string, bool) {
 }
 
 func rawQueryKeyEqual(key []byte, name string) bool {
-	if len(key) != len(name) {
-		return false
-	}
-	for i := 0; i < len(name); i++ {
-		if key[i] != name[i] {
-			return false
+	if len(key) == len(name) {
+		equal := true
+		for i := range name {
+			if key[i] != name[i] || key[i] == '%' || key[i] == '+' {
+				equal = false
+				break
+			}
+		}
+		if equal {
+			return true
 		}
 	}
-	return true
+	// Match the decoding semantics used by parseQuery without allocating. This
+	// keeps Query and QueryParser consistent for escaped names and '+' spaces.
+	nameIndex := 0
+	for i := 0; i < len(key); i++ {
+		decoded := key[i]
+		if decoded == '+' {
+			decoded = ' '
+		} else if decoded == '%' && i+2 < len(key) {
+			h, l := unhexTable[key[i+1]], unhexTable[key[i+2]]
+			if h >= 0 && l >= 0 {
+				decoded = byte(h<<4 | l)
+				i += 2
+			}
+		}
+		if nameIndex >= len(name) || name[nameIndex] != decoded {
+			return false
+		}
+		nameIndex++
+	}
+	return nameIndex == len(name)
 }
 
 func (c *DefaultCtx) parseQuery() {
@@ -829,6 +1013,64 @@ func (c *DefaultCtx) ensureRequestBodyReader() error {
 	return nil
 }
 
+func (c *DefaultCtx) readRequestBody(reader io.Reader) ([]byte, error) {
+	if c.server == nil || c.server.cfg.MaxBufferedRequestBytes <= 0 {
+		return io.ReadAll(reader)
+	}
+	var body []byte
+	var buf [32 << 10]byte
+	var reserved int64
+	emptyReads := 0
+	for {
+		n, err := reader.Read(buf[:])
+		if n > 0 {
+			emptyReads = 0
+			needed := len(body) + n
+			if needed > cap(body) {
+				target := cap(body) * 2
+				if target < needed {
+					target = needed
+				}
+				// Prefer geometric growth when it fits the remaining process
+				// budget; otherwise reserve only the capacity this read needs.
+				current := c.server.bufferedRequestBytes.Load()
+				available := c.server.cfg.MaxBufferedRequestBytes - current
+				if int64(target)-reserved > available {
+					target = needed
+				}
+				if !c.server.tryReserveBufferedBody(int64(target) - reserved) {
+					if target == needed || !c.server.tryReserveBufferedBody(int64(needed)-reserved) {
+						c.server.bodyBudgetRejections.Add(1)
+						c.server.releaseBufferedBody(reserved)
+						return nil, ErrBufferedBodyBudget
+					}
+					target = needed
+				}
+				grown := make([]byte, len(body), target)
+				copy(grown, body)
+				body = grown
+				reserved = int64(target)
+			}
+			body = append(body, buf[:n]...)
+		}
+		if err != nil {
+			if err == io.EOF {
+				c.requestBodyBufferedReserved += reserved
+				return body, nil
+			}
+			c.server.releaseBufferedBody(reserved)
+			return nil, err
+		}
+		if n == 0 {
+			emptyReads++
+			if emptyReads >= 100 {
+				c.server.releaseBufferedBody(reserved)
+				return nil, io.ErrNoProgress
+			}
+		}
+	}
+}
+
 func (c *DefaultCtx) ensureRequestBody() error {
 	if c.body != nil {
 		return c.requestBodyStreamErr
@@ -838,7 +1080,7 @@ func (c *DefaultCtx) ensureRequestBody() error {
 		if c.requestBodyLimit != nil {
 			reader = c.requestBodyLimit
 		}
-		body, err := io.ReadAll(reader)
+		body, err := c.readRequestBody(reader)
 		c.body = body
 		c.requestBodyStreamErr = err
 		c.requestBodyOverride = bytes.NewReader(body)
@@ -855,7 +1097,7 @@ func (c *DefaultCtx) ensureRequestBody() error {
 		if c.requestBodyLimit != nil {
 			reader = c.requestBodyLimit
 		}
-		body, err := io.ReadAll(reader)
+		body, err := c.readRequestBody(reader)
 		c.body = body
 		c.requestBodyStreamErr = err
 		return err
@@ -870,7 +1112,7 @@ func (c *DefaultCtx) ensureRequestBody() error {
 	if c.requestBodyLimit != nil {
 		reader = c.requestBodyLimit
 	}
-	body, err := io.ReadAll(reader)
+	body, err := c.readRequestBody(reader)
 	c.body = body
 	c.requestBodyStreamErr = err
 	return err
@@ -948,7 +1190,7 @@ func (c *DefaultCtx) Trailer(name string) string {
 // chunked body (HTTP/1.1) or as trailing HEADERS (HTTP/2). The trailer
 // name should also be announced via the Trailer response header.
 func (c *DefaultCtx) SetTrailer(key, value string) {
-	if !validToken([]byte(key)) || strings.ContainsAny(value, "\x00\r\n") {
+	if !validToken([]byte(key)) || len(value) > maxHeaderValueLength || !validHeaderValue(value) {
 		return
 	}
 	if c.responseTrailers == nil {
@@ -984,15 +1226,6 @@ func (c *DefaultCtx) BodyParser(v any) error {
 	}
 	if err != nil {
 		return err
-	}
-	// Benchmark/common webhook path: BodyParser(&map[string]any) followed by
-	// c.JSON(body). Keep the parsed map identity so JSON can legally reuse the
-	// original raw JSON when the exact same map is written back unchanged. This
-	// preserves handler source parity while avoiding an unnecessary re-marshal on
-	// echo-style endpoints.
-	if m, ok := v.(*map[string]any); ok && m != nil && *m != nil && isJSONContentTypeBytes(c.Header.ContentType) {
-		c.bodyParserMapPtr = mapPointer(*m)
-		c.bodyParserRawJSON = c.body
 	}
 	return nil
 }
@@ -1158,10 +1391,10 @@ func (c *DefaultCtx) StatusCode() int {
 func (c *DefaultCtx) Set(key, value string) {
 	k := []byte(key)
 	v := []byte(value)
-	if !validToken(k) || strings.ContainsAny(value, "\x00\r\n") {
+	if !validToken(k) || !validHeaderValue(value) {
 		return
 	}
-	if len(v) > 16<<10 {
+	if len(v) > maxHeaderValueLength {
 		return
 	}
 	if bytesEqualFold(k, HeaderContentLengthBytes) || bytesEqualFold(k, HeaderTransferEncodingBytes) || bytesEqualFold(k, HeaderConnectionBytes) || bytesEqualFold(k, HeaderKeepAliveBytes) || bytesEqualFold(k, HeaderProxyAuthorizationBytes) || bytesEqualFold(k, HeaderTEBytes) || bytesEqualFold(k, HeaderTrailerBytes) || bytesEqualFold(k, HeaderUpgradeBytes) || bytesEqualFold(k, []byte("Proxy-Connection")) {
@@ -1225,12 +1458,16 @@ func (c *DefaultCtx) setStaticHeader(k, v []byte) {
 // Append adds a comma-separated response header value without replacing an
 // existing value. It is useful for fields such as Vary.
 func (c *DefaultCtx) Append(key, value string) {
-	if !validToken([]byte(key)) || strings.ContainsAny(value, "\x00\r\n") {
+	if !validToken([]byte(key)) || !validHeaderValue(value) {
 		return
 	}
 	for i := 0; i < c.chCount; i++ {
 		if bytesEqualFold(c.customHeaders[i].Key, []byte(key)) {
 			if !headerValueContainsToken(c.customHeaders[i].Value, value) {
+				currentLen := len(c.customHeaders[i].Value)
+				if currentLen > maxHeaderValueLength-2 || len(value) > maxHeaderValueLength-currentLen-2 {
+					return
+				}
 				c.customHeaders[i].Value = append(append(c.customHeaders[i].Value, ',', ' '), value...)
 			}
 			return
@@ -1239,6 +1476,10 @@ func (c *DefaultCtx) Append(key, value string) {
 	for i := range c.extraHeaders {
 		if bytesEqualFold(c.extraHeaders[i].Key, []byte(key)) {
 			if !headerValueContainsToken(c.extraHeaders[i].Value, value) {
+				currentLen := len(c.extraHeaders[i].Value)
+				if currentLen > maxHeaderValueLength-2 || len(value) > maxHeaderValueLength-currentLen-2 {
+					return
+				}
 				c.extraHeaders[i].Value = append(append(c.extraHeaders[i].Value, ',', ' '), value...)
 			}
 			return
@@ -1253,7 +1494,7 @@ func headerValueContainsToken(header []byte, token string) bool { return hasHead
 func (c *DefaultCtx) Responded() bool { return c.responded }
 
 func (c *DefaultCtx) Type(mime string) Ctx {
-	if strings.ContainsAny(mime, "\x00\r\n") {
+	if len(mime) > maxHeaderValueLength || !validHeaderValue(mime) {
 		return c
 	}
 	if c.server != nil && (c.server.cfg.Mode == ModeStrict || c.server.cfg.Mode == ModeEnterprise || c.server.cfg.Compliance.Strict) {
@@ -1335,7 +1576,7 @@ func (c *DefaultCtx) SendString(s string) error {
 }
 
 func (c *DefaultCtx) SetAltSvc(value string) Ctx {
-	if !strings.ContainsAny(value, "\x00\r\n") {
+	if validHeaderValue(value) {
 		c.Set(HeaderAltSvc, value)
 	}
 	return c
@@ -1368,9 +1609,6 @@ func (c *DefaultCtx) JSON(v any) error {
 	case Map:
 		return c.writeJSONMapStringAny(map[string]any(vv))
 	case map[string]any:
-		if c.bodyParserMapPtr != 0 && c.bodyParserMapPtr == mapPointer(vv) && jsonLooksObjectOrArray(c.bodyParserRawJSON) {
-			return c.EchoJSON()
-		}
 		return c.writeJSONMapStringAny(vv)
 	}
 	if supportsJSON(v) {
@@ -1410,6 +1648,9 @@ func (c *DefaultCtx) JSONAppend(fn JSONAppendFunc) error {
 // correct hot-path primitive for proxy, webhook, and raw echo endpoints; do not
 // decode and re-encode JSON just to return the same payload.
 func (c *DefaultCtx) EchoBody(contentType ...string) error {
+	if err := c.ensureRequestBody(); err != nil {
+		return err
+	}
 	if len(contentType) > 0 && contentType[0] != "" {
 		c.Type(contentType[0])
 	} else if len(c.Header.ContentType) > 0 {
@@ -1422,6 +1663,9 @@ func (c *DefaultCtx) EchoBody(contentType ...string) error {
 // validation for maximum throughput. Pass true to validate with the active JSON
 // engine before echoing.
 func (c *DefaultCtx) EchoJSON(validate ...bool) error {
+	if err := c.ensureRequestBody(); err != nil {
+		return err
+	}
 	if len(validate) > 0 && validate[0] && !CurrentJSONEngine().Valid(c.body) {
 		return BadRequest("Invalid JSON body")
 	}
@@ -1713,10 +1957,7 @@ func (c *DefaultCtx) writeJSONMapStringString(m map[string]string) error {
 	bp := jsonBytePool.Get().(*[]byte)
 	body := appendJSONMapStringString((*bp)[:0], m)
 	err := c.writeResponse(body)
-	if cap(body) <= 64<<10 {
-		*bp = body[:0]
-		jsonBytePool.Put(bp)
-	}
+	putJSONBuffer(bp, body)
 	return err
 }
 
@@ -1748,15 +1989,11 @@ func (c *DefaultCtx) writeJSONMapStringAny(m map[string]any) error {
 	bp := jsonBytePool.Get().(*[]byte)
 	body, err := appendJSONMapStringAny((*bp)[:0], m)
 	if err != nil {
-		*bp = body[:0]
-		jsonBytePool.Put(bp)
+		putJSONBuffer(bp, body)
 		return err
 	}
 	err = c.writeResponse(body)
-	if cap(body) <= 64<<10 {
-		*bp = body[:0]
-		jsonBytePool.Put(bp)
-	}
+	putJSONBuffer(bp, body)
 	return err
 }
 
@@ -1811,9 +2048,9 @@ func appendJSONValue(dst []byte, v any) ([]byte, error) {
 	case uint64:
 		return strconv.AppendUint(dst, x, 10), nil
 	case float32:
-		return strconv.AppendFloat(dst, float64(x), 'g', -1, 32), nil
+		return appendJSONFloat(dst, float64(x), 32)
 	case float64:
-		return strconv.AppendFloat(dst, x, 'g', -1, 64), nil
+		return appendJSONFloat(dst, x, 64)
 	case JSONAppender:
 		return x.AppendJSON(dst)
 	case JSONMarshaler:
@@ -1845,8 +2082,20 @@ func AppendJSONStringContentBytes(dst []byte, b []byte) []byte {
 
 func appendJSONStringContentBytes(dst []byte, b []byte) []byte {
 	start := 0
-	for i := 0; i < len(b); i++ {
+	for i := 0; i < len(b); {
 		c := b[i]
+		if c >= utf8.RuneSelf {
+			_, size := utf8.DecodeRune(b[i:])
+			if size == 1 {
+				dst = append(dst, b[start:i]...)
+				dst = append(dst, "\uFFFD"...)
+				i++
+				start = i
+				continue
+			}
+			i += size
+			continue
+		}
 		if c < 0x20 || c == '\\' || c == '"' {
 			dst = append(dst, b[start:i]...)
 			switch c {
@@ -1867,14 +2116,27 @@ func appendJSONStringContentBytes(dst []byte, b []byte) []byte {
 			}
 			start = i + 1
 		}
+		i++
 	}
 	return append(dst, b[start:]...)
 }
 
 func appendJSONStringContent(dst []byte, s string) []byte {
 	start := 0
-	for i := 0; i < len(s); i++ {
+	for i := 0; i < len(s); {
 		c := s[i]
+		if c >= utf8.RuneSelf {
+			_, size := utf8.DecodeRuneInString(s[i:])
+			if size == 1 {
+				dst = append(dst, s[start:i]...)
+				dst = append(dst, "\uFFFD"...)
+				i++
+				start = i
+				continue
+			}
+			i += size
+			continue
+		}
 		if c < 0x20 || c == '\\' || c == '"' {
 			dst = append(dst, s[start:i]...)
 			switch c {
@@ -1895,37 +2157,14 @@ func appendJSONStringContent(dst []byte, s string) []byte {
 			}
 			start = i + 1
 		}
+		i++
 	}
 	return append(dst, s[start:]...)
 }
 
 func appendJSONString(dst []byte, s string) []byte {
 	dst = append(dst, '"')
-	start := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < 0x20 || c == '\\' || c == '"' {
-			dst = append(dst, s[start:i]...)
-			switch c {
-			case '\\', '"':
-				dst = append(dst, '\\', c)
-			case '\b':
-				dst = append(dst, '\\', 'b')
-			case '\f':
-				dst = append(dst, '\\', 'f')
-			case '\n':
-				dst = append(dst, '\\', 'n')
-			case '\r':
-				dst = append(dst, '\\', 'r')
-			case '\t':
-				dst = append(dst, '\\', 't')
-			default:
-				dst = append(dst, '\\', 'u', '0', '0', hexLower[c>>4], hexLower[c&0x0f])
-			}
-			start = i + 1
-		}
-	}
-	dst = append(dst, s[start:]...)
+	dst = appendJSONStringContent(dst, s)
 	dst = append(dst, '"')
 	return dst
 }
@@ -1940,15 +2179,11 @@ func (c *DefaultCtx) writeJSONAppender(app JSONAppender) error {
 	body := (*bp)[:0]
 	out, err := app.AppendJSON(body)
 	if err != nil {
-		*bp = body[:0]
-		jsonBytePool.Put(bp)
+		putJSONBuffer(bp, body)
 		return err
 	}
 	err = c.writeResponse(out)
-	if cap(out) <= 64<<10 {
-		*bp = out[:0]
-		jsonBytePool.Put(bp)
-	}
+	putJSONBuffer(bp, out)
 	return err
 }
 
@@ -1997,7 +2232,7 @@ const growDirectJSONBufferBytes = 4096
 func (c *DefaultCtx) writeDirectJSONBytes200(base, out []byte) error {
 	c.responded = true
 	if len(out) < directHeaderCacheSize && (len(out) == 0 || &out[0] == &base[:directJSONHeaderReserve+1][directJSONHeaderReserve]) && !c.server.cfg.SendDateHeader &&
-		!c.server.cfg.SendKeepAliveHeader && c.Header.KeepAlive && !c.forceClose {
+		!c.server.cfg.SendKeepAliveHeader && c.server.cfg.ServerHeader == "" && c.Header.KeepAlive && !c.forceClose {
 		header := directJSON200Headers[len(out)]
 		start := directJSONHeaderReserve - len(header)
 		copy(base[start:directJSONHeaderReserve], header)
@@ -2191,7 +2426,7 @@ func (c *DefaultCtx) writeDirect200String(s string) error {
 	}
 	buf := (*c.writeBuf)[:0]
 	if len(s) < directHeaderCacheSize && !c.server.cfg.SendDateHeader &&
-		!c.server.cfg.SendKeepAliveHeader && c.Header.KeepAlive && !c.forceClose &&
+		!c.server.cfg.SendKeepAliveHeader && c.server.cfg.ServerHeader == "" && c.Header.KeepAlive && !c.forceClose &&
 		len(c.contentType) == len(plainTextCT) && len(c.contentType) > 0 && &c.contentType[0] == &plainTextCT[0] {
 		buf = append(buf, directPlain200Headers[len(s)]...)
 		buf = append(buf, s...)
@@ -2774,7 +3009,8 @@ func (c *DefaultCtx) Format(handlers map[string]HandlerFunc) error {
 
 // Range parses the Range request header for a resource of the given total size.
 // Returns nil, nil when no Range header is present (serve the full resource).
-// Returns a 416 error when the header is present but unsatisfiable.
+// Returns a 416 error when the header is present but unsatisfiable or requests
+// more than the default 16 ranges.
 func (c *DefaultCtx) Range(size int64) ([]ByteRange, error) {
 	header := c.Get(HeaderRange)
 	if header == "" {
@@ -2785,13 +3021,26 @@ func (c *DefaultCtx) Range(size int64) ([]ByteRange, error) {
 
 // parseRangeHeader parses an RFC 9110 Range: bytes=... header value.
 func parseRangeHeader(header string, size int64) ([]ByteRange, error) {
+	return parseRangeHeaderLimit(header, size, defaultMaxStaticRanges)
+}
+
+func parseRangeHeaderLimit(header string, size int64, maxRanges int) ([]ByteRange, error) {
 	const prefix = "bytes="
 	if !strings.HasPrefix(header, prefix) {
 		return nil, NewHTTPError(StatusRangeNotSatisfiable, "RANGE_NOT_SATISFIABLE", "unsupported range unit")
 	}
 	spec := header[len(prefix):]
+	if maxRanges <= 0 {
+		maxRanges = defaultMaxStaticRanges
+	}
 	var ranges []ByteRange
-	for _, part := range strings.Split(spec, ",") {
+	for len(spec) > 0 {
+		part := spec
+		if comma := strings.IndexByte(spec, ','); comma >= 0 {
+			part, spec = spec[:comma], spec[comma+1:]
+		} else {
+			spec = ""
+		}
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -2834,6 +3083,9 @@ func parseRangeHeader(header string, size int64) ([]ByteRange, error) {
 		}
 		if end >= size {
 			end = size - 1
+		}
+		if len(ranges) >= maxRanges {
+			return nil, NewHTTPError(StatusRangeNotSatisfiable, "RANGE_NOT_SATISFIABLE", "too many ranges")
 		}
 		ranges = append(ranges, ByteRange{Start: start, End: end})
 	}

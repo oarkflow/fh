@@ -9,15 +9,21 @@ import (
 	"github.com/oarkflow/fh/pkg/storage/kv"
 )
 
-var ErrStoreFull = errors.New("replay: store capacity exhausted")
+var (
+	ErrStoreFull   = errors.New("replay: store capacity exhausted")
+	ErrKeyTooLarge = errors.New("replay: key exceeds maximum size")
+)
+
+const defaultMaxKeyBytes = 256
 
 type Config struct {
-	Header     string
-	TTL        time.Duration
-	MaxEntries int
-	Store      kv.Store
-	Key        func(fh.Ctx) string
-	Next       func(fh.Ctx) bool
+	Header      string
+	TTL         time.Duration
+	MaxEntries  int
+	MaxKeyBytes int
+	Store       kv.Store
+	Key         func(fh.Ctx) string
+	Next        func(fh.Ctx) bool
 }
 
 func New(config Config) fh.HandlerFunc {
@@ -27,8 +33,18 @@ func New(config Config) fh.HandlerFunc {
 	if config.TTL <= 0 {
 		config.TTL = 5 * time.Minute
 	}
+	if config.MaxEntries <= 0 {
+		config.MaxEntries = 100000
+	}
+	if config.MaxKeyBytes <= 0 {
+		config.MaxKeyBytes = defaultMaxKeyBytes
+	}
 	if config.Store == nil {
-		config.Store = kv.NewMemoryStore(kv.WithShardCount(1))
+		config.Store = kv.NewMemoryStore(
+			kv.WithShardCount(256),
+			kv.WithMaxEntries(config.MaxEntries),
+			kv.WithRejectWhenFull(),
+		)
 	}
 	var replayMu sync.Mutex
 	return func(c fh.Ctx) error {
@@ -44,7 +60,10 @@ func New(config Config) fh.HandlerFunc {
 		if key == "" {
 			return fh.NewHTTPError(fh.StatusBadRequest, "REPLAY_KEY_MISSING", "replay nonce is missing")
 		}
-		seen, err := Seen(config.Store, &replayMu, key, config.TTL, config.MaxEntries)
+		if len(key) > config.MaxKeyBytes {
+			return fh.NewHTTPError(fh.StatusBadRequest, "REPLAY_KEY_TOO_LARGE", "replay key is too long")
+		}
+		seen, err := seen(config.Store, &replayMu, key, config.TTL, config.MaxEntries, config.MaxKeyBytes)
 		if err != nil {
 			return err
 		}
@@ -56,8 +75,29 @@ func New(config Config) fh.HandlerFunc {
 }
 
 func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxEntries int) (bool, error) {
+	return seen(store, mu, key, ttl, maxEntries, defaultMaxKeyBytes)
+}
+
+func seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxEntries, maxKeyBytes int) (bool, error) {
+	if len(key) > maxKeyBytes {
+		return false, ErrKeyTooLarge
+	}
 	if maxEntries <= 0 {
 		maxEntries = 100000
+	}
+	if bounded, ok := store.(interface{ CapacityLimit() int }); ok && bounded.CapacityLimit() > 0 && bounded.CapacityLimit() <= maxEntries {
+		var seen bool
+		err := store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+			seen = exists
+			if exists {
+				return nil, 0, false, nil
+			}
+			return []byte{1}, ttl, true, nil
+		})
+		if errors.Is(err, kv.ErrCapacityExceeded) {
+			return false, ErrStoreFull
+		}
+		return seen, err
 	}
 	if mu != nil {
 		mu.Lock()
@@ -75,8 +115,13 @@ func Seen(store kv.Store, mu *sync.Mutex, key string, ttl time.Duration, maxEntr
 	if n >= maxEntries {
 		return false, ErrStoreFull
 	}
-	if err := store.Set(key, []byte{1}, ttl); err != nil {
-		return false, err
-	}
-	return false, nil
+	var seen bool
+	err = store.Mutate(key, func(current []byte, exists bool) ([]byte, time.Duration, bool, error) {
+		seen = exists
+		if exists {
+			return nil, 0, false, nil
+		}
+		return []byte{1}, ttl, true, nil
+	})
+	return seen, err
 }

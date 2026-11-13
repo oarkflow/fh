@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/benchmarks/servers/go/benchstats"
 )
 
 type user struct {
@@ -25,6 +26,10 @@ func benchmarkUsers() []user {
 }
 
 func main() {
+	addr := os.Getenv("FH_BENCH_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:3001"
+	}
 	opts := []fh.Option{
 		fh.WithDisableHTTP2(true),
 		fh.WithDisablePanicRecovery(true),
@@ -57,6 +62,7 @@ func main() {
 		return c.JSON(value)
 	})
 	app.Get("/users", func(c fh.Ctx) error { return c.JSON(users) })
+	app.Get("/__bench/stats", func(c fh.Ctx) error { return c.JSON(benchstats.Read()) })
 
 	if path := os.Getenv("FH_BENCH_CPU_PROFILE"); path != "" {
 		file, err := os.Create(path)
@@ -66,7 +72,7 @@ func main() {
 		if err := pprof.StartCPUProfile(file); err != nil {
 			log.Fatal(err)
 		}
-		err = app.ListenWithGracefulShutdown("127.0.0.1:3001")
+		err = app.ListenWithGracefulShutdown(addr)
 		pprof.StopCPUProfile()
 		_ = file.Close()
 		if err != nil {
@@ -74,5 +80,5 @@ func main() {
 		}
 		return
 	}
-	log.Fatal(app.Listen("127.0.0.1:3001"))
+	log.Fatal(app.Listen(addr))
 }

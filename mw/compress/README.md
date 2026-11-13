@@ -3,6 +3,8 @@
 ## What it does
 
 Compresses eligible responses when the client supports an accepted encoding. It reduces bandwidth for text, JSON, HTML, and other compressible payloads.
+Responses carry `Vary: Accept-Encoding` so shared caches distinguish compressed
+and uncompressed variants, including requests where compression is skipped.
 
 ## How to implement
 
@@ -34,4 +36,4 @@ Run late enough to see the response body, but avoid compressing already-compress
 
 ## Production considerations
 
-Set minimum body size. Disable or be careful for sensitive reflected content if BREACH-style risks apply. Do not compress images, archives, or already-compressed data.
+Set minimum body size. Breach protection is on by default, including when passing a partial `Config`; it skips requests carrying `Authorization`, `Proxy-Authorization`, or `Cookie`, and responses carrying `Set-Cookie`, `Content-Security-Policy`, or `Authorization`. To deliberately compress those responses, set `DisableBreachProtection: true` and assess BREACH-style side-channel risk for the endpoint. Do not compress images, archives, or already-compressed data.

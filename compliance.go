@@ -312,6 +312,18 @@ func applySecureDefaults(cfg *Config) {
 	if cfg.HTTP2IdleTimeout <= 0 || cfg.HTTP2IdleTimeout > 60*time.Second {
 		cfg.HTTP2IdleTimeout = 60 * time.Second
 	}
+	// Bound aggregate request-body buffering before dispatch. Per-request body
+	// limits and handler in-flight limits do not constrain bodies buffered while
+	// requests are still being received. Keep stricter caller budgets intact.
+	if cfg.MaxBufferedRequestBytes <= 0 || cfg.MaxBufferedRequestBytes > 64<<20 {
+		cfg.MaxBufferedRequestBytes = 64 << 20
+	}
+	// Bound aggregate intermediate response buffering from transforms and
+	// buffered streams; direct handler-owned response values remain application
+	// allocations and are not covered by this budget.
+	if cfg.MaxBufferedResponseBytes <= 0 || cfg.MaxBufferedResponseBytes > 64<<20 {
+		cfg.MaxBufferedResponseBytes = 64 << 20
+	}
 
 	// Defense-in-depth against slowloris-style goroutine/heap exhaustion and
 	// sudden request bursts, beyond what connection counts and timeouts catch.

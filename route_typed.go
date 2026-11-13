@@ -79,11 +79,11 @@ func (a *App) addTyped(method, path string, handler any, middleware ...HandlerFu
 		reqPtr := reflect.New(reqType)
 		if len(c.Body()) != 0 {
 			if err := c.BodyParser(reqPtr.Interface()); err != nil {
-				return c.Status(StatusBadRequest).JSON(StructuredError{Error: "invalid_body", Message: err.Error(), RequestID: requestIDFromCtx(c)})
+				return c.Status(StatusBadRequest).JSON(StructuredError{Error: "invalid_body", Message: "Invalid request body", RequestID: requestIDFromCtx(c)})
 			}
 		}
 		if err := bindTaggedFields(c, reqPtr.Elem()); err != nil {
-			return c.Status(StatusBadRequest).JSON(StructuredError{Error: "invalid_request", Message: err.Error(), RequestID: requestIDFromCtx(c)})
+			return c.Status(StatusBadRequest).JSON(StructuredError{Error: "invalid_request", Message: "Invalid request fields", RequestID: requestIDFromCtx(c)})
 		}
 		if err := ValidateStruct(reqPtr.Interface()); err != nil {
 			return typedValidationError(c, err)
@@ -228,7 +228,7 @@ func niceTypeName(t reflect.Type) string {
 	return t.Name()
 }
 func typedValidationError(c Ctx, err error) error {
-	se := StructuredError{Error: "validation_failed", Message: err.Error(), RequestID: requestIDFromCtx(c)}
+	se := StructuredError{Error: "validation_failed", Message: "Validation failed", RequestID: requestIDFromCtx(c)}
 	if ve, ok := err.(*ValidationError); ok {
 		se.Fields = ve.Fields
 	} else if ve, ok := err.(ValidationErrors); ok {

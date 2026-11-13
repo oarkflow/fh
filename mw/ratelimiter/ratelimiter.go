@@ -15,9 +15,17 @@ const (
 	HeaderRemaining  = "X-RateLimit-Remaining"
 	HeaderReset      = "X-RateLimit-Reset"
 	HeaderRetryAfter = "Retry-After"
+
+	// defaultMaxTrackedKeys bounds memory used by attacker-controlled client
+	// identities. Expired entries are reclaimed before live entries.
+	defaultMaxTrackedKeys = 100_000
 )
 
 var ErrLimitReached = errors.New("ratelimiter: limit reached")
+
+func failClosedStoreError(err error) bool {
+	return errors.Is(err, kv.ErrCapacityExceeded) || errors.Is(err, kv.ErrKeyTooLarge)
+}
 
 type KeyFunc func(ctx fh.Ctx) string
 
@@ -70,7 +78,16 @@ func New(config Config) fh.HandlerFunc {
 		now := time.Now()
 		result, err := Allow(cfg.Store, key, cfg.Max, cfg.Window, now)
 		if err != nil {
-			return err
+			if !failClosedStoreError(err) {
+				return err
+			}
+			result = Result{
+				Allowed:    false,
+				Limit:      cfg.Max,
+				Remaining:  0,
+				ResetAt:    now.Add(cfg.Window),
+				RetryAfter: cfg.Window,
+			}
 		}
 
 		if cfg.SendHeaders {
@@ -109,13 +126,21 @@ func normalize(cfg Config) Config {
 		}
 	}
 	if cfg.Store == nil {
-		cfg.Store = kv.NewMemoryStore(kv.WithShardCount(256))
+		cfg.Store = newDefaultStore()
 	}
 	if cfg.LimitReached == nil {
 		cfg.LimitReached = DefaultLimitReachedHandler
 	}
 
 	return cfg
+}
+
+func newDefaultStore() *kv.MemoryStore {
+	return kv.NewMemoryStore(
+		kv.WithShardCount(256),
+		kv.WithMaxEntries(defaultMaxTrackedKeys),
+		kv.WithRejectWhenFull(),
+	)
 }
 
 func DefaultLimitReachedHandler(ctx fh.Ctx, result Result) error {

@@ -3,6 +3,12 @@
 ## What it does
 
 Limits concurrent requests per tenant, preventing one tenant from consuming all server capacity.
+Tenant identifiers are limited to 256 bytes by default before being stored in
+the in-flight map; set `Config.MaxTenantIDBytes` to a different positive value
+for applications with longer trusted identifiers. Overlong identifiers are
+rejected with `400`. The map also tracks at most 10,000 distinct active tenants
+by default (`Config.MaxTenants`); a new tenant is rejected with `503` when that
+capacity is reached, while requests for tracked tenants can finish normally.
 
 ## How to implement
 

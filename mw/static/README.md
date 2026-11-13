@@ -35,3 +35,8 @@ Mount on specific prefixes before fallback routes. Pair with compression, ETag, 
 ## Production considerations
 
 Prevent directory traversal. Disable directory listing unless intentional. Use CDN/object storage for very high traffic assets.
+
+File responses are streamed with a fixed-size buffer instead of being loaded
+fully into memory. When browsing is enabled, `MaxBrowseEntries` bounds the
+listing (default 1000, maximum 10000); reads stop at the limit and the response
+indicates when results were truncated.

@@ -123,8 +123,35 @@ app.Post("/process", func(c fh.Ctx) error {
 ├── pending/     # Jobs waiting to be processed
 ├── processing/  # Jobs currently being processed
 ├── done/        # Completed jobs
-└── failed/      # Failed jobs after max retries
+├── failed/      # Failed jobs after max retries
+└── quarantine/  # Invalid or damaged records retained for inspection
 ```
+
+The file-backed queue requires its root and state directories to be private
+(`0700`) and its event log to be a regular private file (`0600`) on Unix-like
+systems. It rejects symlinked state directories and event logs. Queue job IDs
+are validated before they are used as file names. State changes sync both the
+job file and its containing directory; recovery keeps a persisted pending,
+completed, or failed transition when a crash occurred before the old
+processing file was removed. Windows permission enforcement depends on the
+directory ACL configured by the operator. Job contents are flushed on Windows,
+but directory-entry syncing is unavailable through Go's portable filesystem
+API there, so rename durability across sudden power loss depends on the
+filesystem and remains best-effort. `events.jsonl` is an observability log;
+the job-state files are authoritative. Event append failures are reported via
+`QueueLogError` (or stderr) and do not turn a successfully persisted enqueue
+into an ambiguous error response.
+
+Invalid, malformed, or symlinked job files encountered during claim or startup
+recovery are moved into `quarantine/` rather than deleted. They are excluded
+from worker processing and queue counts; inspect and remove them through
+operator-controlled maintenance.
+
+When retrying an enqueue after an uncertain network response, pass the same
+explicit job ID with the same job type, payload, headers, retry limit, priority,
+run time, and concurrency key. The file-backed queue treats that request as
+idempotent while the ID exists in any state; reusing the ID for different work
+returns `fh.ErrQueueJobIDConflict` instead of replacing the existing job.
 
 ### Worker Processing
 
@@ -135,13 +162,25 @@ app.Queue().Register("send-email", func(ctx context.Context, job *fh.QueueJob) e
 })
 ```
 
+A panic from a job handler is contained to that job and treated as a failed
+attempt. The worker remains available; normal retry limits and dead-letter
+handling still apply. Failed queue storage operations during retry or
+completion are reported through `QueueLogError`, or stderr when no logger is
+configured, so jobs left in `processing` are visible to operators.
+
 ### Job Features
 
 - **Priority:** Jobs can have priority levels
 - **Delayed Jobs:** Schedule jobs for future execution
-- **Concurrency Keys:** Limit concurrent processing by key
+- **Concurrency Keys:** Limit concurrent processing by key within one
+  `DurableQueue` instance. For multiple replicas, the SQL adapter persists
+  expiring key leases for PostgreSQL and MySQL. Other storage adapters must
+  explicitly support cross-replica key concurrency; the production deployment
+  gate rejects this option when the configured store does not provide that
+  capability. A job waiting for its key is deferred without consuming a handler
+  attempt by the built-in memory, file and SQL adapters.
 - **Max Attempts:** Configurable retry count with exponential backoff
-- **Crash Recovery:** On startup, processing jobs are moved back to pending
+- **File queue recovery:** On startup, interrupted processing jobs are moved back to pending
 
 ### Configuration
 
@@ -156,6 +195,31 @@ Reliability: fh.ReliabilityConfig{
     QueueConcurrencyLimitByKey: true,
 }
 ```
+
+The file queue is process-local and its startup recovery may return interrupted
+processing jobs to pending. For shared PostgreSQL or MySQL queues, use
+`pkg/storage/sql` and set `sqlstore.Config.QueueLeaseTTL` when opening the
+adapter (30 seconds by default). SQL claims increment `QueueJob.LeaseFence`,
+store an expiry using the database clock, and use that same clock to decide
+when pending jobs are due and to schedule retry backoff. Replicas do not make
+claim, expiry, or retry-delay decisions from their local clocks. PostgreSQL
+claimers use `FOR UPDATE SKIP LOCKED` to distribute concurrent work without
+waiting on another replica's candidate row. When `QueueConcurrencyLimitByKey` is
+enabled, SQL stores acquire a per-key lease tied to the claim fence and renew it
+with the job lease. Completion, retry and failure release the key lease in the
+same transaction as the job state change.
+Completion, retry and failure updates require the current unexpired
+fence. Any replica can atomically reclaim an expired claim when polling, so a
+worker crash does not wait for another replica to restart. Explicit recovery
+also only requeues expired claims. SQLite does not advertise the multi-replica
+capability.
+
+This provides at-least-once delivery. A handler may run again after a crash or
+lease loss. Make external effects idempotent; where effects share a database
+transaction, include `job.LeaseFence` in the write's ownership check. Direct
+users of `QueueStorage.Claim` must call `QueueLeaseRenewer.RenewLease` during
+long jobs themselves. Upgrade from a pre-lease SQL adapter with all old workers
+stopped, because those binaries cannot renew leases or enforce claim fences.
 
 ### Custom Queue Storage
 
@@ -223,6 +287,11 @@ failedJobs, err := queue.ListJobs(ctx, "failed", 100)
 err = queue.RetryFailed(ctx, jobID)
 err = queue.DiscardFailed(ctx, jobID)
 ```
+
+Queue job snapshots redact common credential fields in payload previews, header
+values, and failure text. Keep queue listing behind the same authorization and
+data-access controls as other operational endpoints; redaction cannot identify
+application-specific sensitive fields unless they use recognizable names.
 
 ---
 
@@ -333,6 +402,16 @@ func main() {
 ## Storage Backends
 
 fh's reliability runtime is storage-agnostic. File/directory persistence is the default, but production applications can plug in DBMS-backed stores by implementing these interfaces:
+
+The optional `pkg/storage/memory` adapters are process-local and non-durable.
+Their journal defaults to 50,000 entries and returns `memory.ErrJournalCapacity`
+when full; idempotency and queue entries are capped at 50,000 by default.
+The in-memory journal defaults to a 16 MiB retained-byte budget. The
+idempotency cache defaults to 64 MiB and drops a response from the cache when it
+cannot fit. The in-memory queue evicts its oldest job when full and defaults to
+a 64 MiB estimated retained-byte budget. `memory.NewWithConfig` can tune these
+limits. Use a durable backend when the journal or queued work must survive
+process restarts or capacity exhaustion.
 
 ```go
 type RequestJournalStore interface {

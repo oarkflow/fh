@@ -104,7 +104,28 @@ state := kv.NewMemoryProvider(
 ```
 
 This is fast and concurrency-safe but process-local and non-durable. In a
-multi-replica deployment, every replica has different state.
+multi-replica deployment, every replica has different state. Each namespace
+gets its own store and its own defaults: 100,000 entries, 8 MiB per value, and
+256 MiB of logical key/value bytes (Go map and allocator overhead is additional).
+The provider opens at most 256 namespaces by default; use
+`NewMemoryProviderWithMaxNamespaces` to set a different positive ceiling. The
+entry and byte limits are per namespace, so set them explicitly when opening
+many namespaces or when the process has a tighter memory budget:
+
+```go
+state := kv.NewMemoryProvider(
+    kv.WithMaxEntries(10_000),
+    kv.WithMaxMemoryBytes(32<<20),
+    kv.WithMaxValueBytes(1<<20),
+)
+```
+
+`WithMaxEntries` uses live-entry eviction by default when full. Add
+`WithRejectWhenFull()` for state where eviction would weaken a security
+control; writes then return `kv.ErrCapacityExceeded` at the entry cap. The byte
+budget always rejects writes that would exceed it. The byte budget is split
+evenly among a store's shards to avoid a global write lock, so skewed key
+distribution can hit one shard's quota while other shards still have room.
 
 ### Durable files
 
@@ -121,7 +142,18 @@ if err != nil {
 The provider creates a hashed directory per namespace with restrictive file
 permissions. It survives restarts on one host, but it is not a distributed
 store and should not be placed on a filesystem that lacks the required atomic
-rename and locking semantics.
+rename and locking semantics. Each namespace defaults to 100,000 entries,
+256 MiB of stored `.kv` file bytes, and 8 MiB per value; tune with
+`WithMaxFileEntries`, `WithMaxFileBytes`, and `WithMaxEntrySize`. Capacity is
+accounted in process, so use one provider/store instance per directory and
+never share that directory between processes. Existing files are scanned once
+when a store opens, and expired files are swept when a capacity limit is hit.
+The provider opens at most 256 namespaces by default; use
+`NewFileProviderWithMaxNamespaces` to set a different positive ceiling.
+Missing storage directories are created with mode `0700`; existing Unix
+directories must already have that mode. The constructors reject symlinks and
+do not change permissions on existing paths. On Windows, provision and verify
+the directory ACL outside fh because Go's permission bits do not expose it.
 
 ### Distributed: Redis and PostgreSQL (fh-contrib)
 
@@ -241,4 +273,3 @@ Before treating an external provider as production-ready, verify:
 - health/readiness signals and observable latency/error metrics;
 - provider shutdown while requests are draining;
 - contract, race, fault-injection and multi-process tests.
-

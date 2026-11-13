@@ -157,7 +157,11 @@ func (d *Decoder) Reset(maxDynTableSize uint32, emitFunc func(HeaderField)) {
 	d.emit = emitFunc
 	d.emitEnabled = true
 	d.firstField = true
+	if cap(d.saveBuf) > 0 {
+		clear(d.saveBuf[:cap(d.saveBuf)])
+	}
 	d.saveBuf = d.saveBuf[:0]
+	d.buf = nil
 	d.headerBytes = 0
 	d.maxStrLen = maxHeaderFieldSize
 	d.maxHeaderBytes = maxHeaderBlockSize
@@ -452,9 +456,14 @@ func (d *Decoder) decodeString(u undecodedStr) (string, error) {
 	var err error
 	*buf, err = huffmanDecode(*buf, d.maxStrLen, u.b)
 	s := string(*buf)
-	decodeBufPool.Put(buf)
+	if cap(*buf) <= maxPooledDecodeBufferBytes {
+		*buf = (*buf)[:0]
+		decodeBufPool.Put(buf)
+	}
 	return s, err
 }
+
+const maxPooledDecodeBufferBytes = 64 << 10
 
 // decodeBufPool recycles []byte scratch buffers for Huffman decoding.
 var decodeBufPool = sync.Pool{
@@ -709,12 +718,24 @@ func (p *DecoderPool) Get(emitFunc func(HeaderField)) *Decoder {
 	p.acquired.Add(1)
 	d := p.pool.Get().(*Decoder)
 	d.Reset(p.maxDynTable, emitFunc)
+	d.SetMaxStringLength(p.maxStrLen)
+	d.SetMaxHeaderBytes(p.maxHeaderBytes)
 	return d
 }
 
 // Put returns a Decoder to the pool. The emit function is cleared.
 // Callers must not use d after Put.
 func (p *DecoderPool) Put(d *Decoder) {
+	if d == nil {
+		return
+	}
+	// Reset at release so pooled decoders do not retain prior header values,
+	// callbacks, or the input frame while idle. Large continuation buffers are
+	// discarded instead of being kept by the process-wide pool.
+	d.Reset(p.maxDynTable, nil)
+	if cap(d.saveBuf) > maxPooledDecodeBufferBytes {
+		d.saveBuf = nil
+	}
 	d.emit = nil
 	p.released.Add(1)
 	p.pool.Put(d)

@@ -1,0 +1,180 @@
+name: fh source release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to package
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fh-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate-tag:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+    steps:
+      - name: Fetch release tags
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release tag
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$REF_NAME}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          commit="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out validated tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate-tag.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up the module Go version
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Compile and vet tagged source
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: Install Syft
+        env:
+          GOTOOLCHAIN: auto
+        run: go install github.com/anchore/syft/cmd/syft@v1.42.3
+
+      - name: Create reproducible release materials
+        env:
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.validate-tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release"
+          archive="$RUNNER_TEMP/release/fh-${RELEASE_TAG}-source.tar.gz"
+          git archive --format=tar --prefix="fh-${RELEASE_TAG}/" "$RELEASE_COMMIT" | gzip -n > "$archive"
+          syft dir:. --source-name fh --source-version "$RELEASE_TAG" -o "spdx-json=$RUNNER_TEMP/release/fh-${RELEASE_TAG}-sbom.spdx.json"
+          (
+            cd "$RUNNER_TEMP/release"
+            sha256sum "fh-${RELEASE_TAG}-source.tar.gz" "fh-${RELEASE_TAG}-sbom.spdx.json" > SHA256SUMS
+          )
+
+      - name: Transfer release materials
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fh-release-materials
+          path: ${{ runner.temp }}/release/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [validate-tag, build]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Retrieve release materials
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fh-release-materials
+          path: ${{ runner.temp }}/release
+
+      - name: Verify downloaded release materials
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/release
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob dotglob
+          files=("$RELEASE_DIR"/*)
+          expected=(
+            "$RELEASE_DIR/fh-${RELEASE_TAG}-source.tar.gz"
+            "$RELEASE_DIR/fh-${RELEASE_TAG}-sbom.spdx.json"
+            "$RELEASE_DIR/SHA256SUMS"
+          )
+          [[ "${#files[@]}" -eq "${#expected[@]}" ]]
+          for file in "${expected[@]}"; do
+            [[ -f "$file" && ! -L "$file" ]]
+          done
+          expected_sums="$(cd "$RELEASE_DIR" && sha256sum "fh-${RELEASE_TAG}-source.tar.gz" "fh-${RELEASE_TAG}-sbom.spdx.json")"
+          actual_sums="$(<"$RELEASE_DIR/SHA256SUMS")"
+          [[ "$actual_sums" == "$expected_sums" ]]
+
+      - name: Attest release files
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release/*
+
+      - name: Attest source archive SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release/fh-${{ needs.validate-tag.outputs.tag }}-source.tar.gz
+          sbom-path: ${{ runner.temp }}/release/fh-${{ needs.validate-tag.outputs.tag }}-sbom.spdx.json
+
+      - name: Verify published attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DIR: ${{ runner.temp }}/release
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for artifact in "$RELEASE_DIR"/*; do
+            gh attestation verify "$artifact" \
+              --repo "$REPOSITORY" \
+              --predicate-type https://slsa.dev/provenance/v1
+          done
+          gh attestation verify "$RELEASE_DIR/fh-${RELEASE_TAG}-source.tar.gz" \
+            --repo "$REPOSITORY" \
+            --predicate-type https://spdx.dev/Document/v2.3
+
+      - name: Confirm release tag is unchanged
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.validate-tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          current_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
+          [[ "$current_commit" == "$RELEASE_COMMIT" ]]
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --generate-notes --title "fh $RELEASE_TAG"

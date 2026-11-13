@@ -31,7 +31,7 @@ err := c.BodyParser(&user)
 // The client must send Content-Type: application/json.
 var user User
 if err := c.BodyParser(&user); err != nil {
-    return fh.NewHTTPError(fh.StatusBadRequest, "INVALID_BODY", err.Error())
+    return fh.WrapHTTPError(err, fh.StatusBadRequest, "INVALID_BODY", "Request body is invalid")
 }
 ```
 

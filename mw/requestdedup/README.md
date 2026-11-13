@@ -38,5 +38,8 @@ app.Post("/payments", dedup.Handler(), func(c fh.Ctx) error {
 |-------|------|---------|-------------|
 | Window | `time.Duration` | 5s | Time window for dedup detection |
 | MaxKeys | `int` | 10000 | Max tracked keys before LRU eviction |
+| MaxKeyBytes | `int` | 256 | Maximum custom key size in bytes; longer keys receive `400` |
+| MaxResponseHeaderCount | `int` | 64 | Maximum response headers retained per entry |
+| MaxResponseHeaderBytes | `int` | 16384 | Maximum response header bytes retained per entry; incomplete captures set `Entry.HeadersComplete` to false |
 | KeyFunc | `func(Ctx) string` | SHA-256(method+URL+body) | Custom key extraction |
 | OnDuplicate | `func(Ctx, *Entry) error` | 409 Conflict JSON | Custom duplicate handler |

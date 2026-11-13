@@ -519,9 +519,13 @@ func doRequest(ctx context.Context, client *http.Client, method, url string, bod
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	const maxBootstrapResponseBytes = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBootstrapResponseBytes+1))
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(data) > maxBootstrapResponseBytes {
+		return nil, nil, fmt.Errorf("bootstrap response exceeds %d bytes", maxBootstrapResponseBytes)
 	}
 	return resp, data, nil
 }

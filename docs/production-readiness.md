@@ -112,10 +112,26 @@ returns a startup error listing the missing controls. Direct mode accepts the
 fh TLS serving entrypoints (`ServeTLS`, `ListenTLS*`, and `ListenAutoTLS*`); an arbitrary
 caller-wrapped TLS listener is not identifiable to the gate.
 For multiple replicas the file queue and file idempotency store are rejected.
-A custom queue must also implement `MultiReplicaQueueStorage` and attest to
-atomic claims, fenced leases, and recovery that does not steal live jobs. The
-built-in SQL queue does not currently provide this capability; use a verified
-external adapter before enabling queue workers across replicas.
+A custom queue must also implement `MultiReplicaQueueStorage`, attest to atomic
+claims and safe recovery, and implement `QueueLeaseRenewer` with a positive TTL.
+When keyed concurrency is enabled, it must also implement
+`MultiReplicaQueueKeyConcurrencyStorage`, `QueueConcurrencyLeaseStorage`, and
+`QueueJobDeferrer`. The SQL queue advertises these capabilities for PostgreSQL
+and MySQL after `Migrate` has created its lease tables and columns. Configure
+`sqlstore.Config.QueueLeaseTTL` longer than the worst expected scheduler or
+database interruption, with margin. MySQL queue tables must use InnoDB; the
+adapter creates them with InnoDB and rejects existing queue tables using a
+non-transactional engine. SQLite intentionally does not pass
+the multi-replica gate. On a rolling upgrade from the older SQL queue, stop all
+old queue workers before migrating and restarting them: old binaries do not
+renew or check fences or concurrency-key leases. The database fence prevents
+stale workers from changing queue state, but applications must still make
+handler side effects idempotent or enforce the fence in their own transactional
+writes.
+`QueueConcurrencyLimitByKey` is process-local unless the storage adapter
+implements `MultiReplicaQueueKeyConcurrencyStorage` and `QueueJobDeferrer`; the
+deployment gate rejects multi-replica use of that option without both
+capabilities.
 Run `contracttest.RunQueue` and `contracttest.RunIdempotency` from the
 adapter's integration tests against its real shared backend. The fixtures
 exercise independent handles, concurrent claims, lease expiry, restart, and
@@ -145,12 +161,24 @@ prefaces to 4096 bytes, and drops bad peers individually. Tune
 `MaxPendingHandshakes` and `MaxHeaderBytes` for the trusted edge's connection
 pool and TLV usage.
 
-`WithMaxBufferedRequestBytes` adds an opt-in process-wide budget for request
-bodies buffered in memory by HTTP/1 and HTTP/2. Exceeding the budget rejects
-the request or resets its stream. Streaming bodies use transport flow control
-and are excluded from this buffered-body budget. Size the budget for expected
-concurrent uploads; it does not cap application allocations or decompressed
-payloads.
+`WithMaxBufferedRequestBytes` configures a process-wide budget for request
+bodies buffered in memory by HTTP/1 and HTTP/2. `SecureByDefault` uses a 64 MiB
+budget unless a stricter value is supplied. Exceeding the budget rejects the
+request or resets its stream. Unread streaming frames use transport flow
+control; bytes retained after a stream is consumed and middleware-produced
+replacement bodies, including decompressed payloads, count against this
+budget. Application allocations outside the request-body pipeline remain
+application-owned. Size the budget for expected concurrent uploads.
+
+`WithMaxBufferedResponseBytes` configures the process-wide budget for
+intermediate response bodies retained by body transforms and buffered response
+streams. `SecureByDefault` uses 64 MiB unless a stricter value is supplied.
+Direct response values created and retained by handlers are application-owned
+allocations and are not covered by this budget.
+
+Build and run the framework with Go 1.27.4 or later. The module pins this
+minimum because earlier Go 1.27 patches predate the November 2026 standard
+library and toolchain security fixes.
 
 Run the example and focused hardening checks with:
 
@@ -226,8 +254,28 @@ Also require:
    `make api-check BASELINE_REF=v1.0.0` locally for a specific baseline;
    review any reported changes because the source-level check is conservative;
 5. signed, reproducible release artifacts and an SBOM where policy
-   requires it — **not yet automated**; no release pipeline produces
-   artifacts yet, so treat this as a gap to close before cutting a v1.
+   requires it — after the GitLab release gate passes, manually dispatch
+   `.github/workflows/release.yml` from the default branch with the release
+   tag. Manually dispatch `.github/workflows/mira-release-v7.yml` from the
+   default branch with the MIRA release tag when publishing MIRA materials.
+   Both workflows validate the tag before building, keep
+   source compilation and packaging in a read-only job, and grant release and
+   attestation permissions only to a separate publishing job. The publisher
+   verifies provenance and the SBOM attestation, then confirms the remote tag
+   still resolves to the validated commit before publication. It packages the
+   tagged source as a reproducible archive, creates an SPDX SBOM and SHA-256
+   manifest, and publishes the attested files. Neither workflow has yet been
+   executed in this repository; verify its output and attestation results
+   before relying on it. The workflow does not establish that the tag itself
+   was signed by an authorized key; enforce tag protection and release
+   authorization in repository policy.
+
+The external production gates remain open: independent MIRA cryptographic
+review and penetration test, real WAN/path-MTU and long-soak evidence, live
+multi-node PostgreSQL failover validation, and operational failover/rollback
+drills. The evidence and acceptance criteria are in
+[`operations-drills.md`](operations-drills.md). Do not mark these complete
+from source inspection or simulated tests.
 
 ## Load and failure testing
 

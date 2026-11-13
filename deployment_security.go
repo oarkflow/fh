@@ -81,6 +81,16 @@ func (a *App) validateDeployment(_ net.Listener, tlsEnabled bool) error {
 			add(c.Reliability.QueueStorage != nil, "replace the process-local file queue with shared QueueStorage")
 			capable, ok := c.Reliability.QueueStorage.(MultiReplicaQueueStorage)
 			add(ok && capable.SupportsMultiReplica(), "shared queue must support atomic claims, fenced leases, and safe recovery")
+			renewer, canRenew := c.Reliability.QueueStorage.(QueueLeaseRenewer)
+			add(canRenew && renewer.LeaseTTL() > 0, "shared queue must renew active claim leases")
+			if c.Reliability.QueueConcurrencyLimitByKey {
+				keyCapable, ok := c.Reliability.QueueStorage.(MultiReplicaQueueKeyConcurrencyStorage)
+				add(ok && keyCapable.SupportsMultiReplicaKeyConcurrency(), "shared queue must enforce concurrency keys across replicas")
+				_, canLeaseKey := c.Reliability.QueueStorage.(QueueConcurrencyLeaseStorage)
+				add(canLeaseKey, "shared queue must acquire fenced concurrency-key leases")
+				_, canDefer := c.Reliability.QueueStorage.(QueueJobDeferrer)
+				add(canDefer, "shared queue must defer key contention without consuming handler attempts")
+			}
 		}
 		if c.Reliability.Enabled && (c.Reliability.IdempotencyEnabled || defaultReliability) {
 			add(g.SharedIdempotency, "confirm shared idempotency storage across replicas")

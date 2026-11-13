@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -109,5 +110,106 @@ func TestDeflateEncoderDirect(t *testing.T) {
 	}
 	if string(out) != string(src) {
 		t.Errorf("expected %q, got %q", string(src), string(out))
+	}
+}
+
+func TestBreachProtectionSurvivesPartialConfig(t *testing.T) {
+	payload := strings.Repeat("private response text ", 40)
+	for _, tc := range []struct {
+		name       string
+		config     *Config
+		compressed bool
+	}{
+		{name: "defaults", config: nil, compressed: false},
+		{name: "partial config", config: &Config{MinSize: 10}, compressed: false},
+		{name: "explicit opt out", config: &Config{MinSize: 10, DisableBreachProtection: true}, compressed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := fh.New()
+			if tc.config == nil {
+				app.Use(New())
+			} else {
+				app.Use(New(*tc.config))
+			}
+			app.Get("/private", func(c fh.Ctx) error {
+				c.Set("Set-Cookie", "session=secret; HttpOnly")
+				return c.SendString(payload)
+			})
+			req := httptest.NewRequest("GET", "/private", nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			gotCompressed := resp.Header.Get("Content-Encoding") == "gzip"
+			if gotCompressed != tc.compressed {
+				t.Fatalf("Content-Encoding = %q, want compressed=%v", resp.Header.Get("Content-Encoding"), tc.compressed)
+			}
+		})
+	}
+}
+
+func TestAcceptEncodingExplicitQualityOverridesWildcard(t *testing.T) {
+	for _, tc := range []struct {
+		header string
+		gzipQ  float64
+		defQ   float64
+		want   string
+	}{
+		{header: "*;q=1, gzip;q=0", gzipQ: 0, defQ: 1, want: EncodingDeflate},
+		{header: "gzip;q=0, *;q=1", gzipQ: 0, defQ: 1, want: EncodingDeflate},
+		{header: "gzip;q=0.5, deflate;q=0.9", gzipQ: 0.5, defQ: 0.9, want: EncodingDeflate},
+		{header: "gzip;q=1.001, *;q=1", gzipQ: 0, defQ: 1, want: EncodingDeflate},
+		{header: "gzip;q=1, gzip;q=0", gzipQ: 0, defQ: 0, want: ""},
+		{header: "gzip;q=.5", gzipQ: 0, defQ: 0, want: ""},
+	} {
+		t.Run(tc.header, func(t *testing.T) {
+			if got := encodingQuality(tc.header, "gzip"); got != tc.gzipQ {
+				t.Errorf("gzip quality = %v, want %v", got, tc.gzipQ)
+			}
+			if got := encodingQuality(tc.header, "deflate"); got != tc.defQ {
+				t.Errorf("deflate quality = %v, want %v", got, tc.defQ)
+			}
+			enc := negotiateEncoder(tc.header, gzip.BestSpeed)
+			if tc.want == "" {
+				if enc != nil {
+					t.Fatalf("encoder = %q, want none", enc.Encoding())
+				}
+				return
+			}
+			if enc == nil || enc.Encoding() != tc.want {
+				t.Fatalf("encoder = %v, want %q", enc, tc.want)
+			}
+		})
+	}
+}
+
+func TestEncodersNormalizeInvalidLevels(t *testing.T) {
+	source := []byte(strings.Repeat("bounded compression level ", 20))
+	for _, level := range []int{-100, 100} {
+		t.Run(strconv.Itoa(level), func(t *testing.T) {
+			for _, encoder := range []Encoder{NewGzipEncoder(level), NewDeflateEncoder(level)} {
+				var dst bytes.Buffer
+				if err := encoder.Encode(&dst, source); err != nil {
+					t.Fatalf("%s encode: %v", encoder.Encoding(), err)
+				}
+				var reader io.ReadCloser
+				var err error
+				if encoder.Encoding() == EncodingGzip {
+					reader, err = gzip.NewReader(&dst)
+				} else {
+					reader = flate.NewReader(&dst)
+				}
+				if err != nil {
+					t.Fatalf("%s reader: %v", encoder.Encoding(), err)
+				}
+				decoded, err := io.ReadAll(reader)
+				_ = reader.Close()
+				if err != nil || !bytes.Equal(decoded, source) {
+					t.Fatalf("%s decoded %d bytes, err=%v", encoder.Encoding(), len(decoded), err)
+				}
+			}
+		})
 	}
 }

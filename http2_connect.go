@@ -23,11 +23,12 @@ type h2StreamConn struct {
 	h      *h2Conn
 	stream *h2Stream
 
-	// mu guards inbound/remoteClosed only. It is independent of h.mu (the
+	// mu guards inbound/inboundBytes/remoteClosed only. It is independent of h.mu (the
 	// stream registry lock) and h.flowMu (the send-window lock) and must
 	// never be held while calling into either.
 	mu           sync.Mutex
 	inbound      [][]byte
+	inboundBytes int
 	remoteClosed bool
 
 	notify chan struct{} // cap 1, non-blocking send; wakes a blocked Read
@@ -41,13 +42,43 @@ func newH2StreamConn(h *h2Conn, s *h2Stream) *h2StreamConn {
 	return &h2StreamConn{h: h, stream: s, notify: make(chan struct{}, 1)}
 }
 
-// deliver queues a chunk of DATA payload for Read. Must be called without
-// holding h.mu.
-func (sc *h2StreamConn) deliver(p []byte) {
+// deliver queues a chunk of DATA payload for Read, copying it when a tail
+// cannot absorb it. Must be called without holding h.mu.
+func (sc *h2StreamConn) deliver(p []byte) bool {
+	if len(p) == 0 {
+		return true
+	}
 	sc.mu.Lock()
-	sc.inbound = append(sc.inbound, p)
+	if sc.stream.reset.Load() {
+		sc.mu.Unlock()
+		return false
+	}
+	queued := len(sc.inbound)
+	if queued > 0 {
+		last := sc.inbound[queued-1]
+		if cap(last) <= int(h2DefaultFrame) && cap(last)-len(last) >= len(p) {
+			sc.inbound[queued-1] = append(last, p...)
+		} else {
+			sc.inbound = append(sc.inbound, append([]byte(nil), p...))
+		}
+	} else {
+		sc.inbound = append(sc.inbound, append([]byte(nil), p...))
+	}
+	sc.inboundBytes += len(p)
 	sc.mu.Unlock()
 	sc.wake()
+	return true
+}
+
+// discardInbound drops unread tunnel bytes after a reset and returns their
+// count so the connection-level receive window can be credited back.
+func (sc *h2StreamConn) discardInbound() int {
+	sc.mu.Lock()
+	n := sc.inboundBytes
+	sc.inbound = nil
+	sc.inboundBytes = 0
+	sc.mu.Unlock()
+	return n
 }
 
 // closeRemote marks the tunnel as half-closed by the peer (END_STREAM
@@ -99,12 +130,18 @@ func (sc *h2StreamConn) creditWindow(n int) {
 func (sc *h2StreamConn) Read(p []byte) (int, error) {
 	for {
 		sc.mu.Lock()
+		if sc.stream.reset.Load() {
+			sc.mu.Unlock()
+			return 0, net.ErrClosed
+		}
 		if len(sc.inbound) > 0 {
 			chunk := sc.inbound[0]
 			n := copy(p, chunk)
+			sc.inboundBytes -= n
 			if n < len(chunk) {
 				sc.inbound[0] = chunk[n:]
 			} else {
+				sc.inbound[0] = nil
 				sc.inbound = sc.inbound[1:]
 			}
 			sc.mu.Unlock()

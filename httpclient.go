@@ -5,18 +5,14 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/hmac"
-	crypto_rand "crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
 	"io"
-	"math"
 	"math/rand"
 	"mime/multipart"
 	"net"
@@ -27,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +32,8 @@ import (
 )
 
 const (
+	defaultClientResponseBodyLimit int64 = 16 << 20
+
 	// MethodQuery is the HTTP QUERY method used by APIs that need a safe, body-capable query operation.
 	// Request already uses Query(...) for URL query parameters, so use Request.Do(ctx, MethodQuery, url)
 	// or Client.Query(ctx, url, body) for this method.
@@ -70,27 +69,38 @@ type ClientConfig struct {
 	MaxConnsPerHost       int
 	DisableCompression    bool
 	DisableKeepAlives     bool
-	ForceAttemptHTTP2     bool
-	TLSConfig             *tls.Config
+	// DisableHTTP2 disables HTTP/2 on the default transport. HTTP/2 is enabled
+	// by default; ForceAttemptHTTP2 overrides DisableHTTP2.
+	DisableHTTP2 bool
+	// ForceAttemptHTTP2 enables HTTP/2 when custom transport settings would
+	// otherwise disable net/http's automatic HTTP/2 setup.
+	ForceAttemptHTTP2 bool
+	TLSConfig         *tls.Config
 	// AllowInsecureTLS must be explicitly enabled before a TLSConfig with
 	// InsecureSkipVerify can be used. Prefer normal certificate validation;
 	// certificate pinning also requires a verified chain.
-	AllowInsecureTLS  bool
-	CertPinning       *CertPinningConfig
-	Proxy             func(*http.Request) (*url.URL, error)
-	Jar               http.CookieJar
-	Transport         http.RoundTripper
-	Logger            Logger
-	Metrics           ClientMetrics
-	Hooks             ClientHooks
-	Security          ClientSecurity
-	Retry             RetryPolicy
-	Redirect          RedirectPolicy
-	BodyLimit         int64
+	AllowInsecureTLS bool
+	CertPinning      *CertPinningConfig
+	Proxy            func(*http.Request) (*url.URL, error)
+	Jar              http.CookieJar
+	Transport        http.RoundTripper
+	Logger           Logger
+	Metrics          ClientMetrics
+	Hooks            ClientHooks
+	Security         ClientSecurity
+	Retry            RetryPolicy
+	Redirect         RedirectPolicy
+	BodyLimit        int64
+	// ResponseBodyLimit caps bytes read or buffered from an upstream response.
+	// Zero uses the 16 MiB default; a negative value disables the cap.
 	ResponseBodyLimit int64
 }
 
 func (c ClientConfig) normalize() ClientConfig {
+	c.Security = c.Security.clone()
+	if c.ResponseBodyLimit == 0 {
+		c.ResponseBodyLimit = defaultClientResponseBodyLimit
+	}
 	if c.Timeout <= 0 {
 		c.Timeout = 30 * time.Second
 	}
@@ -113,13 +123,13 @@ func (c ClientConfig) normalize() ClientConfig {
 		c.IdleConnTimeout = 90 * time.Second
 	}
 	if c.MaxIdleConns <= 0 {
-		c.MaxIdleConns = 1024
+		c.MaxIdleConns = 100
 	}
 	if c.MaxIdleConnsPerHost <= 0 {
-		c.MaxIdleConnsPerHost = 256
+		c.MaxIdleConnsPerHost = 10
 	}
 	if c.MaxConnsPerHost <= 0 {
-		c.MaxConnsPerHost = 1024
+		c.MaxConnsPerHost = 100
 	}
 	if c.UserAgent == "" {
 		c.UserAgent = "fh-client/1.0"
@@ -136,6 +146,7 @@ func (c ClientConfig) normalize() ClientConfig {
 	if c.Retry.MaxAttempts == 0 {
 		c.Retry = DefaultRetryPolicy()
 	}
+	c.Retry = cloneRetryPolicy(c.Retry)
 	if c.Redirect.Max == 0 {
 		c.Redirect = RedirectPolicy{Max: 10, StripSensitiveHeaders: true}
 	}
@@ -144,12 +155,16 @@ func (c ClientConfig) normalize() ClientConfig {
 
 // Client is a high-performance, middleware-first outbound HTTP client for fh.
 type Client struct {
-	cfg    ClientConfig
-	hc     *http.Client
-	rt     http.RoundTripper
-	mw     []ClientMiddleware
-	pool   sync.Pool
-	closed atomic.Bool
+	cfg            ClientConfig
+	hc             *http.Client
+	rt             http.RoundTripper
+	mw             []ClientMiddleware
+	pool           sync.Pool
+	metricsOn      bool
+	securityOn     bool
+	requestHooksOn bool
+	traceHooksOn   bool
+	closed         atomic.Bool
 }
 
 // NewClient creates a production-ready HTTP client. Middleware can be added via Use.
@@ -165,15 +180,18 @@ func NewClient(cfg ...ClientConfig) *Client {
 		} else {
 			c.TLSConfig = c.TLSConfig.Clone()
 		}
-		verifier := c.CertPinning.Verifier()
-		origVerify := c.TLSConfig.VerifyPeerCertificate
-		c.TLSConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		verifier, err := c.CertPinning.connectionVerifier()
+		if err != nil {
+			panic(err)
+		}
+		origVerify := c.TLSConfig.VerifyConnection
+		c.TLSConfig.VerifyConnection = func(state tls.ConnectionState) error {
 			if origVerify != nil {
-				if err := origVerify(rawCerts, verifiedChains); err != nil {
+				if err := origVerify(state); err != nil {
 					return err
 				}
 			}
-			return verifier(rawCerts, verifiedChains)
+			return verifier(state)
 		}
 	}
 	if c.TLSConfig != nil {
@@ -188,17 +206,18 @@ func NewClient(cfg ...ClientConfig) *Client {
 			panic("fh: outbound TLS MinVersion must be TLS 1.2 or newer")
 		}
 	}
+	securityOn := c.Security.Enabled()
 	transport := c.Transport
 	if transport == nil {
 		d := &net.Dialer{Timeout: c.DialTimeout, KeepAlive: c.KeepAlive}
 		dialContext := d.DialContext
-		if c.Security.Enabled() {
+		if securityOn {
 			dialContext = ClientSecurityDialContext(c.Security, d)
 		}
 		transport = &http.Transport{
 			Proxy:                 c.Proxy,
 			DialContext:           dialContext,
-			ForceAttemptHTTP2:     true,
+			ForceAttemptHTTP2:     !c.DisableHTTP2 || c.ForceAttemptHTTP2,
 			MaxIdleConns:          c.MaxIdleConns,
 			MaxIdleConnsPerHost:   c.MaxIdleConnsPerHost,
 			MaxConnsPerHost:       c.MaxConnsPerHost,
@@ -211,7 +230,17 @@ func NewClient(cfg ...ClientConfig) *Client {
 			DisableKeepAlives:     c.DisableKeepAlives,
 		}
 	}
-	cl := &Client{cfg: c, rt: transport}
+	metricsOn := true
+	switch c.Metrics.(type) {
+	case NopClientMetrics, *NopClientMetrics:
+		metricsOn = false
+	}
+	requestHooksOn := c.Hooks.hasRequestHooks()
+	traceHooksOn := c.Hooks.hasTraceHooks()
+	cl := &Client{
+		cfg: c, rt: transport, metricsOn: metricsOn, securityOn: securityOn,
+		requestHooksOn: requestHooksOn, traceHooksOn: traceHooksOn,
+	}
 	cl.pool.New = func() any {
 		return &Request{client: cl, headers: make(http.Header, 8), query: make(url.Values, 4), pathParams: make(map[string]string, 4)}
 	}
@@ -229,10 +258,13 @@ func (c *Client) Use(m ...ClientMiddleware) *Client {
 
 func (c *Client) wrap(base http.RoundTripper) http.RoundTripper {
 	var rt http.RoundTripper = roundTripperFunc(func(r *http.Request) (*http.Response, error) { return base.RoundTrip(r) })
+	rt = budgetClientTransport{next: rt}
+	// Keep built-in validation inside user middleware so it checks the final
+	// request URL after selectors and other middleware have rewritten it.
+	rt = builtinClientTransport{next: rt, client: c}
 	for i := len(c.mw) - 1; i >= 0; i-- {
 		rt = c.mw[i](rt)
 	}
-	rt = builtinClientTransport{next: rt, client: c}
 	return rt
 }
 
@@ -250,18 +282,17 @@ func (c *Client) Close() error {
 
 // R returns a reusable fluent request builder. Do not use the returned Request concurrently.
 func (c *Client) R() *Request {
-	r := c.pool.Get().(*Request)
-	r.reset(c)
-	return r
+	return c.pool.Get().(*Request)
 }
 
 func (c *Client) releaseRequest(r *Request) {
 	if r == nil {
 		return
 	}
-	if r.bodyBytes != nil && cap(r.bodyBytes) > 1<<20 {
-		r.bodyBytes = nil
-	}
+	// Drop request data and closure references as soon as the request finishes.
+	// The builder is already reset before it re-enters the pool, so idle pooled
+	// requests do not retain credentials, bodies, or request-specific middleware.
+	r.reset(c)
 	c.pool.Put(r)
 }
 
@@ -314,21 +345,59 @@ func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
 	if p.HTTPSOnly && req.URL.Scheme != "https" {
 		return ErrClientRedirectBlocked
 	}
-	if c.cfg.Security.Enabled() {
-		if err := c.cfg.Security.Validate(req.URL); err != nil {
+	if c.securityOn {
+		if err := c.strictTransportError(); err != nil {
+			return errors.Join(ErrClientRedirectBlocked, err)
+		}
+		var err error
+		if c.cfg.Transport == nil {
+			err = c.cfg.Security.ValidateHost(req.URL)
+		} else {
+			err = c.cfg.Security.ValidateContext(req.Context(), req.URL)
+		}
+		if err != nil {
 			return errors.Join(ErrClientRedirectBlocked, err)
 		}
 	}
-	if p.StripSensitiveHeaders && len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
-		stripSensitive(req.Header)
+	if p.StripSensitiveHeaders && len(via) > 0 {
+		previous := via[len(via)-1].URL
+		crossHost := !strings.EqualFold(req.URL.Host, via[0].URL.Host)
+		downgrade := strings.EqualFold(previous.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https")
+		if crossHost || downgrade {
+			stripSensitive(req.Header)
+		}
 	}
-	callClientHook(c.cfg.Hooks.OnRedirect, ClientEvent{At: time.Now(), Method: req.Method, URL: safeURL(req.URL), Attempt: len(via) + 1})
+	if hook := c.cfg.Hooks.OnRedirect; hook != nil {
+		callClientHook(hook, ClientEvent{At: time.Now(), Method: req.Method, URL: safeURL(req.URL), Attempt: len(via) + 1})
+	}
+	return nil
+}
+
+func (c *Client) strictTransportError() error {
+	if !c.cfg.Security.Strict {
+		return nil
+	}
+	if c.cfg.Proxy != nil {
+		return ErrClientProxySecurityUnsupported
+	}
+	if c.cfg.Transport != nil {
+		return ErrClientCustomTransportSecurityUnsupported
+	}
 	return nil
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type budgetClientTransport struct{ next http.RoundTripper }
+
+func (b budgetClientTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if budget := BudgetFromContext(req.Context()); budget != nil && !budget.ReserveUpstream() {
+		return nil, ErrClientUpstreamBudgetExceeded
+	}
+	return b.next.RoundTrip(req)
+}
 
 // ClientMiddleware wraps outbound HTTP round trips.
 type ClientMiddleware func(http.RoundTripper) http.RoundTripper
@@ -339,53 +408,77 @@ type builtinClientTransport struct {
 }
 
 func (b builtinClientTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil || req.URL == nil {
+		return nil, ErrClientInvalidURL
+	}
 	c := b.client
 	start := time.Now()
-	event := ClientEvent{At: start, Method: req.Method, URL: safeURL(req.URL), Host: req.URL.Host}
+	event := ClientEvent{At: start, Method: req.Method, Host: req.URL.Host}
+	if c.requestHooksOn {
+		event.URL = safeURL(req.URL)
+	}
 	callClientHook(c.cfg.Hooks.OnBeforeRequest, event)
-	c.cfg.Metrics.Inflight(1)
-	defer c.cfg.Metrics.Inflight(-1)
-	if c.cfg.Security.Enabled() {
-		if err := c.cfg.Security.Validate(req.URL); err != nil {
-			c.cfg.Metrics.Error(req.Method, req.URL.Host, "security")
+	if c.metricsOn {
+		c.cfg.Metrics.Inflight(1)
+		defer c.cfg.Metrics.Inflight(-1)
+	}
+	if c.securityOn {
+		err := c.strictTransportError()
+		if err == nil {
+			if c.cfg.Transport == nil {
+				err = c.cfg.Security.ValidateHost(req.URL)
+			} else {
+				err = c.cfg.Security.ValidateContext(req.Context(), req.URL)
+			}
+		}
+		if err != nil {
+			if c.metricsOn {
+				c.cfg.Metrics.Error(req.Method, req.URL.Host, "security")
+			}
 			callClientHook(c.cfg.Hooks.OnError, event.withErr(err))
 			return nil, &ClientError{Kind: ClientErrSecurity, Method: req.Method, URL: safeURL(req.URL), Err: err, Retryable: false}
 		}
 	}
-	trace := &httptrace.ClientTrace{
-		DNSStart:     func(i httptrace.DNSStartInfo) { callClientHook(c.cfg.Hooks.OnDNSStart, event.withHost(i.Host)) },
-		DNSDone:      func(i httptrace.DNSDoneInfo) { callClientHook(c.cfg.Hooks.OnDNSDone, event.withErr(i.Err)) },
-		ConnectStart: func(network, addr string) { callClientHook(c.cfg.Hooks.OnConnectStart, event.withHost(addr)) },
-		ConnectDone: func(network, addr string, err error) {
-			callClientHook(c.cfg.Hooks.OnConnectDone, event.withHost(addr).withErr(err))
-		},
-		TLSHandshakeStart: func() { callClientHook(c.cfg.Hooks.OnTLSHandshakeStart, event) },
-		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
-			callClientHook(c.cfg.Hooks.OnTLSHandshakeDone, event.withErr(err))
-		},
-		GotConn: func(info httptrace.GotConnInfo) {
-			if info.Reused {
-				callClientHook(c.cfg.Hooks.OnConnectionReuse, event)
-			} else {
-				callClientHook(c.cfg.Hooks.OnConnectionOpen, event)
-			}
-		},
-		WroteRequest: func(info httptrace.WroteRequestInfo) {
-			callClientHook(c.cfg.Hooks.OnRequestSent, event.withErr(info.Err))
-		},
-		GotFirstResponseByte: func() { callClientHook(c.cfg.Hooks.OnResponseHeaders, event) },
+	if c.traceHooksOn {
+		trace := &httptrace.ClientTrace{
+			DNSStart:     func(i httptrace.DNSStartInfo) { callClientHook(c.cfg.Hooks.OnDNSStart, event.withHost(i.Host)) },
+			DNSDone:      func(i httptrace.DNSDoneInfo) { callClientHook(c.cfg.Hooks.OnDNSDone, event.withErr(i.Err)) },
+			ConnectStart: func(network, addr string) { callClientHook(c.cfg.Hooks.OnConnectStart, event.withHost(addr)) },
+			ConnectDone: func(network, addr string, err error) {
+				callClientHook(c.cfg.Hooks.OnConnectDone, event.withHost(addr).withErr(err))
+			},
+			TLSHandshakeStart: func() { callClientHook(c.cfg.Hooks.OnTLSHandshakeStart, event) },
+			TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+				callClientHook(c.cfg.Hooks.OnTLSHandshakeDone, event.withErr(err))
+			},
+			GotConn: func(info httptrace.GotConnInfo) {
+				if info.Reused {
+					callClientHook(c.cfg.Hooks.OnConnectionReuse, event)
+				} else {
+					callClientHook(c.cfg.Hooks.OnConnectionOpen, event)
+				}
+			},
+			WroteRequest: func(info httptrace.WroteRequestInfo) {
+				callClientHook(c.cfg.Hooks.OnRequestSent, event.withErr(info.Err))
+			},
+			GotFirstResponseByte: func() { callClientHook(c.cfg.Hooks.OnResponseHeaders, event) },
+		}
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	}
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	res, err := b.next.RoundTrip(req)
 	dur := time.Since(start)
 	code := 0
 	if res != nil {
 		code = res.StatusCode
 	}
-	c.cfg.Metrics.Observe(req.Method, req.URL.Host, code, dur)
+	if c.metricsOn {
+		c.cfg.Metrics.Observe(req.Method, req.URL.Host, code, dur)
+	}
 	if err != nil {
-		c.cfg.Logger.Error("fh client request failed", "method", req.Method, "url", safeURL(req.URL), "host", req.URL.Host, "error", err, "duration", dur)
-		c.cfg.Metrics.Error(req.Method, req.URL.Host, classifyNetErr(err))
+		c.cfg.Logger.Error("fh client request failed", "method", req.Method, "url", safeURL(req.URL), "host", req.URL.Host, "error", safeClientErrorText(err), "duration", dur)
+		if c.metricsOn {
+			c.cfg.Metrics.Error(req.Method, req.URL.Host, classifyNetErr(err))
+		}
 		callClientHook(c.cfg.Hooks.OnError, event.withErr(err).withDuration(dur))
 		return res, wrapClientErr(req, err, dur)
 	}
@@ -442,18 +535,42 @@ func (r *Request) reset(c *Client) {
 	r.responseLimit = 0
 	r.stream = false
 	r.idempotencyKey = ""
-	for k := range r.headers {
-		delete(r.headers, k)
+	if len(r.headers) > 128 {
+		r.headers = make(http.Header, 8)
+	} else {
+		for k := range r.headers {
+			delete(r.headers, k)
+		}
 	}
-	for k := range r.query {
-		delete(r.query, k)
+	if len(r.query) > 128 {
+		r.query = make(url.Values, 4)
+	} else {
+		for k := range r.query {
+			delete(r.query, k)
+		}
 	}
-	for k := range r.pathParams {
-		delete(r.pathParams, k)
+	if len(r.pathParams) > 64 {
+		r.pathParams = make(map[string]string, 4)
+	} else {
+		for k := range r.pathParams {
+			delete(r.pathParams, k)
+		}
 	}
-	r.cookies = r.cookies[:0]
-	r.middleware = r.middleware[:0]
-	if r.meta != nil {
+	if cap(r.cookies) > 64 {
+		r.cookies = nil
+	} else {
+		clear(r.cookies)
+		r.cookies = r.cookies[:0]
+	}
+	if cap(r.middleware) > 32 {
+		r.middleware = nil
+	} else {
+		clear(r.middleware)
+		r.middleware = r.middleware[:0]
+	}
+	if len(r.meta) > 128 {
+		r.meta = nil
+	} else if r.meta != nil {
 		for k := range r.meta {
 			delete(r.meta, k)
 		}
@@ -497,14 +614,17 @@ func (r *Request) QueryRaw(raw string) *Request {
 func (r *Request) Param(k, v string) *Request       { r.pathParams[k] = v; return r }
 func (r *Request) Cookie(c *http.Cookie) *Request   { r.cookies = append(r.cookies, c); return r }
 func (r *Request) Timeout(d time.Duration) *Request { r.timeout = d; return r }
-func (r *Request) Retry(p RetryPolicy) *Request     { r.retry = &p; return r }
+func (r *Request) Retry(p RetryPolicy) *Request     { p = cloneRetryPolicy(p); r.retry = &p; return r }
 func (r *Request) Use(m ...ClientMiddleware) *Request {
 	r.middleware = append(r.middleware, m...)
 	return r
 }
-func (r *Request) Decode(v any) *Request            { r.decode = v; return r }
-func (r *Request) DecodeError(v any) *Request       { r.errDecode = v; return r }
-func (r *Request) BodyLimit(n int64) *Request       { r.bodyLimit = n; return r }
+func (r *Request) Decode(v any) *Request      { r.decode = v; return r }
+func (r *Request) DecodeError(v any) *Request { r.errDecode = v; return r }
+func (r *Request) BodyLimit(n int64) *Request { r.bodyLimit = n; return r }
+
+// ResponseLimit overrides the client's upstream response cap for this
+// request. Zero uses the client setting; a negative value disables the cap.
 func (r *Request) ResponseLimit(n int64) *Request   { r.responseLimit = n; return r }
 func (r *Request) Stream() *Request                 { r.stream = true; return r }
 func (r *Request) IdempotencyKey(k string) *Request { r.idempotencyKey = k; return r }
@@ -742,6 +862,11 @@ func (r *Request) Do(ctx context.Context, method, rawurl string) (*Response, err
 	if out.limit == 0 {
 		out.limit = c.cfg.ResponseBodyLimit
 	}
+	if out.limit > 0 && res.Body != nil {
+		// Enforce the cap at the public http.Response boundary too: callers can
+		// read Raw.Body directly instead of going through Response.Bytes/Reader.
+		res.Body = &boundedResponseReader{reader: res.Body, left: out.limit}
+	}
 	if res != nil && res.StatusCode >= 400 && r.errDecode != nil && res.Body != nil {
 		_ = out.Decode(r.errDecode)
 		return out, &ClientError{Kind: ClientErrStatus, Method: req.Method, URL: safeURL(req.URL), StatusCode: res.StatusCode, Err: ErrClientStatus}
@@ -777,11 +902,36 @@ func (r *Request) buildURL(raw string) (string, error) {
 			return "", err
 		}
 	}
-	p := u.Path
-	for k, v := range r.pathParams {
-		p = strings.ReplaceAll(p, "{"+k+"}", url.PathEscape(v))
+	if len(r.pathParams) > 0 {
+		escapedPath := u.EscapedPath()
+		var out strings.Builder
+		out.Grow(len(escapedPath))
+		for pos := 0; pos < len(escapedPath); {
+			matchAt := -1
+			matchToken := ""
+			matchValue := ""
+			for key, value := range r.pathParams {
+				token := url.PathEscape("{" + key + "}")
+				if at := strings.Index(escapedPath[pos:], token); at >= 0 && (matchAt < 0 || at < matchAt) {
+					matchAt, matchToken, matchValue = at, token, value
+				}
+			}
+			if matchAt < 0 {
+				out.WriteString(escapedPath[pos:])
+				break
+			}
+			out.WriteString(escapedPath[pos : pos+matchAt])
+			out.WriteString(url.PathEscape(matchValue))
+			pos += matchAt + len(matchToken)
+		}
+		path := out.String()
+		decodedPath, err := url.PathUnescape(path)
+		if err != nil {
+			return "", err
+		}
+		u.Path = decodedPath
+		u.RawPath = path
 	}
-	u.Path = p
 	q := u.Query()
 	for k, vs := range r.query {
 		for _, v := range vs {
@@ -971,9 +1121,6 @@ func (r *Response) Reader() io.ReadCloser {
 	}
 	if r.reader == nil {
 		r.reader = r.Raw.Body
-		if r.limit > 0 {
-			r.reader = &boundedResponseReader{reader: r.Raw.Body, left: r.limit}
-		}
 	}
 	return r.reader
 }
@@ -1036,6 +1183,24 @@ type RetryPolicy struct {
 	Predicate     func(*http.Response, error) bool
 }
 
+func cloneRetryPolicy(p RetryPolicy) RetryPolicy {
+	if p.RetryStatuses != nil {
+		statuses := make(map[int]bool, len(p.RetryStatuses))
+		for status, enabled := range p.RetryStatuses {
+			statuses[status] = enabled
+		}
+		p.RetryStatuses = statuses
+	}
+	if p.RetryMethods != nil {
+		methods := make(map[string]bool, len(p.RetryMethods))
+		for method, enabled := range p.RetryMethods {
+			methods[method] = enabled
+		}
+		p.RetryMethods = methods
+	}
+	return p
+}
+
 func DefaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{MaxAttempts: 3, MaxElapsed: 15 * time.Second, BaseDelay: 50 * time.Millisecond, MaxDelay: 2 * time.Second, Jitter: true, RetryAfter: true, RetryStatuses: map[int]bool{408: true, 425: true, 429: true, 500: true, 502: true, 503: true, 504: true}, RetryMethods: map[string]bool{http.MethodGet: true, http.MethodHead: true, http.MethodPut: true, http.MethodDelete: true, http.MethodOptions: true, http.MethodTrace: true, MethodQuery: true, MethodSearch: true}}
 }
@@ -1062,6 +1227,20 @@ func doWithRetry(ctx context.Context, hc *http.Client, req *http.Request, p Retr
 			return res, lastErr
 		}
 		delay := retryDelay(res, attempt, p)
+		waitLimit := p.MaxElapsed
+		if waitLimit <= 0 {
+			waitLimit = p.MaxDelay
+			if waitLimit <= 0 {
+				waitLimit = 2 * time.Second
+			}
+		}
+		// Retry-After is controlled by the upstream. When callers omit an
+		// overall retry deadline, do not let that header retain this request
+		// goroutine for an unbounded interval; decline the retry if it exceeds
+		// the configured per-wait ceiling.
+		if delay > waitLimit {
+			return res, lastErr
+		}
 		if p.MaxElapsed > 0 && time.Since(started)+delay > p.MaxElapsed {
 			return res, lastErr
 		}
@@ -1069,7 +1248,9 @@ func doWithRetry(ctx context.Context, hc *http.Client, req *http.Request, p Retr
 			_, _ = io.CopyN(io.Discard, res.Body, 64<<10)
 			_ = res.Body.Close()
 		}
-		callClientHook(hooks.OnRetry, ClientEvent{At: time.Now(), Method: req.Method, URL: safeURL(req.URL), Attempt: attempt, Err: lastErr, StatusCode: statusOf(res), Duration: delay})
+		if hooks.OnRetry != nil {
+			callClientHook(hooks.OnRetry, ClientEvent{At: time.Now(), Method: req.Method, URL: safeURL(req.URL), Attempt: attempt, Err: lastErr, StatusCode: statusOf(res), Duration: delay})
+		}
 		t := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -1081,7 +1262,7 @@ func doWithRetry(ctx context.Context, hc *http.Client, req *http.Request, p Retr
 	return res, lastErr
 }
 func shouldRetry(req *http.Request, res *http.Response, err error, p RetryPolicy) bool {
-	if errors.Is(err, ErrClientNoHealthyEndpoints) {
+	if errors.Is(err, ErrClientNoHealthyEndpoints) || errors.Is(err, ErrClientUpstreamBudgetExceeded) {
 		return false
 	}
 	if p.Predicate != nil {
@@ -1098,7 +1279,7 @@ func shouldRetry(req *http.Request, res *http.Response, err error, p RetryPolicy
 func retryDelay(res *http.Response, attempt int, p RetryPolicy) time.Duration {
 	if p.RetryAfter && res != nil {
 		if v := res.Header.Get("Retry-After"); v != "" {
-			if sec, err := strconv.Atoi(v); err == nil {
+			if sec, err := strconv.ParseInt(v, 10, 64); err == nil && sec >= 0 && sec <= int64((1<<63-1)/int64(time.Second)) {
 				return time.Duration(sec) * time.Second
 			}
 			if tm, err := http.ParseTime(v); err == nil {
@@ -1116,18 +1297,22 @@ func retryDelay(res *http.Response, attempt int, p RetryPolicy) time.Duration {
 	if max <= 0 {
 		max = 2 * time.Second
 	}
-	d := time.Duration(float64(base) * math.Pow(2, float64(attempt-1)))
+	d := base
+	for i := 1; i < attempt && d < max; i++ {
+		if d > max/2 {
+			d = max
+		} else {
+			d *= 2
+		}
+	}
 	if d > max {
 		d = max
 	}
 	if p.Jitter && d > 0 {
-		var buf [8]byte
-		if _, err := crypto_rand.Read(buf[:]); err == nil {
-			frac := float64(binary.BigEndian.Uint64(buf[:])) / float64(^uint64(0))
-			d = time.Duration(float64(d) * frac)
-		} else {
-			d = time.Duration(rand.Int63n(int64(d)))
-		}
+		// Retry jitter prevents synchronized clients from stampeding an upstream;
+		// it is not a security token, so the concurrency-safe, auto-seeded
+		// package PRNG avoids an unnecessary operating-system RNG read per retry.
+		d = time.Duration(rand.Int63n(int64(d)))
 	}
 	return d
 }
@@ -1148,26 +1333,88 @@ type ClientSecurity struct {
 	AllowedHosts    map[string]bool
 	BlockedHosts    map[string]bool
 	RequireHTTPS    bool
+	normalized      bool
 }
 
 func (s ClientSecurity) Enabled() bool {
 	return s.Strict || s.RequireHTTPS || len(s.AllowedHosts) > 0 || len(s.BlockedHosts) > 0
 }
+
+func (s ClientSecurity) clone() ClientSecurity {
+	if s.AllowedHosts != nil {
+		allowed := make(map[string]bool, len(s.AllowedHosts))
+		for host, enabled := range s.AllowedHosts {
+			host = normalizeSecurityHost(host)
+			if previous, ok := allowed[host]; ok {
+				allowed[host] = previous && enabled
+			} else {
+				allowed[host] = enabled
+			}
+		}
+		s.AllowedHosts = allowed
+	}
+	if s.BlockedHosts != nil {
+		blocked := make(map[string]bool, len(s.BlockedHosts))
+		for host, enabled := range s.BlockedHosts {
+			host = normalizeSecurityHost(host)
+			blocked[host] = blocked[host] || enabled
+		}
+		s.BlockedHosts = blocked
+	}
+	s.normalized = true
+	return s
+}
+
 func (s ClientSecurity) Validate(u *url.URL) error {
+	return s.ValidateContext(context.Background(), u)
+}
+
+// ValidateHost applies scheme and host allow/block rules without DNS lookup.
+// The default client uses this before dispatch and validates resolved addresses
+// in its dialer, avoiding a second DNS query for each pooled request.
+func (s ClientSecurity) ValidateHost(u *url.URL) error {
 	if u == nil {
 		return ErrClientInvalidURL
 	}
-	host := strings.ToLower(u.Hostname())
+	host := normalizeSecurityHost(u.Hostname())
+	if host == "" {
+		return ErrClientInvalidURL
+	}
 	if s.RequireHTTPS && u.Scheme != "https" {
 		return ErrClientHTTPSRequired
 	}
-	if len(s.AllowedHosts) > 0 && !s.AllowedHosts[host] {
+	allowed := true
+	if len(s.AllowedHosts) > 0 {
+		if s.normalized {
+			allowed = s.AllowedHosts[host]
+		} else {
+			allowed = hostMapAllows(s.AllowedHosts, host)
+		}
+	}
+	if !allowed {
 		return ErrClientHostBlocked
 	}
-	if s.BlockedHosts[host] {
+	blocked := s.BlockedHosts[host]
+	if !s.normalized {
+		blocked = hostMapAllows(s.BlockedHosts, host)
+	}
+	if blocked {
 		return ErrClientHostBlocked
 	}
-	ips, err := net.LookupIP(host)
+	return nil
+}
+
+// ValidateContext checks a destination while allowing DNS resolution to stop
+// when the request is canceled or its deadline expires.
+func (s ClientSecurity) ValidateContext(ctx context.Context, u *url.URL) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.ValidateHost(u); err != nil {
+		return err
+	}
+	host := strings.ToLower(u.Hostname())
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil {
 		return err
 	}
@@ -1179,12 +1426,56 @@ func (s ClientSecurity) Validate(u *url.URL) error {
 	return nil
 }
 
-func (s ClientSecurity) validateResolvedIP(ip net.IP) error {
-	if s.Strict && !s.AllowLocalhost && ip.IsLoopback() {
-		return ErrClientHostBlocked
+func hostMapAllows(hosts map[string]bool, host string) bool {
+	host = normalizeSecurityHost(host)
+	if allowed, ok := hosts[host]; ok {
+		return allowed
 	}
-	if s.Strict && !s.AllowPrivateIPs && isPrivateIP(ip) {
-		return ErrClientHostBlocked
+	for candidate, allowed := range hosts {
+		if normalizeSecurityHost(candidate) == host {
+			return allowed
+		}
+	}
+	return false
+}
+
+// normalizeSecurityHost treats a DNS root dot as equivalent to its
+// dotless spelling so host allow/block rules cannot be bypassed with an FQDN.
+func normalizeSecurityHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	host = strings.TrimSuffix(host, ".")
+	// IP literals have multiple equivalent spellings. Canonicalize them before
+	// allow/block matching so expanded IPv6 and IPv4-mapped IPv6 cannot bypass
+	// an entry written in another equivalent form.
+	ipHost := host
+	if zone := strings.LastIndexByte(ipHost, '%'); zone > 0 && strings.Contains(ipHost[:zone], ":") {
+		ipHost = ipHost[:zone]
+	}
+	if ip := net.ParseIP(ipHost); ip != nil {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			return ipv4.String()
+		}
+		return ip.String()
+	}
+	return host
+}
+
+func (s ClientSecurity) validateResolvedIP(ip net.IP) error {
+	if s.Strict {
+		loopback := ip.IsLoopback()
+		linkLocal := ip.IsLinkLocalUnicast()
+		if !ip.IsGlobalUnicast() && !(loopback && s.AllowLocalhost) && !(linkLocal && s.AllowPrivateIPs) {
+			return ErrClientHostBlocked
+		}
+		if loopback && !s.AllowLocalhost {
+			return ErrClientHostBlocked
+		}
+		if !s.AllowPrivateIPs && isPrivateIP(ip) && !(loopback && s.AllowLocalhost) {
+			return ErrClientHostBlocked
+		}
 	}
 	return nil
 }
@@ -1193,6 +1484,10 @@ func isPrivateIP(ip net.IP) bool {
 		return true
 	}
 	if v4 := ip.To4(); v4 != nil {
+		// Class E (240.0.0.0/4) is reserved and is not a safe public target.
+		if v4[0] >= 240 {
+			return true
+		}
 		if v4.IsLoopback() || v4.IsLinkLocalUnicast() || v4.IsLinkLocalMulticast() || v4.IsPrivate() {
 			return true
 		}
@@ -1222,6 +1517,15 @@ func isPrivateIP(ip net.IP) bool {
 		if v4[0] == 100 && v4[1] == 100 && v4[2] == 100 && v4[3] == 200 {
 			return true
 		}
+		// IETF protocol assignments are not generally public destinations.
+		// Preserve the globally reachable PCP and TURN anycast exceptions.
+		if v4[0] == 192 && v4[1] == 0 && v4[2] == 0 && v4[3] != 9 && v4[3] != 10 {
+			return true
+		}
+		// Deprecated 6to4 relay anycast space.
+		if v4[0] == 192 && v4[1] == 88 && v4[2] == 99 {
+			return true
+		}
 		return false
 	}
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
@@ -1234,6 +1538,40 @@ func isPrivateIP(ip net.IP) bool {
 		}
 		if ip[0] == 0xfe && (ip[1]&0xc0) == 0xc0 {
 			return true
+		}
+		// Documentation prefix (2001:db8::/32) is globally-unicast according
+		// to net.IP, but must never be treated as a public outbound destination.
+		if ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8 {
+			return true
+		}
+		// Current documentation, benchmarking, and deprecated ORCHID ranges.
+		if (ip[0] == 0x3f && ip[1] == 0xff && ip[2]&0xf0 == 0) ||
+			(ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0 && ip[3] == 2 && ip[4] == 0 && ip[5] == 0) ||
+			(ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0 && ip[3]&0xf0 == 0x10) ||
+			(ip[0] == 0x5f && ip[1] == 0x00) {
+			return true
+		}
+		if ip[0] == 0x01 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0 && ip[4] == 0 && ip[5] == 0 && ip[6] == 0 && (ip[7] == 0 || ip[7] == 1) {
+			return true // Discard-only and dummy IPv6 prefixes.
+		}
+		// The network-specific NAT64 prefix is not globally reachable. For the
+		// well-known NAT64 prefix, inspect the embedded IPv4 address so private
+		// destinations cannot bypass the IPv4 SSRF checks through translation.
+		if ip[0] == 0x00 && ip[1] == 0x64 && ip[2] == 0xff && ip[3] == 0x9b {
+			if ip[4] == 0 && ip[5] == 1 {
+				return true
+			}
+			if ip[4] == 0 && ip[5] == 0 && ip[6] == 0 && ip[7] == 0 && ip[8] == 0 && ip[9] == 0 && ip[10] == 0 && ip[11] == 0 {
+				return isPrivateIP(net.IP(ip[12:16]))
+			}
+		}
+		// Block IPv6 transition mechanisms: they can tunnel to embedded IPv4
+		// destinations outside the checks applied to ordinary IPv6 addresses.
+		if ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0 && ip[3] == 0 {
+			return true // Teredo (2001::/32)
+		}
+		if ip[0] == 0x20 && ip[1] == 0x02 {
+			return true // 6to4 (2002::/16)
 		}
 	}
 	return false
@@ -1248,13 +1586,29 @@ type ClientEvent struct {
 	StatusCode        int
 	Attempt           int
 	Duration          time.Duration
-	Err               error
+	// Err is the original error so hooks can use errors.Is/errors.As. It may
+	// contain request details or credentials; sanitize it before logging.
+	Err error
 }
 
 func callClientHook(f func(ClientEvent), e ClientEvent) {
 	if f != nil {
 		f(e)
 	}
+}
+
+func (h ClientHooks) hasRequestHooks() bool {
+	return h.OnBeforeRequest != nil || h.OnRequestSent != nil || h.OnResponseHeaders != nil ||
+		h.OnAfterResponse != nil || h.OnRetry != nil || h.OnRedirect != nil || h.OnError != nil ||
+		h.OnDNSStart != nil || h.OnDNSDone != nil || h.OnConnectStart != nil || h.OnConnectDone != nil ||
+		h.OnTLSHandshakeStart != nil || h.OnTLSHandshakeDone != nil || h.OnConnectionOpen != nil ||
+		h.OnConnectionReuse != nil
+}
+
+func (h ClientHooks) hasTraceHooks() bool {
+	return h.OnRequestSent != nil || h.OnResponseHeaders != nil || h.OnDNSStart != nil || h.OnDNSDone != nil ||
+		h.OnConnectStart != nil || h.OnConnectDone != nil || h.OnTLSHandshakeStart != nil ||
+		h.OnTLSHandshakeDone != nil || h.OnConnectionOpen != nil || h.OnConnectionReuse != nil
 }
 
 func (e ClientEvent) withErr(err error) ClientEvent            { e.Err = err; return e }
@@ -1297,7 +1651,7 @@ func ClientLogger(l Logger) ClientMiddleware {
 			res, err := next.RoundTrip(r)
 			status := statusOf(res)
 			if err != nil {
-				l.Error("fh client request failed", "method", r.Method, "url", safeURL(r.URL), "status", status, "duration", time.Since(start), "error", err)
+				l.Error("fh client request failed", "method", r.Method, "url", safeURL(r.URL), "status", status, "duration", time.Since(start), "error", safeClientErrorText(err))
 			} else {
 				l.Info("fh client request", "method", r.Method, "url", safeURL(r.URL), "status", status, "duration", time.Since(start))
 			}
@@ -1326,28 +1680,81 @@ func ClientAPIKey(header, key string) ClientMiddleware { return ClientHeader(hea
 func ClientGzipRequest(min int) ClientMiddleware {
 	return func(next http.RoundTripper) http.RoundTripper {
 		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			if r.Body == nil || r.Header.Get("Content-Encoding") != "" {
+			if r.Body == nil || r.Body == http.NoBody || r.Header.Get("Content-Encoding") != "" {
 				return next.RoundTrip(r)
 			}
-			var b bytes.Buffer
-			gz := gzip.NewWriter(&b)
-			_, err := io.Copy(gz, r.Body)
-			if closeErr := gz.Close(); closeErr != nil && err == nil {
-				err = closeErr
+			if min > 0 && (r.ContentLength < 0 || r.ContentLength < int64(min)) {
+				return next.RoundTrip(r)
 			}
-			_ = r.Body.Close()
-			if err != nil {
-				return nil, err
-			}
-			if b.Len() >= min {
-				r.Body = io.NopCloser(bytes.NewReader(b.Bytes()))
-				r.ContentLength = int64(b.Len())
-				r.Header.Set("Content-Encoding", "gzip")
+			originalGetBody := r.GetBody
+			r.Body = newClientGzipBody(r.Context(), r.Body)
+			r.ContentLength = -1
+			r.TransferEncoding = nil
+			r.Header.Del("Content-Length")
+			r.Header.Set("Content-Encoding", "gzip")
+			if originalGetBody != nil {
+				r.GetBody = func() (io.ReadCloser, error) {
+					body, err := originalGetBody()
+					if err != nil {
+						return nil, err
+					}
+					return newClientGzipBody(r.Context(), body), nil
+				}
 			}
 			return next.RoundTrip(r)
 		})
 	}
 }
+
+type clientGzipBody struct {
+	reader      *io.PipeReader
+	stop        func() bool
+	closeSource func() error
+}
+
+func newClientGzipBody(ctx context.Context, source io.ReadCloser) *clientGzipBody {
+	reader, writer := io.Pipe()
+	var sourceCloseOnce sync.Once
+	var sourceCloseErr error
+	closeSource := func() error {
+		sourceCloseOnce.Do(func() { sourceCloseErr = source.Close() })
+		return sourceCloseErr
+	}
+	stop := context.AfterFunc(ctx, func() {
+		_ = reader.CloseWithError(ctx.Err())
+		_ = closeSource()
+	})
+	go func() {
+		defer stop()
+		compressor := gzip.NewWriter(writer)
+		_, copyErr := io.Copy(compressor, source)
+		closeErr := compressor.Close()
+		sourceErr := closeSource()
+		if copyErr != nil {
+			_ = writer.CloseWithError(copyErr)
+		} else if closeErr != nil {
+			_ = writer.CloseWithError(closeErr)
+		} else if sourceErr != nil {
+			_ = writer.CloseWithError(sourceErr)
+		} else {
+			_ = writer.Close()
+		}
+	}()
+	return &clientGzipBody{reader: reader, stop: stop, closeSource: closeSource}
+}
+
+func (b *clientGzipBody) Read(p []byte) (int, error) { return b.reader.Read(p) }
+
+func (b *clientGzipBody) Close() error {
+	b.stop()
+	readerErr := b.reader.Close()
+	sourceErr := b.closeSource()
+	if readerErr != nil {
+		return readerErr
+	}
+	return sourceErr
+}
+
 func ClientHMACSigner(header, secret string) ClientMiddleware {
 	if header == "" {
 		header = "X-Signature"
@@ -1385,41 +1792,94 @@ func ClientBulkhead(max int, wait time.Duration) ClientMiddleware {
 	sem := make(chan struct{}, max)
 	return func(next http.RoundTripper) http.RoundTripper {
 		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			timer := time.NewTimer(wait)
+			if err := r.Context().Err(); err != nil {
+				return nil, err
+			}
 			if wait <= 0 {
-				timer.Stop()
-			}
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-				return next.RoundTrip(r)
-			case <-r.Context().Done():
-				if !timer.Stop() {
-					<-timer.C
+				select {
+				case sem <- struct{}{}:
+				case <-r.Context().Done():
+					return nil, r.Context().Err()
+				default:
+					return nil, ErrClientBulkheadFull
 				}
-				return nil, r.Context().Err()
-			case <-timer.C:
-				return nil, ErrClientBulkheadFull
+			} else {
+				timer := time.NewTimer(wait)
+				defer timer.Stop()
+				select {
+				case sem <- struct{}{}:
+				case <-r.Context().Done():
+					return nil, r.Context().Err()
+				case <-timer.C:
+					return nil, ErrClientBulkheadFull
+				}
 			}
+			if err := r.Context().Err(); err != nil {
+				<-sem
+				return nil, err
+			}
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { <-sem }) }
+			completed := false
+			defer func() {
+				if !completed {
+					release()
+				}
+			}()
+			res, err := next.RoundTrip(r)
+			if err == nil && res != nil && res.Body != nil && res.Body != http.NoBody {
+				res.Body = &clientBulkheadBody{ReadCloser: res.Body, release: release}
+				completed = true
+			}
+			return res, err
 		})
 	}
 }
+
+type clientBulkheadBody struct {
+	io.ReadCloser
+	release func()
+}
+
+func (b *clientBulkheadBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.release()
+	}
+	return n, err
+}
+
+func (b *clientBulkheadBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.release()
+	return err
+}
+
 func ClientRateLimit(ratePerSecond int) ClientMiddleware {
 	if ratePerSecond <= 0 {
 		ratePerSecond = 1
 	}
 	interval := time.Second / time.Duration(ratePerSecond)
+	if interval <= 0 {
+		interval = time.Nanosecond
+	}
 	var mu sync.Mutex
-	last := time.Now()
+	var nextSlot time.Time
 	return func(next http.RoundTripper) http.RoundTripper {
 		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 			mu.Lock()
 			now := time.Now()
-			wait := last.Add(interval).Sub(now)
+			wait := time.Duration(0)
+			if !nextSlot.IsZero() {
+				wait = nextSlot.Sub(now)
+				if wait < 0 {
+					wait = 0
+				}
+			}
 			if wait > 0 {
-				last = last.Add(interval)
+				nextSlot = nextSlot.Add(interval)
 			} else {
-				last = now
+				nextSlot = now.Add(interval)
 			}
 			mu.Unlock()
 			if wait > 0 {
@@ -1474,16 +1934,37 @@ type circuitState uint32
 
 const (
 	circuitClosed circuitState = iota
+	circuitTransition
 	circuitOpen
 	circuitHalfOpen
 )
 
+const circuitStateMask uint64 = 3
+
+func packCircuitState(epoch uint64, state circuitState) uint64 {
+	return epoch<<2 | uint64(state)
+}
+
+func unpackCircuitState(token uint64) (uint64, circuitState) {
+	return token >> 2, circuitState(token & circuitStateMask)
+}
+
+type circuitFailureCounter struct {
+	generation uint64
+	count      atomic.Uint64
+}
+
+type circuitProbeCounter struct {
+	generation uint64
+	count      atomic.Uint64
+}
+
 type CircuitBreaker struct {
 	cfg      CircuitConfig
-	state    atomic.Uint32
-	failures atomic.Uint64
+	state    atomic.Uint64
+	failures atomic.Pointer[circuitFailureCounter]
 	openedAt atomic.Int64
-	probes   atomic.Uint64
+	probes   atomic.Pointer[circuitProbeCounter]
 }
 
 func NewCircuitBreaker(cfg CircuitConfig) *CircuitBreaker {
@@ -1496,49 +1977,146 @@ func NewCircuitBreaker(cfg CircuitConfig) *CircuitBreaker {
 	if cfg.HalfOpenMax == 0 {
 		cfg.HalfOpenMax = 1
 	}
-	return &CircuitBreaker{cfg: cfg}
+	b := &CircuitBreaker{cfg: cfg}
+	b.failures.Store(&circuitFailureCounter{})
+	b.probes.Store(&circuitProbeCounter{})
+	return b
 }
 func (b *CircuitBreaker) Middleware() ClientMiddleware {
 	return func(next http.RoundTripper) http.RoundTripper {
 		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			if !b.allow() {
+			epoch, ok := b.allow()
+			if !ok {
 				return nil, ErrClientCircuitOpen
 			}
 			res, err := next.RoundTrip(r)
+			if isLocalCircuitOutcome(err) {
+				b.abandonProbe(epoch)
+				return res, err
+			}
 			if err != nil || (res != nil && res.StatusCode >= 500) {
-				b.fail()
+				b.complete(epoch, true)
 			} else {
-				b.success()
+				b.complete(epoch, false)
 			}
 			return res, err
 		})
 	}
 }
-func (b *CircuitBreaker) allow() bool {
-	st := circuitState(b.state.Load())
-	if st == circuitClosed {
-		return true
-	}
-	if st == circuitOpen {
-		if time.Since(time.Unix(0, b.openedAt.Load())) >= b.cfg.RecoveryTimeout {
-			b.state.Store(uint32(circuitHalfOpen))
-			b.probes.Store(0)
-		} else {
-			return false
+
+func isLocalCircuitOutcome(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, ErrClientUpstreamBudgetExceeded) ||
+		errors.Is(err, ErrClientBulkheadFull) ||
+		errors.Is(err, ErrClientCircuitOpen) ||
+		errors.Is(err, ErrClientNoHealthyEndpoints)
+}
+
+func (b *CircuitBreaker) allow() (uint64, bool) {
+	for {
+		token := b.state.Load()
+		epoch, st := unpackCircuitState(token)
+		switch st {
+		case circuitClosed:
+			if b.state.Load() == token {
+				return token, true
+			}
+		case circuitOpen:
+			if time.Since(time.Unix(0, b.openedAt.Load())) < b.cfg.RecoveryTimeout {
+				return 0, false
+			}
+			transition := packCircuitState(epoch, circuitTransition)
+			if b.state.CompareAndSwap(token, transition) {
+				b.probes.Store(&circuitProbeCounter{generation: epoch + 1})
+				b.failures.Store(&circuitFailureCounter{generation: epoch + 1})
+				b.state.CompareAndSwap(transition, packCircuitState(epoch+1, circuitHalfOpen))
+			}
+		case circuitHalfOpen:
+			probes := b.probes.Load()
+			if probes == nil || probes.generation != epoch {
+				continue
+			}
+			admitted := false
+			for {
+				count := probes.count.Load()
+				if count >= b.cfg.HalfOpenMax {
+					return 0, false
+				}
+				if probes.count.CompareAndSwap(count, count+1) {
+					admitted = true
+					break
+				}
+			}
+			if b.state.Load() != token {
+				continue
+			}
+			return token, admitted
+		default:
+			return 0, false
 		}
 	}
-	return b.probes.Add(1) <= b.cfg.HalfOpenMax
 }
-func (b *CircuitBreaker) fail() {
-	if b.failures.Add(1) >= b.cfg.FailureThreshold {
-		b.state.Store(uint32(circuitOpen))
+
+func (b *CircuitBreaker) complete(epoch uint64, failed bool) {
+	if b.state.Load() != epoch {
+		return
+	}
+	generation, state := unpackCircuitState(epoch)
+	counter := b.failures.Load()
+	if counter == nil || counter.generation != generation {
+		return
+	}
+	if failed {
+		if state == circuitClosed && counter.count.Add(1) < b.cfg.FailureThreshold {
+			return
+		}
+		if state != circuitClosed && state != circuitHalfOpen {
+			return
+		}
+		transition := packCircuitState(generation, circuitTransition)
+		if !b.state.CompareAndSwap(epoch, transition) {
+			return
+		}
+		b.failures.Store(&circuitFailureCounter{generation: generation + 1})
 		b.openedAt.Store(time.Now().UnixNano())
+		b.probes.Store(&circuitProbeCounter{generation: generation + 1})
+		b.state.CompareAndSwap(transition, packCircuitState(generation+1, circuitOpen))
+		return
+	}
+
+	if state == circuitClosed {
+		counter.count.Store(0)
+		return
+	}
+	if state == circuitHalfOpen {
+		transition := packCircuitState(generation, circuitTransition)
+		if !b.state.CompareAndSwap(epoch, transition) {
+			return
+		}
+		b.failures.Store(&circuitFailureCounter{generation: generation + 1})
+		b.probes.Store(&circuitProbeCounter{generation: generation + 1})
+		b.state.CompareAndSwap(transition, packCircuitState(generation+1, circuitClosed))
 	}
 }
-func (b *CircuitBreaker) success() {
-	b.failures.Store(0)
-	b.state.Store(uint32(circuitClosed))
-	b.probes.Store(0)
+
+func (b *CircuitBreaker) abandonProbe(token uint64) {
+	generation, state := unpackCircuitState(token)
+	if state != circuitHalfOpen || b.state.Load() != token {
+		return
+	}
+	probes := b.probes.Load()
+	if probes == nil || probes.generation != generation {
+		return
+	}
+	for {
+		count := probes.count.Load()
+		if count == 0 {
+			return
+		}
+		if probes.count.CompareAndSwap(count, count-1) {
+			return
+		}
+	}
 }
 func ClientCircuitBreaker(cfg CircuitConfig) ClientMiddleware {
 	return NewCircuitBreaker(cfg).Middleware()
@@ -1583,32 +2161,50 @@ func (c *Client) Batch(ctx context.Context, maxConcurrency int, fns ...func(*Req
 	if maxConcurrency <= 0 {
 		maxConcurrency = 8
 	}
-	sem := make(chan struct{}, maxConcurrency)
-	out := make([]BatchResult, len(fns))
+	results := make([]BatchResult, len(fns))
+	if len(fns) == 0 {
+		return results
+	}
+	if maxConcurrency > len(fns) {
+		maxConcurrency = len(fns)
+	}
+	type batchJob struct {
+		index int
+		fn    func(*Request) (*Response, error)
+	}
+	jobs := make(chan batchJob)
 	var wg sync.WaitGroup
-	for i, fn := range fns {
-		i, fn := i, fn
+	for worker := 0; worker < maxConcurrency; worker++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					out[i] = BatchResult{Index: i, Error: fmt.Errorf("httpclient: batch panic: %v", r)}
+			for job := range jobs {
+				if err := ctx.Err(); err != nil {
+					results[job.index] = BatchResult{Index: job.index, Error: err}
+					continue
 				}
-			}()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				out[i] = BatchResult{Index: i, Error: ctx.Err()}
-				return
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							results[job.index] = BatchResult{Index: job.index, Error: fmt.Errorf("httpclient: batch panic: %v", r)}
+						}
+					}()
+					res, err := job.fn(c.R())
+					results[job.index] = BatchResult{Index: job.index, Response: res, Error: err}
+				}()
 			}
-			res, err := fn(c.R())
-			out[i] = BatchResult{Index: i, Response: res, Error: err}
 		}()
 	}
+	for i, fn := range fns {
+		select {
+		case jobs <- batchJob{index: i, fn: fn}:
+		case <-ctx.Done():
+			results[i] = BatchResult{Index: i, Error: ctx.Err()}
+		}
+	}
+	close(jobs)
 	wg.Wait()
-	return out
+	return results
 }
 
 // Generic typed helpers.
@@ -1637,6 +2233,7 @@ const (
 	ClientErrTLS      ClientErrorKind = "tls"
 	ClientErrRedirect ClientErrorKind = "redirect"
 	ClientErrSecurity ClientErrorKind = "security"
+	ClientErrBudget   ClientErrorKind = "budget"
 	ClientErrProtocol ClientErrorKind = "protocol"
 	ClientErrPanic    ClientErrorKind = "panic"
 	ClientErrStatus   ClientErrorKind = "status"
@@ -1657,7 +2254,7 @@ func (e *ClientError) Error() string {
 		return ""
 	}
 	if e.Err != nil {
-		return "fh client: " + string(e.Kind) + ": " + e.Err.Error()
+		return "fh client: " + string(e.Kind) + ": " + safeClientErrorText(e.Err)
 	}
 	return "fh client: " + string(e.Kind)
 }
@@ -1669,16 +2266,19 @@ func (e *ClientError) Unwrap() error {
 }
 
 var (
-	ErrClientRedirectLimit   = errors.New("redirect limit reached")
-	ErrClientRedirectBlocked = errors.New("redirect blocked by policy")
-	ErrClientBodyTooLarge    = errors.New("body too large")
-	ErrClientBodyStreamed    = errors.New("response is streaming")
-	ErrClientInvalidURL      = errors.New("invalid url")
-	ErrClientHTTPSRequired   = errors.New("https required")
-	ErrClientHostBlocked     = errors.New("host blocked by security policy")
-	ErrClientCircuitOpen     = errors.New("circuit breaker open")
-	ErrClientBulkheadFull    = errors.New("bulkhead capacity exhausted")
-	ErrClientStatus          = errors.New("unexpected http status")
+	ErrClientRedirectLimit                      = errors.New("redirect limit reached")
+	ErrClientRedirectBlocked                    = errors.New("redirect blocked by policy")
+	ErrClientBodyTooLarge                       = errors.New("body too large")
+	ErrClientBodyStreamed                       = errors.New("response is streaming")
+	ErrClientInvalidURL                         = errors.New("invalid url")
+	ErrClientHTTPSRequired                      = errors.New("https required")
+	ErrClientHostBlocked                        = errors.New("host blocked by security policy")
+	ErrClientProxySecurityUnsupported           = errors.New("strict destination security cannot verify targets through a proxy")
+	ErrClientCustomTransportSecurityUnsupported = errors.New("strict destination security requires the built-in transport")
+	ErrClientCircuitOpen                        = errors.New("circuit breaker open")
+	ErrClientBulkheadFull                       = errors.New("bulkhead capacity exhausted")
+	ErrClientUpstreamBudgetExceeded             = errors.New("upstream call budget exhausted")
+	ErrClientStatus                             = errors.New("unexpected http status")
 )
 
 func wrapClientErr(req *http.Request, err error, d time.Duration) error {
@@ -1691,12 +2291,17 @@ func wrapClientErr(req *http.Request, err error, d time.Duration) error {
 	}
 	if errors.Is(err, ErrClientRedirectLimit) || errors.Is(err, ErrClientRedirectBlocked) {
 		kind = ClientErrRedirect
+	} else if errors.Is(err, ErrClientUpstreamBudgetExceeded) {
+		kind = ClientErrBudget
 	}
 	return &ClientError{Kind: kind, Method: req.Method, URL: safeURL(req.URL), Duration: d, Err: err, Retryable: kind == ClientErrNetwork || kind == ClientErrTimeout}
 }
 func classifyNetErr(err error) string {
 	if err == nil {
 		return ""
+	}
+	if errors.Is(err, ErrClientUpstreamBudgetExceeded) {
+		return "budget"
 	}
 	if os.IsTimeout(err) {
 		return "timeout"
@@ -1731,19 +2336,74 @@ func safeURL(u *url.URL) string {
 		return ""
 	}
 	cp := *u
+	// Fragments are client-side only and can still carry secrets supplied by
+	// callers, so omit them from diagnostic URLs entirely.
+	cp.Fragment = ""
+	cp.RawFragment = ""
 	if cp.User != nil {
-		cp.User = url.UserPassword(cp.User.Username(), "xxxxx")
+		// Usernames can carry API credentials too; never preserve either half
+		// of userinfo in client logs or structured errors.
+		cp.User = url.UserPassword("xxxxx", "xxxxx")
 	}
 	q := cp.Query()
 	for k := range q {
-		lk := strings.ToLower(k)
-		if strings.Contains(lk, "token") || strings.Contains(lk, "secret") || strings.Contains(lk, "password") || strings.Contains(lk, "key") || strings.Contains(lk, "auth") || strings.Contains(lk, "bearer") || strings.Contains(lk, "credential") || strings.Contains(lk, "session") || strings.Contains(lk, "otp") || strings.Contains(lk, "ssn") || strings.Contains(lk, "card") || strings.Contains(lk, "cvv") {
+		if sensitiveClientURLKey(k) {
 			q.Set(k, "xxxxx")
 		}
 	}
 	cp.RawQuery = q.Encode()
 	return cp.String()
 }
+
+func sensitiveClientURLKey(key string) bool {
+	key = strings.ToLower(key)
+	for _, part := range [...]string{"token", "secret", "password", "key", "auth", "bearer", "credential", "session", "otp", "ssn", "card", "cvv", "state", "code", "nonce", "signature", "assertion", "jwt", "email", "user", "account", "tenant", "customer", "phone", "address", "identity", "principal", "organization", "org", "uid"} {
+		if strings.Contains(key, part) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	clientErrorURLPattern   = regexp.MustCompile(`(?i)(?:https?|wss?|ftp)://[^\s"'<>]+`)
+	clientErrorRedactKeys   = append(append([]string(nil), DefaultRedactionConfig().Fields...), "state", "code", "code_verifier", "id_token", "jwt", "signature", "sig", "credential", "credentials", "nonce", "assertion")
+	clientErrorColonPattern = compileClientErrorColonPattern(clientErrorRedactKeys)
+)
+
+func compileClientErrorColonPattern(keys []string) *regexp.Regexp {
+	quotedKeys := make([]string, 0, len(keys))
+	for _, key := range keys {
+		quotedKeys = append(quotedKeys, regexp.QuoteMeta(key))
+	}
+	return regexp.MustCompile(`(?i)["']?(` + strings.Join(quotedKeys, "|") + `)["']?\s*:\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n,;&]*)`)
+}
+
+// safeClientErrorText scrubs common credential key/value forms and complete
+// URLs embedded in transport or middleware errors before they reach logs.
+func safeClientErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := clientErrorURLPattern.ReplaceAllStringFunc(err.Error(), func(candidate string) string {
+		end := len(candidate)
+		for end > 0 && strings.ContainsRune(".,;:!?)]}", rune(candidate[end-1])) {
+			end--
+		}
+		trimmed, suffix := candidate[:end], candidate[end:]
+		parsed, parseErr := url.Parse(trimmed)
+		if parseErr != nil {
+			return "[REDACTED_URL]" + suffix
+		}
+		return safeURL(parsed) + suffix
+	})
+	message = clientErrorColonPattern.ReplaceAllString(message, "$1:[REDACTED]")
+	for _, key := range clientErrorRedactKeys {
+		message = redactKey(message, key, "[REDACTED]")
+	}
+	return message
+}
+
 func signRequestHMAC(r *http.Request, secret []byte, newHash func() hash.Hash) (string, error) {
 	h := hmac.New(newHash, secret)
 	h.Write([]byte(r.Method))

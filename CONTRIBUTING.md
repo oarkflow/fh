@@ -36,7 +36,7 @@ Before opening a new issue:
 ## Development Setup
 
 ### Prerequisites
-- **Go 1.27.3 or higher** (installed and available in your `PATH`)
+- **Go 1.27.4 or higher** (installed and available in your `PATH`)
 - `git`
 - Recommended tools:
   ```bash

@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -21,21 +22,60 @@ type Store struct {
 }
 
 func New() *Store {
-	return &Store{Journal: &JournalStore{}, Idempotency: NewIdempotencyStore(24 * time.Hour), Queue: NewQueueStorage()}
+	return NewWithConfig(StoreConfig{})
 }
 
 type StoreConfig struct {
+	// MaxJournalEntries caps the append-only in-memory journal. At capacity,
+	// Append returns ErrJournalCapacity instead of discarding prior entries.
+	MaxJournalEntries int
+	// MaxJournalBytes bounds retained journal strings; default 16 MiB.
+	MaxJournalBytes int64
+	// MaxIdempotencyEntries caps retained idempotency records.
 	MaxIdempotencyEntries int
-	MaxQueueEntries       int
+	// MaxIdempotencyBytes bounds retained records and cached responses; default 64 MiB.
+	MaxIdempotencyBytes int64
+	// MaxQueueEntries caps retained jobs; new jobs evict the oldest entry.
+	MaxQueueEntries int
+	// MaxQueueBytes caps estimated retained job memory; default 64 MiB.
+	MaxQueueBytes int64
 }
 
 func NewWithConfig(cfg StoreConfig) *Store {
-	return &Store{Journal: &JournalStore{}, Idempotency: NewIdempotencyStoreWithLimit(24*time.Hour, cfg.MaxIdempotencyEntries), Queue: NewQueueStorageWithLimit(cfg.MaxQueueEntries)}
+	return &Store{
+		Journal:     NewJournalStoreWithLimits(cfg.MaxJournalEntries, cfg.MaxJournalBytes),
+		Idempotency: NewIdempotencyStoreWithLimits(24*time.Hour, cfg.MaxIdempotencyEntries, cfg.MaxIdempotencyBytes),
+		Queue:       NewQueueStorageWithLimits(cfg.MaxQueueEntries, cfg.MaxQueueBytes),
+	}
 }
 
+var ErrJournalCapacity = errors.New("memory journal: entry capacity reached")
+var ErrQueueCapacity = errors.New("memory queue: capacity reached")
+var ErrIdempotencyCapacity = errors.New("memory idempotency: capacity reached")
+
+const defaultMaxJournalEntries = 50000
+const defaultMaxJournalBytes = 16 << 20
+
 type JournalStore struct {
-	mu      sync.Mutex
-	entries []fh.RequestJournalEntry
+	mu         sync.Mutex
+	maxEntries int
+	maxBytes   int64
+	usedBytes  int64
+	entries    []fh.RequestJournalEntry
+}
+
+func NewJournalStoreWithLimit(maxEntries int) *JournalStore {
+	return NewJournalStoreWithLimits(maxEntries, 0)
+}
+
+func NewJournalStoreWithLimits(maxEntries int, maxBytes int64) *JournalStore {
+	if maxEntries <= 0 {
+		maxEntries = defaultMaxJournalEntries
+	}
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxJournalBytes
+	}
+	return &JournalStore{maxEntries: maxEntries, maxBytes: maxBytes}
 }
 
 func (s *JournalStore) Append(e fh.RequestJournalEntry) error {
@@ -44,8 +84,23 @@ func (s *JournalStore) Append(e fh.RequestJournalEntry) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.maxEntries <= 0 {
+		s.maxEntries = defaultMaxJournalEntries
+	}
+	if s.maxBytes <= 0 {
+		s.maxBytes = defaultMaxJournalBytes
+	}
+	size := journalEntryBytes(e)
+	if len(s.entries) >= s.maxEntries || s.usedBytes+size > s.maxBytes {
+		return ErrJournalCapacity
+	}
 	s.entries = append(s.entries, e)
+	s.usedBytes += size
 	return nil
+}
+
+func journalEntryBytes(e fh.RequestJournalEntry) int64 {
+	return int64(96 + len(e.RequestID) + len(e.Event) + len(e.Method) + len(e.Path) + len(e.BodyHash) + len(e.RemoteIP))
 }
 func (s *JournalStore) Entries() []fh.RequestJournalEntry {
 	s.mu.Lock()
@@ -57,11 +112,20 @@ func (s *JournalStore) Entries() []fh.RequestJournalEntry {
 func (s *JournalStore) Close() error { return nil }
 
 type IdempotencyStore struct {
-	mu          sync.Mutex
-	ttl         time.Duration
-	maxEntries  int
-	records     map[string]*fh.IdempotencyRecord
-	insertOrder []string
+	mu         sync.Mutex
+	ttl        time.Duration
+	maxEntries int
+	maxBytes   int64
+	usedBytes  int64
+	records    map[string]*idempotencyEntry
+	order      list.List
+}
+
+type idempotencyEntry struct {
+	key    string
+	record *fh.IdempotencyRecord
+	elem   *list.Element
+	size   int64
 }
 
 func NewIdempotencyStore(ttl time.Duration) *IdempotencyStore {
@@ -69,27 +133,54 @@ func NewIdempotencyStore(ttl time.Duration) *IdempotencyStore {
 }
 
 func NewIdempotencyStoreWithLimit(ttl time.Duration, maxEntries int) *IdempotencyStore {
+	return NewIdempotencyStoreWithLimits(ttl, maxEntries, 0)
+}
+
+func NewIdempotencyStoreWithLimits(ttl time.Duration, maxEntries int, maxBytes int64) *IdempotencyStore {
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
 	if maxEntries <= 0 {
 		maxEntries = 50000
 	}
-	return &IdempotencyStore{ttl: ttl, maxEntries: maxEntries, records: map[string]*fh.IdempotencyRecord{}}
-}
-func (s *IdempotencyStore) evictLocked() {
-	for len(s.records) > s.maxEntries && len(s.insertOrder) > 0 {
-		delete(s.records, s.insertOrder[0])
-		s.insertOrder = s.insertOrder[1:]
+	if maxBytes <= 0 {
+		maxBytes = 64 << 20
 	}
+	return &IdempotencyStore{ttl: ttl, maxEntries: maxEntries, maxBytes: maxBytes, records: map[string]*idempotencyEntry{}}
 }
+
+func idempotencyRecordBytes(rec *fh.IdempotencyRecord) int64 {
+	if rec == nil {
+		return 0
+	}
+	size := int64(256 + len(rec.Key) + len(rec.RequestHash) + len(rec.Method) + len(rec.Path) + len(rec.ContentType) + len(rec.Response))
+	for key, values := range rec.Headers {
+		for _, value := range values {
+			size += int64(48 + len(key) + len(value))
+		}
+	}
+	return size
+}
+
+func (s *IdempotencyStore) removeEntryLocked(entry *idempotencyEntry) {
+	if entry == nil {
+		return
+	}
+	if s.records[entry.key] == entry {
+		delete(s.records, entry.key)
+		s.usedBytes -= entry.size
+	}
+	s.order.Remove(entry.elem)
+}
+
 func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (fh.IdempotencyDecision, *fh.IdempotencyRecord, error) {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if rec := s.records[key]; rec != nil {
+	if entry := s.records[key]; entry != nil {
+		rec := entry.record
 		if !rec.ExpiresAt.IsZero() && rec.ExpiresAt.Before(now) {
-			delete(s.records, key)
+			s.removeEntryLocked(entry)
 		} else {
 			cp := cloneIdem(rec)
 			if rec.RequestHash != reqHash {
@@ -101,28 +192,72 @@ func (s *IdempotencyStore) Begin(key, reqHash, method, path string) (fh.Idempote
 			return fh.IdempotencyProcessing, cp, nil
 		}
 	}
-	s.evictLocked()
 	rec := &fh.IdempotencyRecord{Key: key, RequestHash: reqHash, Method: method, Path: path, State: "processing", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(s.ttl)}
-	s.records[key] = rec
-	s.insertOrder = append(s.insertOrder, key)
+	size := idempotencyRecordBytes(rec)
+	if size > s.maxBytes {
+		return fh.IdempotencyNew, nil, ErrIdempotencyCapacity
+	}
+	for len(s.records) >= s.maxEntries || s.usedBytes+size > s.maxBytes {
+		if oldest := s.order.Front(); oldest != nil {
+			entry := oldest.Value.(*idempotencyEntry)
+			s.removeEntryLocked(entry)
+		} else {
+			return fh.IdempotencyNew, nil, ErrIdempotencyCapacity
+		}
+	}
+	entry := &idempotencyEntry{key: key, record: rec, size: size}
+	entry.elem = s.order.PushBack(entry)
+	s.records[key] = entry
+	s.usedBytes += size
 	return fh.IdempotencyNew, cloneIdem(rec), nil
 }
 func (s *IdempotencyStore) Complete(key, reqHash string, status int, contentType string, headers map[string][]string, response []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rec := s.records[key]
-	if rec == nil {
+	entry := s.records[key]
+	if entry == nil {
 		return nil
 	}
+	rec := entry.record
 	if rec.RequestHash != reqHash {
 		return fmt.Errorf("memory idempotency: hash mismatch for key %q", key)
+	}
+	candidate := *rec
+	candidate.ContentType = contentType
+	candidate.Headers = headers
+	candidate.Response = response
+	candidate.State = "completed"
+	candidate.UpdatedAt = time.Now().UTC()
+	size := idempotencyRecordBytes(&candidate)
+	if size > s.maxBytes {
+		// A response larger than the configured cache budget is still returned
+		// to its caller, but retaining it would violate the memory bound.
+		s.removeEntryLocked(entry)
+		return nil
+	}
+	for s.usedBytes-entry.size+size > s.maxBytes {
+		var victim *idempotencyEntry
+		for elem := s.order.Front(); elem != nil; elem = elem.Next() {
+			other := elem.Value.(*idempotencyEntry)
+			if other != entry {
+				victim = other
+				break
+			}
+		}
+		if victim == nil {
+			s.removeEntryLocked(entry)
+			return nil
+		}
+		s.removeEntryLocked(victim)
 	}
 	rec.State = "completed"
 	rec.StatusCode = status
 	rec.ContentType = contentType
 	rec.Headers = cloneHeaders(headers)
 	rec.Response = append([]byte(nil), response...)
-	rec.UpdatedAt = time.Now().UTC()
+	rec.UpdatedAt = candidate.UpdatedAt
+	s.usedBytes += size - entry.size
+	entry.size = size
 	return nil
 }
 func (s *IdempotencyStore) Close() error { return nil }
@@ -137,9 +272,10 @@ func (s *IdempotencyStore) PurgeExpired(ctx context.Context, now time.Time) (int
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	purged := 0
-	for key, rec := range s.records {
+	for _, entry := range s.records {
+		rec := entry.record
 		if rec != nil && !rec.ExpiresAt.IsZero() && !rec.ExpiresAt.After(now) {
-			delete(s.records, key)
+			s.removeEntryLocked(entry)
 			purged++
 		}
 	}
@@ -147,11 +283,19 @@ func (s *IdempotencyStore) PurgeExpired(ctx context.Context, now time.Time) (int
 }
 
 type QueueStorage struct {
-	mu          sync.Mutex
-	jobs        map[string]*fh.QueueJob
-	state       map[string]string
-	maxEntries  int
-	insertOrder []string
+	mu         sync.Mutex
+	jobs       map[string]*fh.QueueJob
+	state      map[string]string
+	maxEntries int
+	maxBytes   int64
+	usedBytes  int64
+	jobBytes   map[string]int64
+	order      list.List
+	orderByID  map[string]*list.Element
+}
+
+type queueOrderEntry struct {
+	id string
 }
 
 func NewQueueStorage() *QueueStorage {
@@ -159,11 +303,88 @@ func NewQueueStorage() *QueueStorage {
 }
 
 func NewQueueStorageWithLimit(maxEntries int) *QueueStorage {
+	return NewQueueStorageWithLimits(maxEntries, 0)
+}
+
+func NewQueueStorageWithLimits(maxEntries int, maxBytes int64) *QueueStorage {
 	if maxEntries <= 0 {
 		maxEntries = 50000
 	}
-	return &QueueStorage{jobs: map[string]*fh.QueueJob{}, state: map[string]string{}, maxEntries: maxEntries}
+	if maxBytes <= 0 {
+		maxBytes = 64 << 20
+	}
+	return &QueueStorage{jobs: map[string]*fh.QueueJob{}, state: map[string]string{}, maxEntries: maxEntries, maxBytes: maxBytes, jobBytes: map[string]int64{}, orderByID: map[string]*list.Element{}}
 }
+
+func (s *QueueStorage) evictOldestLocked() bool {
+	oldest := s.order.Front()
+	if oldest == nil {
+		return false
+	}
+	entry := oldest.Value.(*queueOrderEntry)
+	s.usedBytes -= s.jobBytes[entry.id]
+	delete(s.jobBytes, entry.id)
+	delete(s.jobs, entry.id)
+	delete(s.state, entry.id)
+	delete(s.orderByID, entry.id)
+	s.order.Remove(oldest)
+	return true
+}
+
+func (s *QueueStorage) removeJobLocked(id string) {
+	s.usedBytes -= s.jobBytes[id]
+	delete(s.jobBytes, id)
+	delete(s.jobs, id)
+	delete(s.state, id)
+	if elem := s.orderByID[id]; elem != nil {
+		s.order.Remove(elem)
+		delete(s.orderByID, id)
+	}
+}
+
+func (s *QueueStorage) storeLocked(job *fh.QueueJob, state string, moveToBack bool) error {
+	size := queueJobBytes(job)
+	if size > s.maxBytes {
+		return ErrQueueCapacity
+	}
+	oldSize, exists := s.jobBytes[job.ID]
+	if exists {
+		if s.usedBytes-oldSize+size > s.maxBytes {
+			return ErrQueueCapacity
+		}
+		if elem := s.orderByID[job.ID]; elem != nil && moveToBack {
+			s.order.Remove(elem)
+			delete(s.orderByID, job.ID)
+		}
+		s.usedBytes += size - oldSize
+	} else {
+		for len(s.jobs) >= s.maxEntries || s.usedBytes+size > s.maxBytes {
+			if !s.evictOldestLocked() {
+				return ErrQueueCapacity
+			}
+		}
+		s.usedBytes += size
+	}
+	s.jobs[job.ID] = job
+	s.state[job.ID] = state
+	s.jobBytes[job.ID] = size
+	if s.orderByID[job.ID] == nil {
+		s.orderByID[job.ID] = s.order.PushBack(&queueOrderEntry{id: job.ID})
+	}
+	return nil
+}
+
+func queueJobBytes(job *fh.QueueJob) int64 {
+	if job == nil {
+		return 0
+	}
+	size := int64(256 + len(job.ID) + len(job.Type) + len(job.Payload) + len(job.LastError) + len(job.ConcurrencyKey))
+	for key, value := range job.Headers {
+		size += int64(48 + len(key) + len(value))
+	}
+	return size
+}
+
 func (s *QueueStorage) Enqueue(ctx context.Context, job *fh.QueueJob) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -171,7 +392,7 @@ func (s *QueueStorage) Enqueue(ctx context.Context, job *fh.QueueJob) error {
 	if job == nil {
 		return errors.New("memory queue: nil job")
 	}
-	cp := cloneJob(job)
+	cp := *job
 	now := time.Now().UTC()
 	if cp.ID == "" {
 		cp.ID = "memjob_" + now.Format("20060102150405.000000000")
@@ -183,17 +404,15 @@ func (s *QueueStorage) Enqueue(ctx context.Context, job *fh.QueueJob) error {
 	if cp.VisibleAt.IsZero() {
 		cp.VisibleAt = now
 	}
+	if queueJobBytes(&cp) > s.maxBytes {
+		return ErrQueueCapacity
+	}
+	stored := cloneJob(&cp)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for len(s.jobs) >= s.maxEntries && len(s.insertOrder) > 0 {
-		oldest := s.insertOrder[0]
-		delete(s.jobs, oldest)
-		delete(s.state, oldest)
-		s.insertOrder = s.insertOrder[1:]
+	if err := s.storeLocked(stored, "pending", true); err != nil {
+		return err
 	}
-	s.jobs[cp.ID] = cp
-	s.state[cp.ID] = "pending"
-	s.insertOrder = append(s.insertOrder, cp.ID)
 	job.ID = cp.ID
 	return nil
 }
@@ -240,9 +459,10 @@ func (s *QueueStorage) Complete(ctx context.Context, job *fh.QueueJob) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.jobs[job.ID] = cloneJob(job)
-	s.state[job.ID] = "done"
-	return nil
+	if queueJobBytes(job) > s.maxBytes {
+		return ErrQueueCapacity
+	}
+	return s.storeLocked(cloneJob(job), "done", false)
 }
 func (s *QueueStorage) Retry(ctx context.Context, job *fh.QueueJob, cause error, backoff time.Duration) error {
 	if err := ctx.Err(); err != nil {
@@ -251,7 +471,7 @@ func (s *QueueStorage) Retry(ctx context.Context, job *fh.QueueJob, cause error,
 	if job == nil {
 		return nil
 	}
-	cp := cloneJob(job)
+	cp := *job
 	cp.Attempts++
 	cp.UpdatedAt = time.Now().UTC()
 	cp.VisibleAt = cp.UpdatedAt.Add(backoff * time.Duration(max(1, cp.Attempts)))
@@ -263,14 +483,40 @@ func (s *QueueStorage) Retry(ctx context.Context, job *fh.QueueJob, cause error,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.jobs[cp.ID] = cp
 	if cp.Attempts >= cp.MaxAttempts {
-		s.state[cp.ID] = "failed"
+		if queueJobBytes(&cp) > s.maxBytes {
+			return ErrQueueCapacity
+		}
+		return s.storeLocked(cloneJob(&cp), "failed", false)
 	} else {
-		s.state[cp.ID] = "pending"
+		if queueJobBytes(&cp) > s.maxBytes {
+			return ErrQueueCapacity
+		}
+		return s.storeLocked(cloneJob(&cp), "pending", false)
 	}
-	return nil
 }
+
+func (s *QueueStorage) Defer(ctx context.Context, job *fh.QueueJob, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if job == nil {
+		return nil
+	}
+	cp := *job
+	cp.UpdatedAt = time.Now().UTC()
+	if delay < 0 {
+		delay = 0
+	}
+	cp.VisibleAt = cp.UpdatedAt.Add(delay)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state[job.ID] != "processing" {
+		return errors.New("memory queue: job is not processing")
+	}
+	return s.storeLocked(cloneJob(&cp), "pending", false)
+}
+
 func (s *QueueStorage) Fail(ctx context.Context, job *fh.QueueJob, cause error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -278,16 +524,17 @@ func (s *QueueStorage) Fail(ctx context.Context, job *fh.QueueJob, cause error) 
 	if job == nil {
 		return nil
 	}
-	cp := cloneJob(job)
+	cp := *job
 	cp.UpdatedAt = time.Now().UTC()
 	if cause != nil {
 		cp.LastError = cause.Error()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.jobs[cp.ID] = cp
-	s.state[cp.ID] = "failed"
-	return nil
+	if queueJobBytes(&cp) > s.maxBytes {
+		return ErrQueueCapacity
+	}
+	return s.storeLocked(cloneJob(&cp), "failed", false)
 }
 func (s *QueueStorage) Recover(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
@@ -405,9 +652,7 @@ func (s *QueueStorage) RequeueFailed(ctx context.Context, id string) error {
 	j.UpdatedAt = time.Now().UTC()
 	j.VisibleAt = j.UpdatedAt
 	j.LastError = ""
-	s.jobs[id] = j
-	s.state[id] = "pending"
-	return nil
+	return s.storeLocked(j, "pending", false)
 }
 
 func (s *QueueStorage) DiscardFailed(ctx context.Context, id string) error {
@@ -419,8 +664,7 @@ func (s *QueueStorage) DiscardFailed(ctx context.Context, id string) error {
 	if s.state[id] != "failed" {
 		return fmt.Errorf("memory queue: failed job %q not found", id)
 	}
-	delete(s.jobs, id)
-	delete(s.state, id)
+	s.removeJobLocked(id)
 	return nil
 }
 
@@ -454,8 +698,7 @@ func (s *QueueStorage) PurgeJobs(ctx context.Context, state string, before time.
 		if j == nil || j.UpdatedAt.After(before) {
 			continue
 		}
-		delete(s.jobs, id)
-		delete(s.state, id)
+		s.removeJobLocked(id)
 		purged++
 		if purged >= limit {
 			break
@@ -476,5 +719,5 @@ func queueSnapshot(state string, job *fh.QueueJob) fh.QueueJobSnapshot {
 			headers[k] = v
 		}
 	}
-	return fh.QueueJobSnapshot{ID: job.ID, Type: job.Type, State: state, Headers: headers, Attempts: job.Attempts, MaxAttempts: job.MaxAttempts, VisibleAt: job.VisibleAt, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt, LastError: job.LastError, Priority: job.Priority, RunAt: job.RunAt, ConcurrencyKey: job.ConcurrencyKey, PayloadBytes: len(job.Payload), PayloadPreview: preview}
+	return fh.SanitizeQueueJobSnapshot(fh.QueueJobSnapshot{ID: job.ID, Type: job.Type, State: state, Headers: headers, Attempts: job.Attempts, MaxAttempts: job.MaxAttempts, VisibleAt: job.VisibleAt, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt, LastError: job.LastError, Priority: job.Priority, RunAt: job.RunAt, ConcurrencyKey: job.ConcurrencyKey, PayloadBytes: len(job.Payload), PayloadPreview: preview})
 }
