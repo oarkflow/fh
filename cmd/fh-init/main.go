@@ -6,6 +6,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go/format"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,12 +42,19 @@ func run(args []string) error {
 	module := fspec.String("module", "", "Go module path for the new application")
 	output := fspec.String("dir", ".", "directory to create the application in")
 	force := fspec.Bool("force", false, "allow writing into a non-empty directory")
+	with := fspec.String("with", "", "comma-separated opt-in modules to add (for example audit,vault); see -list-modules")
+	listModules := fspec.Bool("list-modules", false, "print the opt-in modules offered by the template and exit")
+	fspec.StringVar(&templateRepo, "template", templateRepo, "template repository URL or local directory")
+	fspec.StringVar(&frontendRepo, "frontend", frontendRepo, "frontend repository URL or local directory")
 	verify := fspec.Bool("verify", false, "after scaffolding, build the frontend and server, run the application on a loopback port, exercise its HTTP surface, and open it in your browser")
 	noBrowser := fspec.Bool("no-browser", false, "with -verify, run the HTTP checklist but do not open a system browser")
 	requireVerify := fspec.Bool("require-verify", false, "with -verify, fail the command if verification cannot run to completion (default: warn and still exit successfully)")
 	verifyTimeout := fspec.Duration("verify-timeout", 6*time.Minute, "time budget for -verify's frontend+server build, run, and checklist phase")
 	if err := fspec.Parse(args); err != nil {
 		return err
+	}
+	if *listModules {
+		return printModules(os.Stdout)
 	}
 	if *module == "" {
 		return errors.New("-module is required, for example -module example.com/acme/orders")
@@ -67,10 +77,14 @@ func run(args []string) error {
 		return fmt.Errorf("directory %s is not empty; use -force to continue", root)
 	}
 
-	if err := renderTemplate(root, *module); err != nil {
+	mods, err := renderTemplate(root, *module, splitList(*with))
+	if err != nil {
 		return err
 	}
 	if err := cloneFrontend(root); err != nil {
+		return err
+	}
+	if err := applyFrontendModules(root, mods); err != nil {
 		return err
 	}
 	if err := createEnvironmentFile(root); err != nil {
@@ -87,44 +101,63 @@ func run(args []string) error {
 	})
 }
 
-func renderTemplate(root, module string) error {
+func renderTemplate(root, module string, withModules []string) ([]moduleSpec, error) {
 	workDir, err := os.MkdirTemp("", "fh-init-template-*")
 	if err != nil {
-		return fmt.Errorf("create template working directory: %w", err)
+		return nil, fmt.Errorf("create template working directory: %w", err)
 	}
 	defer os.RemoveAll(workDir)
 
 	source := filepath.Join(workDir, "template")
 	if err := cloneRepository(templateRepo, source, "template"); err != nil {
-		return err
+		return nil, err
 	}
-	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+	// Resolve before writing anything so an unknown module name fails cleanly.
+	mods, err := resolveModules(source, withModules)
+	if err != nil {
+		return nil, err
+	}
+	err = filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
-		}
-		if entry.IsDir() {
-			return nil
 		}
 		rel, err := filepath.Rel(source, path)
 		if err != nil {
 			return err
 		}
-		rel = strings.TrimSuffix(rel, ".tmpl")
-		destination := filepath.Join(root, rel)
-		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-			return err
+		if entry.IsDir() {
+			if rel == modulesDir {
+				return filepath.SkipDir // opt-in modules are rendered only when requested
+			}
+			return nil
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		data = []byte(strings.ReplaceAll(string(data), "__FH_MODULE__", module))
-		mode := os.FileMode(0o644)
-		if filepath.Base(destination) == "run.sh" {
-			mode = 0o755
-		}
-		return os.WriteFile(destination, data, mode)
+		return renderFile(path, filepath.Join(root, strings.TrimSuffix(rel, ".tmpl")), module)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return mods, applyModules(source, root, module, mods)
+}
+
+func renderFile(path, destination, module string) error {
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	data = []byte(strings.ReplaceAll(string(data), "__FH_MODULE__", module))
+	if strings.HasSuffix(destination, ".go") {
+		if formatted, err := format.Source(data); err == nil {
+			data = formatted
+		}
+	}
+	mode := os.FileMode(0o644)
+	if filepath.Base(destination) == "run.sh" {
+		mode = 0o755
+	}
+	return os.WriteFile(destination, data, mode)
 }
 
 // cloneFrontend vendors the FH Control Center frontend boilerplate
@@ -153,6 +186,9 @@ func cloneRepository(repo, dest, label string) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
+	}
+	if info, err := os.Stat(repo); err == nil && info.IsDir() {
+		return copyTree(repo, dest)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -195,4 +231,45 @@ func createEnvironmentFile(root string) error {
 		return fmt.Errorf("close .env: %w", closeErr)
 	}
 	return nil
+}
+
+// copyTree copies a local template directory, leaving out version control and
+// installed dependencies, so -template/-frontend can point at a working copy.
+func copyTree(from, to string) error {
+	return filepath.WalkDir(from, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(from, path)
+		if err != nil {
+			return err
+		}
+		if entry.Name() == ".git" || entry.Name() == "node_modules" {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil // a symlink to an installed dependency tree
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(filepath.Join(to, rel), 0o755)
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(filepath.Join(to, rel), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			return err
+		}
+		return out.Close()
+	})
 }

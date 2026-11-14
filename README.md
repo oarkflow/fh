@@ -88,6 +88,12 @@ cd service
 ./run.sh
 ```
 
+Optional features are opt-in modules: `fh-init -list-modules` shows what the template
+offers and `-with accounts,rbac,workflow,billing` adds them (with their dependencies and
+their frontend screens). `-template` and `-frontend` accept a URL or a local directory,
+which is handy when developing a template. Modules are configured through the generated
+`config/app.bcl`; see the template repository's `modules/README.md`.
+
 The generator initializes `.env` from `.env.example` and preserves it on
 subsequent `-force` regeneration. Add `-verify` to have it build the server,
 boot it on a spare loopback port, walk through the app's full HTTP surface
