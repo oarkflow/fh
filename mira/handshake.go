@@ -124,7 +124,7 @@ const keyEpochPackets uint64 = 4096
 // initialChain derives independent directional hash chains. Advancing a
 // chain with HMAC is one-way; the previous chain secret is cleared on rollover.
 // This provides past-epoch key erasure but NOT post-compromise recovery.
-func (k trafficSchedule) initialChain(outbound bool) [32]byte {
+func (k *trafficSchedule) initialChain(outbound bool) [32]byte {
 	direction := "c2s"
 	if k.client != outbound {
 		direction = "s2c"
@@ -136,20 +136,24 @@ func (k trafficSchedule) initialChain(outbound bool) [32]byte {
 	mac.Write([]byte(direction))
 	mac.Write(cid[:])
 	var result [32]byte
-	copy(result[:], mac.Sum(nil))
+	sum := mac.Sum(nil)
+	copy(result[:], sum)
+	clear(sum)
 	return result
 }
-func advanceChain(previous [32]byte, epoch uint16) [32]byte {
+func advanceChain(previous *[32]byte, epoch uint16) [32]byte {
 	var e [2]byte
 	binary.BigEndian.PutUint16(e[:], epoch)
 	mac := hmac.New(sha256.New, previous[:])
 	mac.Write([]byte("MIRA-T/1 v4 irreversible epoch step"))
 	mac.Write(e[:])
 	var result [32]byte
-	copy(result[:], mac.Sum(nil))
+	sum := mac.Sum(nil)
+	copy(result[:], sum)
+	clear(sum)
 	return result
 }
-func (k trafficSchedule) fromChain(chain [32]byte, epoch uint16, outbound bool) (*cryptokit.Protector, error) {
+func (k *trafficSchedule) fromChain(chain *[32]byte, epoch uint16, outbound bool) (*cryptokit.Protector, error) {
 	var idAndEpoch [10]byte
 	binary.BigEndian.PutUint64(idAndEpoch[:8], k.id)
 	binary.BigEndian.PutUint16(idAndEpoch[8:], epoch)
@@ -162,21 +166,30 @@ func (k trafficSchedule) fromChain(chain [32]byte, epoch uint16, outbound bool) 
 	if err != nil {
 		return nil, err
 	}
+	defer clear(keys.Key[:])
+	defer clear(keys.IV[:])
 	return cryptokit.NewProtector(keys)
 }
-func (k trafficSchedule) protector(epoch uint16, outbound bool) (*cryptokit.Protector, error) {
+func (k *trafficSchedule) protector(epoch uint16, outbound bool) (*cryptokit.Protector, error) {
 	chain := k.initialChain(outbound)
 	for i := 1; i <= int(epoch); i++ {
-		next := advanceChain(chain, uint16(i))
+		next := advanceChain(&chain, uint16(i))
 		clear(chain[:])
 		chain = next
+		clear(next[:])
 	}
-	p, err := k.fromChain(chain, epoch, outbound)
+	p, err := k.fromChain(&chain, epoch, outbound)
 	clear(chain[:])
 	return p, err
 }
 
 func derive(psk []byte, key *ecdh.PrivateKey, peer []byte, clientPart, serverPart []byte, cid uint64, client bool) (tx, rx *cryptokit.Protector, schedule trafficSchedule, err error) {
+	scheduleTransferred := false
+	defer func() {
+		if !scheduleTransferred {
+			clear(schedule.master[:])
+		}
+	}()
 	pub, err := ecdh.X25519().NewPublicKey(peer)
 	if err != nil {
 		return nil, nil, schedule, err
@@ -185,6 +198,7 @@ func derive(psk []byte, key *ecdh.PrivateKey, peer []byte, clientPart, serverPar
 	if err != nil {
 		return nil, nil, schedule, err
 	}
+	defer clear(shared)
 	// Transcript is length-delimited to avoid concat ambiguity and includes
 	// the major wire revision, both ephemeral keys, nonces, credential id and
 	// CID. HMAC extracts a master from both the PSK and ephemeral DH output.
@@ -206,7 +220,9 @@ func derive(psk []byte, key *ecdh.PrivateKey, peer []byte, clientPart, serverPar
 	masterMAC.Write([]byte("MIRA-T/1 traffic extract v3"))
 	masterMAC.Write(shared)
 	masterMAC.Write(transcript.Sum(nil))
-	copy(schedule.master[:], masterMAC.Sum(nil))
+	master := masterMAC.Sum(nil)
+	copy(schedule.master[:], master)
+	clear(master)
 	schedule.id = cid
 	schedule.client = client
 	tx, err = schedule.protector(0, true)
@@ -217,6 +233,7 @@ func derive(psk []byte, key *ecdh.PrivateKey, peer []byte, clientPart, serverPar
 	if err != nil {
 		return nil, nil, schedule, err
 	}
+	scheduleTransferred = true
 	return tx, rx, schedule, nil
 }
 
@@ -225,12 +242,20 @@ func sealed(protector *cryptokit.Protector, cid, pn uint64, kind, flags uint8, f
 }
 
 func sealedEpoch(protector *cryptokit.Protector, cid, pn uint64, kind, flags uint8, epoch uint16, frame []byte) ([]byte, error) {
+	return sealedEpochAppend(nil, protector, cid, pn, kind, flags, epoch, frame)
+}
+
+func sealedEpochAppend(dst []byte, protector *cryptokit.Protector, cid, pn uint64, kind, flags uint8, epoch uint16, frame []byte) ([]byte, error) {
 	hdr := wire.Header{Kind: kind, Flags: flags, Connection: cid, Number: pn, Epoch: epoch, Length: uint16(len(frame) + wire.AuthTagSize)}
 	h, err := wire.HeaderBytes(hdr)
 	if err != nil {
 		return nil, err
 	}
-	raw := make([]byte, 0, wire.HeaderSize+int(hdr.Length))
+	need := wire.HeaderSize + int(hdr.Length)
+	if cap(dst) < need {
+		dst = make([]byte, 0, need)
+	}
+	raw := dst[:0]
 	raw = append(raw, h[:]...)
 	raw = protector.Seal(raw, frame, h[:], pn)
 	if len(raw) > wire.MaxDatagram {

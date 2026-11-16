@@ -52,31 +52,55 @@ func ParseFrames(p []byte, maxFrames int) ([]Frame, error) {
 	}
 	out := make([]Frame, 0, min(maxFrames, 8))
 	for len(p) > 0 {
-		if len(out) >= maxFrames || len(p) < 3 {
+		if len(out) >= maxFrames {
 			return nil, ErrInvalid
 		}
-		typ, flags := p[0], p[1]
-		if typ == 0 || typ > FrameHalfClose {
-			return nil, fmt.Errorf("%w: unknown frame type %d", ErrInvalid, typ)
+		frame, consumed, err := parseFrame(p)
+		if err != nil {
+			return nil, err
 		}
-		p = p[2:]
-		n, consumed := binary.Uvarint(p)
-		if consumed <= 0 || n > MaxFrameBody {
-			return nil, ErrInvalid
-		}
-		var canonical [10]byte
-		canonicalN := binary.PutUvarint(canonical[:], n)
-		if canonicalN != consumed {
-			return nil, ErrInvalid
-		}
-		if uint64(len(p[consumed:])) < n {
-			return nil, ErrShort
-		}
+		out = append(out, frame)
 		p = p[consumed:]
-		out = append(out, Frame{Type: typ, Flags: flags, Body: p[:int(n)]})
-		p = p[int(n):]
 	}
 	return out, nil
+}
+
+// ParseSingleFrame decodes one frame without allocating a result slice. It is
+// intended for packet paths whose framing policy permits exactly one frame.
+func ParseSingleFrame(p []byte) (Frame, error) {
+	frame, consumed, err := parseFrame(p)
+	if err != nil {
+		return Frame{}, err
+	}
+	if consumed != len(p) {
+		return Frame{}, ErrInvalid
+	}
+	return frame, nil
+}
+
+func parseFrame(p []byte) (Frame, int, error) {
+	if len(p) < 3 {
+		return Frame{}, 0, ErrInvalid
+	}
+	typ, flags := p[0], p[1]
+	if typ == 0 || typ > FrameHalfClose {
+		return Frame{}, 0, fmt.Errorf("%w: unknown frame type %d", ErrInvalid, typ)
+	}
+	lengthBytes := p[2:]
+	n, consumed := binary.Uvarint(lengthBytes)
+	if consumed <= 0 || n > MaxFrameBody {
+		return Frame{}, 0, ErrInvalid
+	}
+	var canonical [10]byte
+	if binary.PutUvarint(canonical[:], n) != consumed {
+		return Frame{}, 0, ErrInvalid
+	}
+	if uint64(len(lengthBytes[consumed:])) < n {
+		return Frame{}, 0, ErrShort
+	}
+	start := 2 + consumed
+	end := start + int(n)
+	return Frame{Type: typ, Flags: flags, Body: p[start:end]}, end, nil
 }
 
 // AppendNumber and ReadNumber use Go's canonical unsigned base-128 varints.

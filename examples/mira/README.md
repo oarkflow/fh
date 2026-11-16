@@ -229,8 +229,9 @@ rejected.
    1 MiB per message). Best-effort and latest-state messages must fit one datagram.
 2. **ACK ranges.** Receivers batch accepted packet numbers into ACK_RANGES frames,
    with a 1 ms delayed-ack timer so bursts coalesce.
-3. **Retransmission.** Lost packets are resent as the *same ciphertext*, so a
-   nonce is never reused under one key.
+3. **Retransmission.** A lost reliable frame is resealed under a fresh packet
+   number. The frame's channel/message identity lets the receiver suppress
+   duplicate DATA while keeping retransmissions inside its replay window.
 4. **Congestion control and pacing.** A congestion window bounds bytes in flight;
    a virtual-time pacer spaces sends (short bursts allowed) so a window is not
    dumped onto the path at once.
@@ -373,7 +374,7 @@ every number above. All are in `mira/session.go` and covered by the full suite
 | Startup control frames counted as congestion | The server deliberately ignores traffic from a client's UDP path until validation finishes, so the first CREDIT/PATH_RESPONSE packets are lost by design. Their retransmission halved `cwnd` and ended slow start for the whole session | 64 KiB echo 7.3 → 4.2 RTT, 256 KiB 18.6 → 8.0 RTT (emulated 134 ms) |
 | RTO had no margin, and the first RTO was 250 ms | `srtt + 4·rttvar` collapses to ~RTT on a stable path; the first RTO fired before any ACK was possible | spurious retransmits removed |
 | Slow start paced at 1× | The window could not double each RTT | part of the figures above |
-| `MaxInflight` default 32 | Capped a 134 ms path near 0.3 MB/s | default is now 256 |
+| Runtime `MaxInflight` default was 32 | Capped a 134 ms path near 0.3 MB/s | current default is 256 |
 
 Regression guards: `mira/transfer` `TestRoundTripLargeFile` fails below 1 MiB/s
 on loopback; `mira` `TestLargeMessageRoundTripBudget` fails if a 64 KiB or

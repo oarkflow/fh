@@ -9,10 +9,10 @@
 
 ## Workstream priority
 
-- **Complete production security and operations engineering work — done.** Release
-  automation, operational procedures, readiness criteria, and implementation
-  hardening are recorded in this repository. This completes the repository-side
-  workstream; external evidence gates remain open:
+- **Production readiness — not established.** Release automation, operational
+  procedures, readiness criteria, and implementation hardening are recorded in
+  this repository, but implementation work alone does not certify deployment
+  readiness. The following external evidence gates remain open:
   independent cryptographic review and penetration test, real WAN/path-MTU and
   long-soak runs, live multi-node PostgreSQL failover, successful release-workflow
   execution, and operational failover/rollback drills. This status does not claim

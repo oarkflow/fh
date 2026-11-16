@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -37,14 +38,34 @@ func main() {
 	gatewayPublicKey := flag.String("gateway-delegation-key", "", "legacy trusted Ed25519 public key (PEM)")
 	gatewayKeyring := flag.String("gateway-delegation-ring", "", "JSON public keyring for SIGHUP reloadable gateway trust")
 	gatewayAudience := flag.String("gateway-audience", "mira-upstream", "expected signed assertion audience")
-	maxSessions := flag.Int("max-sessions", 1000, "maximum concurrent sessions")
+	maxSessions := flag.Int("max-sessions", 16, "maximum concurrent sessions; raise only after sizing per-session memory against the process limit")
+	maxServerReceive := flag.Int64("max-server-receive-bytes", 128<<20, "aggregate buffered inbound application payload across sessions (default 128 MiB)")
 	maxPerIdentity := flag.Int("max-sessions-per-identity", 4, "maximum concurrent sessions per certificate identity")
+	maxTLSPerIP := flag.Int("max-tls-handshakes-per-ip", 32, "maximum concurrent TLS bootstrap handshakes from one source IP (1..1024)")
+	maxHandshakeRate := flag.Int("max-handshake-attempts-per-second", 2000, "endpoint-wide UDP HELLO and TLS bootstrap rate limit (1..1000000)")
 	maxChannels := flag.Int("max-channels", 16, "maximum channels per session")
-	maxInflight := flag.Int("max-inflight", 0, "maximum un-acknowledged packets per session (0 = library default 32); raise for bulk senders")
+	maxInflight := flag.Int("max-inflight", 0, "maximum un-acknowledged packets per session (0 = library default 256); lower for memory-constrained deployments or raise for bulk senders")
+	udpReadBuffer := flag.Int("udp-read-buffer", 0, "kernel UDP receive queue bytes (0 = operating-system default; maximum 64 MiB)")
+	udpWriteBuffer := flag.Int("udp-write-buffer", 0, "kernel UDP send queue bytes (0 = operating-system default; maximum 64 MiB)")
 	idleTimeout := flag.Duration("idle-timeout", 90*time.Second, "close sessions idle for this long")
 	maxLifetime := flag.Duration("max-session-lifetime", 30*time.Minute, "force re-authentication after this long")
 	metricsAddr := flag.String("metrics", "127.0.0.1:9109", "loopback-only Prometheus listener; set empty to disable")
 	flag.Parse()
+	if *maxSessions <= 0 || *maxPerIdentity <= 0 || *maxChannels <= 0 || *maxInflight < 0 || *maxServerReceive < 8<<20 || *maxServerReceive > 64<<30 {
+		log.Fatal("-max-sessions, -max-sessions-per-identity, and -max-channels must be positive; -max-inflight cannot be negative; -max-server-receive-bytes must be 8 MiB..64 GiB")
+	}
+	if *maxTLSPerIP <= 0 || *maxTLSPerIP > 1024 {
+		log.Fatal("-max-tls-handshakes-per-ip must be 1..1024")
+	}
+	if *maxHandshakeRate <= 0 || *maxHandshakeRate > 1_000_000 {
+		log.Fatal("-max-handshake-attempts-per-second must be 1..1000000")
+	}
+	if *udpReadBuffer < 0 || *udpReadBuffer > 64<<20 || *udpWriteBuffer < 0 || *udpWriteBuffer > 64<<20 {
+		log.Fatal("-udp-read-buffer and -udp-write-buffer must be 0..67108864 bytes")
+	}
+	if *idleTimeout <= 0 || *maxLifetime <= 0 {
+		log.Fatal("-idle-timeout and -max-session-lifetime must be positive")
+	}
 	var delegated *delegation.Verifier
 	if *gatewayPublicKey != "" && *gatewayKeyring != "" {
 		log.Fatal("choose gateway-delegation-key or gateway-delegation-ring")
@@ -79,17 +100,47 @@ func main() {
 	}
 	var allowed atomic.Value
 	allowed.Store(initialAllowed)
+	var lastStorageLog atomic.Int64
 	reloader, err := certconfig.NewServerReloader(*cert, *key, *ca)
 	if err != nil {
 		log.Fatal(err)
 	}
-	server, err := mira.ListenTLS(*udp, *tcp, reloader.Config(), mira.Options{MaxSessions: *maxSessions, MaxSessionsPerIdentity: *maxPerIdentity, MaxChannels: *maxChannels, MaxInflight: *maxInflight, IdleTimeout: *idleTimeout, MaxSessionLifetime: *maxLifetime})
+	server, err := mira.ListenTLSWithIdentityAuthorizer(*udp, *tcp, reloader.Config(), func(identity string) bool {
+		_, ok := allowed.Load().(map[string]struct{})[identity]
+		return ok
+	}, mira.Options{MaxSessions: *maxSessions, MaxServerReceiveBytes: *maxServerReceive, MaxSessionsPerIdentity: *maxPerIdentity, MaxTLSHandshakesPerIP: *maxTLSPerIP, MaxHandshakeAttemptsPerSecond: *maxHandshakeRate, MaxChannels: *maxChannels, MaxInflight: *maxInflight, UDPReadBufferBytes: *udpReadBuffer, UDPWriteBufferBytes: *udpWriteBuffer, IdleTimeout: *idleTimeout, MaxSessionLifetime: *maxLifetime})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer server.Close()
 	var base *durable.Store
 	var storage journal.Store
+	var handlerWG sync.WaitGroup
+	defer func() {
+		if err := server.Close(); err != nil {
+			log.Printf("MIRA shutdown: %v", err)
+		}
+		handlersDone := make(chan struct{})
+		go func() {
+			handlerWG.Wait()
+			close(handlersDone)
+		}()
+		select {
+		case <-handlersDone:
+		case <-time.After(10 * time.Second):
+			log.Printf("shutdown timed out waiting for application handlers; leaving WAL close to process exit")
+			return
+		}
+		if closer, ok := storage.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil {
+				log.Printf("encrypted WAL keyring close: %v", err)
+			}
+		}
+		if base != nil {
+			if err := base.Close(); err != nil {
+				log.Printf("WAL close: %v", err)
+			}
+		}
+	}()
 	if *walPath != "" {
 		if *keyFile == "" {
 			log.Fatal("-wal requires -wal-keys")
@@ -98,7 +149,6 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer base.Close()
 		active, keys, err := atrest.ReadKeyring(*keyFile)
 		if err != nil {
 			log.Fatal(err)
@@ -115,10 +165,16 @@ func main() {
 		_, ok := allowed.Load().(map[string]struct{})[id]
 		return ok && c.MaxMessage <= 1<<20
 	})
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if *metricsAddr != "" {
 		host, _, e := net.SplitHostPort(*metricsAddr)
 		if e != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 			log.Fatal("metrics must bind an explicit loopback IP or be disabled")
+		}
+		metricsListener, e := net.Listen("tcp", *metricsAddr)
+		if e != nil {
+			log.Fatalf("metrics listener: %v", e)
 		}
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -128,10 +184,11 @@ func main() {
 			}
 		})
 		mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-		metricsServer := &http.Server{Addr: *metricsAddr, Handler: mux, ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 20 * time.Second}
+		metricsServer := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 20 * time.Second}
 		go func() {
-			if e := metricsServer.ListenAndServe(); e != nil && e != http.ErrServerClosed {
+			if e := metricsServer.Serve(metricsListener); e != nil && e != http.ErrServerClosed {
 				log.Printf("metrics listener: %v", e)
+				stop()
 			}
 		}()
 		defer metricsServer.Close()
@@ -139,7 +196,6 @@ func main() {
 	reload := make(chan os.Signal, 1)
 	signal.Notify(reload, syscall.SIGHUP)
 	defer signal.Stop(reload)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	go func() {
 		for {
 			select {
@@ -157,15 +213,17 @@ func main() {
 						log.Printf("ACL reload refused: %v", e)
 					} else {
 						old := allowed.Load().(map[string]struct{})
-						allowed.Store(updated)
+						removed := make(map[string]struct{})
 						for id := range old {
 							if _, ok := updated[id]; !ok {
-								server.RevokeIdentity(id)
+								removed[id] = struct{}{}
 							}
 						}
-						for id := range updated {
-							server.AllowIdentity(id)
+						if err := server.ReplaceRevokedIdentities(removed, updated); err != nil {
+							log.Printf("ACL reload refused: %v", err)
+							continue
 						}
+						allowed.Store(updated)
 						log.Printf("ACL reloaded with %d authorized identities", len(updated))
 					}
 				}
@@ -179,7 +237,6 @@ func main() {
 			}
 		}
 	}()
-	defer stop()
 	log.Printf("MIRA TLS bootstrap %s; encrypted UDP %s", server.TLSAddr(), server.Addr())
 	for {
 		s, err := server.Accept(ctx)
@@ -194,14 +251,18 @@ func main() {
 			s.Close(context.Background())
 			continue
 		}
+		handlerWG.Add(1)
 		go func(ss *mira.Session) {
+			defer handlerWG.Done()
 			defer ss.Close(context.Background())
 			for {
 				ch, err := ss.AcceptChannel(ctx)
 				if err != nil {
 					return
 				}
+				handlerWG.Add(1)
 				go func(c protocol.Channel) {
+					defer handlerWG.Done()
 					defer c.Close(context.Background())
 					subject := ss.Identity()
 					if *gatewayIdentity != "" && subject == *gatewayIdentity {
@@ -214,7 +275,13 @@ func main() {
 						subject = bound
 					}
 					if storage != nil {
-						_ = journal.ServeChannel(ctx, c, protocol.Principal{Subject: subject, Device: ss.Identity()}, storage)
+						_ = journal.ServeChannelWithErrorHandler(ctx, c, protocol.Principal{Subject: subject, Device: ss.Identity()}, storage, func(err error) {
+							now := time.Now().Unix()
+							previous := lastStorageLog.Load()
+							if now-previous >= 10 && lastStorageLog.CompareAndSwap(previous, now) {
+								log.Printf("journal storage operation failed: %v", err)
+							}
+						})
 						return
 					}
 					for {

@@ -40,7 +40,7 @@ Maximum accepted datagram: **1472 bytes**; ordinary default emission is smaller 
 | 16 | MTU_PROBE | authenticated padding; ACK confirms tested packet size |
 | 17 | HALF_CLOSE | `ChannelID(varint) | FinalMessageID(varint)`; applies to ordered channel writes |
 
-The legacy DATA layout changed by adding `FragmentSize`; therefore v3 and v4 cannot exchange DATA. The reassembler requires a fixed fragment size for every fragment of the same message and bounds total allocation. `BestEffort`/`LatestState` remain restricted to single-datagram payloads, without retransmission. Reliable fragments may be resent as identical ciphertext without a reused-nonce new encryption operation.
+The legacy DATA layout changed by adding `FragmentSize`; therefore v3 and v4 cannot exchange DATA. The reassembler requires a fixed fragment size for every fragment of the same message and bounds total allocation. Reliable and `LatestState` message IDs may not jump more than 4096 beyond the receiver's current sequence floor; stale reliable IDs outside the retained 4096-ID duplicate-suppression window are discarded. `BestEffort`/`LatestState` remain restricted to single-datagram payloads, without retransmission. Reliable retries preserve the frame contents but reseal them with fresh packet numbers; DATA duplicates are suppressed by channel and message ID.
 
 ## Recommended TLS 1.3 bootstrap
 
@@ -50,7 +50,7 @@ The legacy stateless HELLO/HELLO_ACK PSK+X25519 flow remains available only on e
 
 ## Epochs and packet ACK semantics
 
-Outgoing/incoming AEAD keys are independent and evolve via a direction-specific one-way symmetric epoch chain each 4096 packet numbers. A small old-key receive window allows packet reordering; key updates are not a fresh-DH post-compromise rekey. AEAD packet numbers must never repeat with the same key; ciphertext retransmissions are byte-identical. Transport ACK signifies volatile acceptance, while stored/processed receipts require an explicit application acknowledgment after the relevant operation.
+Outgoing/incoming AEAD keys are independent and evolve via a direction-specific one-way symmetric epoch chain each 4096 packet numbers. A small old-key receive window allows packet reordering; key updates are not a fresh-DH post-compromise rekey. AEAD packet numbers must never repeat with the same key. A reliable retry reseals its retained frame with a fresh packet number while preserving its channel/message identity for duplicate suppression. Transport ACK signifies volatile acceptance, while stored/processed receipts require an explicit application acknowledgment after the relevant operation.
 
 ## Recovery and interoperability
 

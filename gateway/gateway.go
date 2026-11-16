@@ -27,8 +27,9 @@ import (
 // returns a stable principal; gateway sessions are always scoped to it.
 type Authenticate func(*http.Request) (string, error)
 
-// DialBackend MUST apply that principal's authorization policy on the backend,
-// not merely authenticate a shared service account.
+// DialBackend MUST honor context cancellation and apply that principal's
+// authorization policy on the backend, not merely authenticate a shared
+// service account.
 type DialBackend func(context.Context, string) (*mira.Session, error)
 
 type Config struct {
@@ -49,13 +50,21 @@ type Config struct {
 }
 type Gateway struct {
 	c                  Config
+	ctx                context.Context
+	cancel             context.CancelFunc
+	policyCtx          context.Context
+	policyCancel       context.CancelFunc
+	policyPending      *sync.WaitGroup
 	mu                 sync.Mutex
 	sessions           map[string]*browserSession
+	sessionsByOwner    map[string]int
 	pending            int
 	pendingByPrincipal map[string]int
+	policyGeneration   uint64
 	historyBytes       int64
 	closed             bool
 	done               chan struct{}
+	closeDone          chan struct{}
 	wg                 sync.WaitGroup
 }
 type Event struct {
@@ -69,6 +78,7 @@ type browserSession struct {
 	last         time.Time
 	next         uint64
 	history      []Event
+	historyHead  int
 	historyBytes int64
 	changed      chan struct{}
 	closed       bool
@@ -114,22 +124,35 @@ func New(c Config) (*Gateway, error) {
 	if c.MaxHistoryBytes > c.MaxTotalHistoryBytes {
 		return nil, errors.New("gateway: per-session history budget exceeds total history budget")
 	}
-	g := &Gateway{c: c, sessions: make(map[string]*browserSession), pendingByPrincipal: make(map[string]int), done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	policyCtx, policyCancel := context.WithCancel(ctx)
+	g := &Gateway{c: c, ctx: ctx, cancel: cancel, policyCtx: policyCtx, policyCancel: policyCancel, policyPending: &sync.WaitGroup{}, sessions: make(map[string]*browserSession), sessionsByOwner: make(map[string]int), pendingByPrincipal: make(map[string]int), done: make(chan struct{}), closeDone: make(chan struct{})}
 	g.wg.Add(1)
 	go g.sweep()
 	return g, nil
 }
 
-// InvalidateAllSessions closes active backend sessions after emergency
-// authentication-policy or revocation changes. This deliberately over-revokes
-// rather than allowing long-lived browser streams to bypass the new policy.
+// InvalidateAllSessions closes active backend sessions and cancels in-flight
+// connects after emergency authentication-policy or revocation changes. This
+// deliberately over-revokes rather than allowing old policy decisions to live
+// on in browser streams or pending backend dials.
 func (g *Gateway) InvalidateAllSessions() {
 	if g == nil {
 		return
 	}
 	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return
+	}
+	g.policyGeneration++
+	g.policyCancel()
+	g.policyCtx, g.policyCancel = context.WithCancel(g.ctx)
+	pending := g.policyPending
+	g.policyPending = &sync.WaitGroup{}
 	all := g.sessions
 	g.sessions = make(map[string]*browserSession)
+	g.sessionsByOwner = make(map[string]int)
 	for _, bs := range all {
 		if !bs.closed {
 			bs.closed = true
@@ -138,31 +161,33 @@ func (g *Gateway) InvalidateAllSessions() {
 		g.clearHistoryLocked(bs)
 	}
 	g.mu.Unlock()
-	for _, bs := range all {
-		_ = bs.conn.Close(context.Background())
-	}
+	closeBackendSessionMap(all)
+	pending.Wait()
 }
 
 func (g *Gateway) Close() error {
 	g.mu.Lock()
 	if g.closed {
+		closeDone := g.closeDone
 		g.mu.Unlock()
+		<-closeDone
 		return nil
 	}
 	g.closed = true
 	close(g.done)
 	all := g.sessions
 	g.sessions = make(map[string]*browserSession)
+	g.sessionsByOwner = make(map[string]int)
 	for _, ss := range all {
 		ss.closed = true
 		close(ss.changed)
 		g.clearHistoryLocked(ss)
 	}
 	g.mu.Unlock()
-	for _, ss := range all {
-		_ = ss.conn.Close(context.Background())
-	}
+	g.cancel()
+	closeBackendSessionMap(all)
 	g.wg.Wait()
+	close(g.closeDone)
 	return nil
 }
 func (g *Gateway) sweep() {
@@ -182,20 +207,53 @@ func (g *Gateway) expire() {
 	now := time.Now()
 	var old []*browserSession
 	g.mu.Lock()
-	for key, ss := range g.sessions {
+	for _, ss := range g.sessions {
 		if now.Sub(ss.last) > g.c.IdleTimeout {
 			ss.closed = true
 			close(ss.changed)
-			delete(g.sessions, key)
+			g.removeOwnerSessionLocked(ss)
 			g.clearHistoryLocked(ss)
 			old = append(old, ss)
 		}
 	}
 	g.mu.Unlock()
-	for _, ss := range old {
-		_ = ss.conn.Close(context.Background())
-	}
+	closeBackendSessions(old)
 }
+
+func closeBackendSessions(sessions []*browserSession) {
+	if len(sessions) == 0 {
+		return
+	}
+	workers := min(len(sessions), 128)
+	jobs := make(chan *browserSession)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for bs := range jobs {
+				_ = bs.conn.Close(context.Background())
+			}
+		}()
+	}
+	for _, bs := range sessions {
+		jobs <- bs
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func closeBackendSessionMap(sessions map[string]*browserSession) {
+	if len(sessions) == 0 {
+		return
+	}
+	list := make([]*browserSession, 0, len(sessions))
+	for _, session := range sessions {
+		list = append(list, session)
+	}
+	closeBackendSessions(list)
+}
+
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/connect", g.connect)
@@ -263,13 +321,21 @@ func (g *Gateway) capacityLocked(owner string) bool {
 	if g.closed || len(g.sessions)+g.pending >= g.c.MaxSessions {
 		return false
 	}
-	count := 0
-	for _, bs := range g.sessions {
-		if bs.owner == owner {
-			count++
-		}
+	return g.sessionsByOwner[owner]+g.pendingByPrincipal[owner] < g.c.MaxSessionsPerPrincipal
+}
+
+// removeOwnerSessionLocked decrements the per-principal index only when this
+// exact session is still registered. The caller holds g.mu.
+func (g *Gateway) removeOwnerSessionLocked(bs *browserSession) {
+	if current := g.sessions[bs.id]; current != bs {
+		return
 	}
-	return count+g.pendingByPrincipal[owner] < g.c.MaxSessionsPerPrincipal
+	delete(g.sessions, bs.id)
+	if count := g.sessionsByOwner[bs.owner]; count <= 1 {
+		delete(g.sessionsByOwner, bs.owner)
+	} else {
+		g.sessionsByOwner[bs.owner] = count - 1
+	}
 }
 
 // releasePendingLocked removes reservation bookkeeping once a connect attempt
@@ -286,11 +352,26 @@ func (g *Gateway) releasePendingLocked(owner string) {
 }
 
 func (g *Gateway) connect(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	generation := g.policyGeneration
+	policyCtx := g.policyCtx
+	pending := g.policyPending
+	closed := g.closed
+	g.mu.Unlock()
+	if closed {
+		http.Error(w, "gateway closed", http.StatusServiceUnavailable)
+		return
+	}
 	owner, ok := g.principal(w, r)
 	if !ok {
 		return
 	}
 	g.mu.Lock()
+	if g.closed || generation != g.policyGeneration {
+		g.mu.Unlock()
+		http.Error(w, "authentication state changed", http.StatusUnauthorized)
+		return
+	}
 	if !g.capacityLocked(owner) {
 		g.mu.Unlock()
 		http.Error(w, "capacity exceeded", http.StatusServiceUnavailable)
@@ -300,7 +381,11 @@ func (g *Gateway) connect(w http.ResponseWriter, r *http.Request) {
 	// connect requests can create an unbounded number of upstream handshakes.
 	g.pending++
 	g.pendingByPrincipal[owner]++
+	pending.Add(1)
+	g.wg.Add(1)
 	g.mu.Unlock()
+	defer g.wg.Done()
+	defer pending.Done()
 	reserved := true
 	defer func() {
 		g.mu.Lock()
@@ -311,6 +396,8 @@ func (g *Gateway) connect(w http.ResponseWriter, r *http.Request) {
 	}()
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
+	stopOnPolicyChange := context.AfterFunc(policyCtx, cancel)
+	defer stopOnPolicyChange()
 	ss, err := g.c.DialBackend(ctx, owner)
 	if err != nil {
 		http.Error(w, "backend unavailable", http.StatusBadGateway)
@@ -340,6 +427,12 @@ func (g *Gateway) connect(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	g.releasePendingLocked(owner)
 	reserved = false
+	if g.closed || generation != g.policyGeneration {
+		g.mu.Unlock()
+		_ = ss.Close(context.Background())
+		http.Error(w, "authentication state changed", http.StatusUnauthorized)
+		return
+	}
 	if !g.capacityLocked(owner) {
 		g.mu.Unlock()
 		_ = ss.Close(context.Background())
@@ -347,6 +440,7 @@ func (g *Gateway) connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.sessions[id] = bs
+	g.sessionsByOwner[owner]++
 	g.wg.Add(1)
 	g.mu.Unlock()
 	go g.receive(bs)
@@ -378,7 +472,7 @@ func (g *Gateway) receive(bs *browserSession) {
 	if !bs.closed {
 		bs.closed = true
 		close(bs.changed)
-		delete(g.sessions, bs.id)
+		g.removeOwnerSessionLocked(bs)
 		g.clearHistoryLocked(bs)
 	}
 	g.mu.Unlock()
@@ -408,7 +502,7 @@ func (g *Gateway) disconnect(w http.ResponseWriter, r *http.Request) {
 	if !bs.closed {
 		bs.closed = true
 		close(bs.changed)
-		delete(g.sessions, bs.id)
+		g.removeOwnerSessionLocked(bs)
 		g.clearHistoryLocked(bs)
 	}
 	g.mu.Unlock()
@@ -423,14 +517,20 @@ func (g *Gateway) appendHistoryLocked(bs *browserSession, event Event) {
 	if cost > g.c.MaxHistoryBytes || cost > g.c.MaxTotalHistoryBytes {
 		return
 	}
-	for len(bs.history) > 0 && (len(bs.history) >= g.c.History || bs.historyBytes+cost > g.c.MaxHistoryBytes || g.historyBytes+cost > g.c.MaxTotalHistoryBytes) {
-		oldest := bs.history[0]
+	for len(bs.history)-bs.historyHead > 0 && (len(bs.history)-bs.historyHead >= g.c.History || bs.historyBytes+cost > g.c.MaxHistoryBytes || g.historyBytes+cost > g.c.MaxTotalHistoryBytes) {
+		oldest := bs.history[bs.historyHead]
 		oldestCost := int64(len(oldest.Data)) + historyEventOverhead
-		copy(bs.history, bs.history[1:])
-		bs.history[len(bs.history)-1] = Event{}
-		bs.history = bs.history[:len(bs.history)-1]
+		bs.history[bs.historyHead] = Event{}
+		bs.historyHead++
 		bs.historyBytes -= oldestCost
 		g.historyBytes -= oldestCost
+	}
+	// Eviction is O(1); occasionally compact the retained suffix so repeated
+	// appends cannot grow the backing slice without bound.
+	if bs.historyHead >= 64 && bs.historyHead*2 >= len(bs.history) {
+		copy(bs.history, bs.history[bs.historyHead:])
+		bs.history = bs.history[:len(bs.history)-bs.historyHead]
+		bs.historyHead = 0
 	}
 	if bs.historyBytes+cost > g.c.MaxHistoryBytes || g.historyBytes+cost > g.c.MaxTotalHistoryBytes {
 		return
@@ -449,6 +549,7 @@ func (g *Gateway) clearHistoryLocked(bs *browserSession) {
 	g.historyBytes -= bs.historyBytes
 	bs.historyBytes = 0
 	bs.history = nil
+	bs.historyHead = 0
 }
 func (g *Gateway) send(w http.ResponseWriter, r *http.Request) {
 	owner, ok := g.principal(w, r)
@@ -508,23 +609,19 @@ func (g *Gateway) read(bs *browserSession, after uint64) ([]Event, <-chan struct
 		return nil, nil, http.StatusGone
 	}
 	expected := after + 1
-	for _, e := range bs.history {
+	events := make([]Event, 0, len(bs.history)-bs.historyHead)
+	for _, e := range bs.history[bs.historyHead:] {
 		if e.Cursor <= after {
 			continue
 		}
 		if e.Cursor != expected {
 			return nil, nil, http.StatusConflict
 		}
+		events = append(events, e)
 		expected = e.Cursor + 1
 	}
 	if expected != 0 && expected <= bs.next {
 		return nil, nil, http.StatusConflict
-	}
-	events := make([]Event, 0)
-	for _, e := range bs.history {
-		if e.Cursor > after {
-			events = append(events, e)
-		}
 	}
 	return events, bs.changed, 0
 }

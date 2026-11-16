@@ -1,0 +1,10 @@
+certs/
+allow.txt
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+bin/mira-bench
+bin/mira-dev-certs

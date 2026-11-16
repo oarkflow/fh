@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 
 	"github.com/oarkflow/fh/durable"
 	"github.com/oarkflow/fh/protocol"
@@ -40,6 +39,12 @@ type Store interface {
 // never accept a client-supplied tenant or identity here. Only stored data
 // receives AckStored. Errors are returned as application events, not fake ACKs.
 func ServeChannel(ctx context.Context, ch protocol.Channel, principal protocol.Principal, store Store) error {
+	return ServeChannelWithErrorHandler(ctx, ch, principal, store, nil)
+}
+
+// ServeChannelWithErrorHandler reports internal store errors to the trusted
+// application while sending only sanitized error classes to the remote peer.
+func ServeChannelWithErrorHandler(ctx context.Context, ch protocol.Channel, principal protocol.Principal, store Store, onStoreError func(error)) error {
 	if principal.Subject == "" {
 		return errors.New("journal: authenticated principal required")
 	}
@@ -73,7 +78,10 @@ func ServeChannel(ctx context.Context, ch protocol.Channel, principal protocol.P
 			m := protocol.Message{Payload: req.Payload}
 			cursor, e := store.AppendIdempotent(ctx, principal, req.ID, m)
 			if e != nil {
-				if err := write(ctx, ch, Event{Type: "error", Error: e.Error()}); err != nil {
+				if onStoreError != nil {
+					onStoreError(e)
+				}
+				if err := write(ctx, ch, Event{Type: "error", Error: publicStoreError(e)}); err != nil {
 					return err
 				}
 				continue
@@ -95,7 +103,10 @@ func ServeChannel(ctx context.Context, ch protocol.Channel, principal protocol.P
 			for {
 				entries, e := store.ReadRecordsAfter(ctx, principal, cursor, 64)
 				if e != nil {
-					if err := write(ctx, ch, Event{Type: "error", Error: e.Error()}); err != nil {
+					if onStoreError != nil {
+						onStoreError(e)
+					}
+					if err := write(ctx, ch, Event{Type: "error", Error: publicStoreError(e)}); err != nil {
 						return err
 					}
 					break
@@ -115,7 +126,10 @@ func ServeChannel(ctx context.Context, ch protocol.Channel, principal protocol.P
 			}
 		case "ack":
 			if e := store.Acknowledge(ctx, principal, req.Cursor); e != nil {
-				if err := write(ctx, ch, Event{Type: "error", Error: e.Error()}); err != nil {
+				if onStoreError != nil {
+					onStoreError(e)
+				}
+				if err := write(ctx, ch, Event{Type: "error", Error: publicStoreError(e)}); err != nil {
 					return err
 				}
 				continue
@@ -127,12 +141,24 @@ func ServeChannel(ctx context.Context, ch protocol.Channel, principal protocol.P
 				return e
 			}
 		default:
-			if e := write(ctx, ch, Event{Type: "error", Error: fmt.Sprintf("unknown operation %q", req.Operation)}); e != nil {
+			if e := write(ctx, ch, Event{Type: "error", Error: "unknown operation"}); e != nil {
 				return e
 			}
 		}
 	}
 }
+
+func publicStoreError(err error) string {
+	switch {
+	case errors.Is(err, durable.ErrConflict):
+		return "idempotency conflict"
+	case errors.Is(err, durable.ErrLimit):
+		return "storage capacity reached"
+	default:
+		return "storage operation failed"
+	}
+}
+
 func write(ctx context.Context, ch protocol.Channel, e Event) error {
 	b, err := json.Marshal(e)
 	if err != nil {

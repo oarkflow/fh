@@ -44,7 +44,7 @@ if err != nil {
 
 server, err := mira.ListenTLS(
 	":7447", ":7448", tlsConfig,
-	mira.Options{MaxSessions: 1000, MaxSessionsPerIdentity: 4},
+	mira.Options{MaxSessions: 16, MaxSessionsPerIdentity: 4},
 )
 if err != nil {
 	log.Fatal(err)
@@ -56,6 +56,42 @@ The listener is separate from `fh.App`'s HTTP listener. Certificate identity
 must also be authorized for session and channel access; successful mTLS alone
 does not grant application permissions. See [MIRA quick start](QUICK_START.md),
 [deployment](DEPLOYMENT.md), and [runbook](RUNBOOK.md).
+
+When a deployment has an identity allowlist, use
+`mira.ListenTLSWithIdentityAuthorizer` to reject verified but unauthorized
+certificates before allocating a MIRA session. Keep channel authorization in
+place as well, since session admission does not authorize application actions.
+
+`mira.Options` clamps `MaxSessions`, `MaxChannels`, and `MaxInflight` to hard
+implementation ceilings of 100,000, 4,096, and 4,096. Per-session memory still
+depends on the configured message, queue, receive, and active-channel limits;
+size these together with the process memory limit.
+
+The `mira-tls-server` command exposes `-max-tls-handshakes-per-ip`,
+`-max-handshake-attempts-per-second`, `-udp-read-buffer`, and
+`-udp-write-buffer` for these deployment controls.
+
+`MaxHandshakeAttemptsPerSecond` applies an endpoint-wide token bucket to UDP
+HELLO and TLS bootstrap attempts (default 2,000 attempts/second with a
+two-second burst), before credential and key-agreement work. Each source IP is
+also limited to 50 attempts/second with a 100-attempt burst. Raise the endpoint
+limit only when the host can sustain the resulting handshake load.
+`mira_handshake_rate_limited_total` counts UDP HELLO rejections;
+`mira_tls_handshake_rate_limited_total` counts TLS admission rejections.
+Prometheus also exposes aggregate inbound/outbound datagram and payload-byte
+counters, queue drops, and UDP write errors; these contain no per-peer labels.
+
+The TLS bootstrap listener also limits concurrent unauthenticated handshakes
+per source IP with `MaxTLSHandshakesPerIP` (default 32, hard cap 1,024), in
+addition to its 128-connection endpoint-wide cap. Tune for expected clients
+behind shared NAT addresses while keeping the endpoint-wide limit sized for
+available CPU and memory.
+
+For high-throughput hosts, `UDPReadBufferBytes` and `UDPWriteBufferBytes` can
+request larger kernel socket queues on listeners and dialed sockets. Zero keeps
+the operating-system default; requests are capped at 64 MiB, and the operating
+system may apply a lower limit. Set these alongside host UDP buffer limits and
+measure packet drops under the target workload before raising them.
 
 ## Supporting packages
 

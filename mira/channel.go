@@ -58,6 +58,7 @@ type Channel struct {
 	completed         map[uint64]protocol.Message // owned by loop
 	seen              map[uint64]struct{}         // owned by loop
 	seenOrder         []uint64
+	seenOrderNext     int
 	maxSeen           uint64
 	mu                sync.Mutex
 	receipts          map[uint64]*receiptState
@@ -91,6 +92,7 @@ func (c *Channel) signalClose() {
 		c.mu.Lock()
 		for _, r := range c.receipts {
 			if !r.complete {
+				clear(r.payload)
 				r.payload = nil
 				r.complete = true
 				r.err = ErrClosed
@@ -127,13 +129,51 @@ func (c *Channel) Send(ctx context.Context, payload []byte) (uint64, error) {
 	if (c.cfg.Delivery == protocol.BestEffort || c.cfg.Delivery == protocol.LatestState) && len(payload) > fragmentSize {
 		return 0, protocol.ErrBackpressure
 	}
-	if !c.s.reserveQueue(int64(len(payload) + 64)) {
+	reliable := c.cfg.Delivery != protocol.BestEffort && c.cfg.Delivery != protocol.LatestState
+	reserved := int64(len(payload) + 64)
+	if !c.s.reserveQueue(reserved) {
 		return 0, ErrBackpressure
 	}
+	var reservation *queueReservation
+	if !reliable {
+		reservation = &queueReservation{s: c.s, bytes: reserved}
+	}
+	if c.closed.Load() || c.expired() {
+		if reservation != nil {
+			reservation.release()
+		} else {
+			c.s.releaseQueue(reserved)
+		}
+		if c.expired() {
+			return 0, ErrExpired
+		}
+		return 0, ErrClosed
+	}
+	select {
+	case <-c.s.done:
+		if reservation != nil {
+			reservation.release()
+		} else {
+			c.s.releaseQueue(reserved)
+		}
+		return 0, ErrClosed
+	default:
+	}
 	id := c.nextMsg.Load() + 1
-	reliable := c.cfg.Delivery != protocol.BestEffort && c.cfg.Delivery != protocol.LatestState
 	if reliable {
 		c.mu.Lock()
+		if c.closed.Load() {
+			c.mu.Unlock()
+			c.s.releaseQueue(reserved)
+			return 0, ErrClosed
+		}
+		select {
+		case <-c.s.done:
+			c.mu.Unlock()
+			c.s.releaseQueue(reserved)
+			return 0, ErrClosed
+		default:
+		}
 		if len(c.receipts) >= 4096 {
 			for k, r := range c.receipts {
 				if r.complete {
@@ -143,32 +183,65 @@ func (c *Channel) Send(ctx context.Context, payload []byte) (uint64, error) {
 		}
 		if len(c.receipts) >= 8192 {
 			c.mu.Unlock()
-			c.s.releaseQueue(int64(len(payload) + 64))
+			c.s.releaseQueue(reserved)
 			return 0, ErrBackpressure
 		}
-		c.receipts[id] = &receiptState{done: make(chan struct{}), storedDone: make(chan struct{}), processedDone: make(chan struct{}), bytes: int64(len(payload) + 64)}
+		c.receipts[id] = &receiptState{done: make(chan struct{}), storedDone: make(chan struct{}), processedDone: make(chan struct{}), bytes: reserved}
 		c.mu.Unlock()
 	}
-	req := sendRequest{c: c, id: id, data: append([]byte(nil), payload...), reserved: int64(len(payload) + 64)}
+	req := sendRequest{c: c, id: id, data: append([]byte(nil), payload...), reservation: reservation}
 	select {
 	case <-ctx.Done():
-		c.dropReceipt(id)
-		c.s.releaseQueue(req.reserved)
+		clear(req.data)
+		if reservation != nil {
+			reservation.release()
+		} else {
+			c.dropReceipt(id)
+		}
 		return 0, ctx.Err()
 	case <-c.s.done:
-		c.dropReceipt(id)
-		c.s.releaseQueue(req.reserved)
+		clear(req.data)
+		if reservation != nil {
+			reservation.release()
+		} else {
+			c.dropReceipt(id)
+		}
 		return 0, ErrClosed
 	case c.s.requests <- req:
+		select {
+		case <-c.s.done:
+			if reservation != nil {
+				reservation.release()
+			}
+			c.signalClose()
+			return 0, ErrClosed
+		default:
+		}
 		c.nextMsg.Store(id)
 		return id, nil
 	default:
-		c.dropReceipt(id)
-		c.s.releaseQueue(req.reserved)
+		clear(req.data)
+		if reservation != nil {
+			reservation.release()
+		} else {
+			c.dropReceipt(id)
+		}
 		return 0, ErrBackpressure
 	}
 }
-func (c *Channel) dropReceipt(id uint64) { c.mu.Lock(); delete(c.receipts, id); c.mu.Unlock() }
+func (c *Channel) dropReceipt(id uint64) {
+	c.mu.Lock()
+	if r := c.receipts[id]; r != nil {
+		delete(c.receipts, id)
+		if !r.complete {
+			r.complete = true
+			clear(r.payload)
+			r.payload = nil
+			c.s.releaseQueue(r.bytes)
+		}
+	}
+	c.mu.Unlock()
+}
 func (c *Channel) setLeft(id uint64, n int) {
 	c.mu.Lock()
 	if r := c.receipts[id]; r != nil {
@@ -182,6 +255,7 @@ func (c *Channel) ackFragment(id uint64) {
 	if r != nil && !r.complete {
 		r.left--
 		if r.left == 0 {
+			clear(r.payload)
 			r.payload = nil
 			r.complete = true
 			close(r.done)
@@ -249,6 +323,8 @@ func (c *Channel) markReceipt(id uint64, level protocol.ReceiptLevel) {
 	// An application receipt also confirms that a complete message was accepted,
 	// even if the transport ACK datagram was lost.
 	if !r.complete {
+		clear(r.payload)
+		r.payload = nil
 		r.complete = true
 		close(r.done)
 		c.s.releaseQueue(r.bytes)
@@ -313,23 +389,27 @@ func (c *Channel) maybeReadEOF() {
 		c.readEOFOnce.Do(func() { close(c.readEOF) })
 	}
 }
-func (c *Channel) Receive(ctx context.Context) (protocol.Message, error) {
-	// Drain already-buffered messages first, including when the channel closed.
+func (c *Channel) takeBuffered() (protocol.Message, bool) {
 	select {
 	case m := <-c.recv:
-		c.s.recvBytes.Add(-int64(len(m.Payload)))
-		c.s.consumedBytes.Add(int64(len(m.Payload)))
+		c.s.releaseReceive(int64(len(m.Payload)), true)
 		select {
 		case c.s.wake <- struct{}{}:
 		default:
 		}
-		return m, nil
+		return m, true
 	default:
+		return protocol.Message{}, false
+	}
+}
+func (c *Channel) Receive(ctx context.Context) (protocol.Message, error) {
+	// Drain already-buffered messages first, including when the channel closed.
+	if m, ok := c.takeBuffered(); ok {
+		return m, nil
 	}
 	select {
 	case m := <-c.recv:
-		c.s.recvBytes.Add(-int64(len(m.Payload)))
-		c.s.consumedBytes.Add(int64(len(m.Payload)))
+		c.s.releaseReceive(int64(len(m.Payload)), true)
 		select {
 		case c.s.wake <- struct{}{}:
 		default:
@@ -337,21 +417,19 @@ func (c *Channel) Receive(ctx context.Context) (protocol.Message, error) {
 		return m, nil
 	case <-c.readEOF:
 		// Do not return EOF ahead of queued messages even if both cases ready.
-		select {
-		case m := <-c.recv:
-			c.s.recvBytes.Add(-int64(len(m.Payload)))
-			c.s.consumedBytes.Add(int64(len(m.Payload)))
-			select {
-			case c.s.wake <- struct{}{}:
-			default:
-			}
+		if m, ok := c.takeBuffered(); ok {
 			return m, nil
-		default:
 		}
 		return protocol.Message{}, io.EOF
 	case <-c.closedCh:
+		if m, ok := c.takeBuffered(); ok {
+			return m, nil
+		}
 		return protocol.Message{}, ErrClosed
 	case <-c.s.done:
+		if m, ok := c.takeBuffered(); ok {
+			return m, nil
+		}
 		return protocol.Message{}, ErrClosed
 	case <-ctx.Done():
 		return protocol.Message{}, ctx.Err()
@@ -385,20 +463,20 @@ func encodeOpen(id uint64, c protocol.ChannelConfig) []byte {
 	return b
 }
 func decodeOpen(body []byte) (uint64, protocol.ChannelConfig, bool) {
-	id, n := binary.Uvarint(body)
-	if n <= 0 || n+2 > len(body) {
+	id, n, ok := readCanonicalUvarint(body)
+	if !ok || n+2 > len(body) {
 		return 0, protocol.ChannelConfig{}, false
 	}
 	body = body[n:]
 	cfg := protocol.ChannelConfig{Delivery: protocol.Delivery(body[0]), Priority: body[1]}
 	body = body[2:]
-	max, n := binary.Uvarint(body)
-	if n <= 0 {
+	max, n, ok := readCanonicalUvarint(body)
+	if !ok {
 		return 0, cfg, false
 	}
 	body = body[n:]
-	lease, n := binary.Uvarint(body)
-	if n <= 0 || n != len(body) {
+	lease, n, ok := readCanonicalUvarint(body)
+	if !ok || n != len(body) {
 		return 0, cfg, false
 	}
 	if cfg.Delivery < protocol.ReliableOrdered || cfg.Delivery > protocol.Bulk || max == 0 || max > (1<<20) || lease > 86_400_000 {
@@ -409,40 +487,69 @@ func decodeOpen(body []byte) (uint64, protocol.ChannelConfig, bool) {
 	return id, cfg, true
 }
 
+func readCanonicalUvarint(body []byte) (uint64, int, bool) {
+	n, consumed := binary.Uvarint(body)
+	if consumed <= 0 {
+		return 0, 0, false
+	}
+	if consumed > 1 && n < uint64(1)<<uint(7*(consumed-1)) {
+		return 0, 0, false
+	}
+	return n, consumed, true
+}
+
 // DATA v4 contains the sender's chosen fragment size. A message's fragments
 // must all agree on this size; this permits PMTU discovery without corrupting
 // in-flight reassembly when the path changes between messages.
 func encodeDataSized(id, msg, total, offset, size uint64, data []byte) []byte {
-	b := binary.AppendUvarint(nil, id)
-	b = binary.AppendUvarint(b, msg)
-	b = binary.AppendUvarint(b, total)
-	b = binary.AppendUvarint(b, offset)
-	b = binary.AppendUvarint(b, size)
-	return append(b, data...)
+	var prefix [5 * binary.MaxVarintLen64]byte
+	n := 0
+	n += binary.PutUvarint(prefix[n:], id)
+	n += binary.PutUvarint(prefix[n:], msg)
+	n += binary.PutUvarint(prefix[n:], total)
+	n += binary.PutUvarint(prefix[n:], offset)
+	n += binary.PutUvarint(prefix[n:], size)
+	body := make([]byte, n+len(data))
+	copy(body, prefix[:n])
+	copy(body[n:], data)
+	return body
 }
 func decodeData(b []byte) (cid, msg, total, offset uint64, data []byte, ok bool) {
 	cid, msg, total, offset, _, data, ok = decodeDataSized(b)
 	return
 }
 func decodeDataSized(b []byte) (cid, msg, total, offset, size uint64, data []byte, ok bool) {
-	nums := []*uint64{&cid, &msg, &total, &offset, &size}
-	for _, v := range nums {
-		n, k := binary.Uvarint(b)
-		if k <= 0 {
-			return
-		}
-		var canonical [10]byte
-		if binary.PutUvarint(canonical[:], n) != k {
-			return
-		}
-		*v = n
-		b = b[k:]
+	var n, k int
+	cid, n, ok = readCanonicalUvarint(b)
+	if !ok {
+		return
 	}
+	b = b[n:]
+	msg, k, ok = readCanonicalUvarint(b)
+	if !ok {
+		return
+	}
+	b = b[k:]
+	total, n, ok = readCanonicalUvarint(b)
+	if !ok {
+		return
+	}
+	b = b[n:]
+	offset, k, ok = readCanonicalUvarint(b)
+	if !ok {
+		return
+	}
+	b = b[k:]
+	size, n, ok = readCanonicalUvarint(b)
+	if !ok {
+		return
+	}
+	b = b[n:]
 	return cid, msg, total, offset, size, b, true
 }
 
-// payloadForRecovery is only called from the session actor. It returns the
-// already-accounted reliable payload, not another copy.
+// payloadForRecovery returns a private copy because Channel.Close may clear the
+// receipt-owned buffer concurrently after releasing the receipt mutex.
 func (c *Channel) payloadForRecovery(id uint64) []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -450,7 +557,7 @@ func (c *Channel) payloadForRecovery(id uint64) []byte {
 	if r == nil || r.complete {
 		return nil
 	}
-	return r.payload
+	return append([]byte(nil), r.payload...)
 }
 func (c *Channel) resetRecoveryFragments(id uint64, n int) {
 	c.mu.Lock()

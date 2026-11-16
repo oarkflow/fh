@@ -1,7 +1,8 @@
 # Deploying `mira-tls-server` with Docker
 
-Image: `scratch` + four static binaries (`mira-tls-server`, `mira-healthcheck`,
-`mira-bench`, `mira-dev-certs`), about 32 MB, running as a non-root user.
+Production image: `scratch` + the static server and healthcheck binaries,
+running as a non-root user. Benchmark and development certificate tools are
+available in a separate image target.
 
 ## Build
 
@@ -9,8 +10,11 @@ Image: `scratch` + four static binaries (`mira-tls-server`, `mira-healthcheck`,
 # Anywhere with Go and Docker (compiles inside the build stage):
 docker build -f Dockerfile.mira -t fh-mira:local .
 
+# Optional smoke-test / development tools; not included in the server image:
+docker build --target tools -f Dockerfile.mira -t fh-mira-tools:local .
+
 # Or cross-compile and ship binaries to a host that should not compile:
-for c in mira-tls-server mira-healthcheck mira-bench mira-dev-certs; do
+for c in mira-tls-server mira-healthcheck; do
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o deploy/mira/bin/$c ./cmd/$c
 done
 docker build -f deploy/mira/Dockerfile.prebuilt -t fh-mira:local deploy/mira
@@ -35,7 +39,7 @@ and firewall first, and read the status note in
 
 ```sh
 docker run --rm --network <same network> --user "$(id -u):$(id -g)" \
-  -v "$PWD/certs:/certs:ro" --entrypoint /mira-bench fh-mira:local \
+  -v "$PWD/certs:/certs:ro" --entrypoint /mira-bench fh-mira-tools:local \
   -tcp mira-server:7448 -udp mira-server:7447 \
   -cert /certs/client.pem -key /certs/client.key -ca /certs/root.pem \
   -name server.local -clients 4 -messages 1000 -bytes 256

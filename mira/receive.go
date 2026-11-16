@@ -8,6 +8,8 @@ import (
 	"github.com/oarkflow/fh/protocol"
 )
 
+const maxSeenMessageIDs = 4096
+
 func (s *Session) onOpen(body []byte) bool {
 	id, cfg, ok := decodeOpen(body)
 	if !ok || id == 0 {
@@ -30,11 +32,20 @@ func (s *Session) onOpen(body []byte) bool {
 		return true
 	}
 	c := newChannel(s, id, cfg, false)
-	select {
-	case s.accepts <- c:
+	accepted := false
+	if s.server != nil {
+		accepted = s.server.deliverChannel(s, c)
+	} else {
+		select {
+		case s.accepts <- c:
+			accepted = true
+		default:
+		}
+	}
+	if accepted {
 		s.channels[id] = c
 		s.enqueueControl(txFrame{frame: wire.Frame{Type: wire.FrameOpenAck, Body: binary.AppendUvarint(nil, id)}, reliable: true})
-	default:
+	} else {
 		s.enqueueControl(txFrame{frame: wire.Frame{Type: wire.FrameReset, Body: binary.AppendUvarint(nil, id)}, reliable: true})
 	}
 	return true
@@ -56,6 +67,19 @@ func (s *Session) onData(body []byte) bool {
 	if total > uint64(c.cfg.MaxMessage) || total > uint64(s.opts.MaxMessage) || offset > total || uint64(len(chunk)) > total-offset {
 		return false
 	}
+	// Keep an authenticated peer from jumping the message sequence far ahead
+	// and making otherwise valid subsequent IDs stale. The same bounded window
+	// is used below to retain duplicate-suppression state.
+	floor := c.maxSeen
+	if c.cfg.Delivery == protocol.ReliableOrdered && c.nextDeliver > 1 && c.nextDeliver-1 > floor {
+		floor = c.nextDeliver - 1
+	}
+	if c.cfg.Delivery == protocol.LatestState && c.lastState > floor {
+		floor = c.lastState
+	}
+	if c.cfg.Delivery != protocol.BestEffort && id > floor && id-floor > maxSeenMessageIDs {
+		return false
+	}
 	if size == 0 || size > 1300 || offset%size != 0 {
 		return false
 	}
@@ -64,12 +88,12 @@ func (s *Session) onData(body []byte) bool {
 		return false
 	}
 	if c.cfg.Delivery == protocol.LatestState || c.cfg.Delivery == protocol.BestEffort {
-		if !s.admitApplicationBytes(len(chunk)) {
-			return true
-		} // best effort may drop
 		if offset != 0 || total > size {
 			return false
 		}
+		if !s.admitApplicationBytes(len(chunk)) {
+			return true
+		} // best effort may drop
 		if c.cfg.Delivery == protocol.LatestState && id <= c.lastState {
 			return true
 		}
@@ -81,14 +105,18 @@ func (s *Session) onData(body []byte) bool {
 			c.lastState = id
 			select {
 			case old := <-c.recv:
-				s.recvBytes.Add(-int64(len(old.Payload)))
+				discarded := int64(len(old.Payload))
+				s.releaseReceive(discarded, true)
+				clear(old.Payload)
 			default:
 			}
 		}
 		select {
 		case c.recv <- m:
 		default:
-			s.recvBytes.Add(-int64(len(chunk)))
+			discarded := int64(len(m.Payload))
+			s.releaseReceive(discarded, true)
+			clear(m.Payload)
 		}
 		return true
 	}
@@ -177,10 +205,12 @@ func (s *Session) noteSeen(c *Channel, id uint64) {
 		c.maxSeen = id
 	}
 	c.seen[id] = struct{}{}
-	c.seenOrder = append(c.seenOrder, id)
-	if len(c.seenOrder) > 4096 {
-		old := c.seenOrder[0]
-		delete(c.seen, old)
-		c.seenOrder = c.seenOrder[1:]
+	if len(c.seenOrder) < maxSeenMessageIDs {
+		c.seenOrder = append(c.seenOrder, id)
+		return
 	}
+	old := c.seenOrder[c.seenOrderNext]
+	delete(c.seen, old)
+	c.seenOrder[c.seenOrderNext] = id
+	c.seenOrderNext = (c.seenOrderNext + 1) % maxSeenMessageIDs
 }

@@ -15,9 +15,10 @@ services:
       - -ca=/certs/root.pem
       - -allow-file=/config/allow.txt
       - -metrics=127.0.0.1:9109
-      - -max-sessions=1000
+      - -max-sessions=16            # conservative default for the 512 MiB container cap
+      - -max-server-receive-bytes=134217728 # aggregate inbound payload budget (128 MiB)
       - -max-sessions-per-identity=4   # raise for gateways / load tests
-      - -max-inflight=128              # bulk senders; default 32
+      - -max-inflight=256              # high-latency throughput; per-session cap is also 256
     ports:
       # Loopback by default. Publish on a public address only after review:
       #   "0.0.0.0:7447:7447/udp" and "0.0.0.0:7448:7448/tcp"

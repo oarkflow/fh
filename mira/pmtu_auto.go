@@ -1,6 +1,7 @@
 package mira
 
 import (
+	"sort"
 	"time"
 
 	"github.com/oarkflow/fh/internal/wire"
@@ -104,6 +105,8 @@ func (s *Session) resetPathMTU() {
 		}
 		delete(s.pending, pn)
 		s.inFlightBytes -= p.size
+		clear(p.frame.frame.Body)
+		clear(p.raw)
 		if p.frame.probeReply != nil {
 			select {
 			case p.frame.probeReply <- 0:
@@ -112,16 +115,22 @@ func (s *Session) resetPathMTU() {
 		}
 	}
 	kept := s.control[:0]
-	for _, f := range s.control {
+	for i := range s.control {
+		f := s.control[i]
 		if f.probeMTU == 0 {
 			kept = append(kept, f)
-		} else if f.probeReply != nil {
-			select {
-			case f.probeReply <- 0:
-			default:
+		} else {
+			clear(f.frame.Body)
+			s.control[i] = txFrame{}
+			if f.probeReply != nil {
+				select {
+				case f.probeReply <- 0:
+				default:
+				}
 			}
 		}
 	}
+	clear(s.control[len(kept):])
 	s.control = kept
 	s.mtuProbeOutstanding = false
 	s.mtuProbeFailures = 0
@@ -159,18 +168,36 @@ func (s *Session) recoverMTUBlackhole(now time.Time) {
 		if _, found := impacted[keyOf(p.frame)]; found {
 			delete(s.pending, pn)
 			s.inFlightBytes -= p.size
+			clear(p.frame.frame.Body)
+			clear(p.raw)
 		}
 	}
-	pendingQueue := s.queue[:0]
-	for _, f := range s.queue {
-		if _, found := impacted[keyOf(f)]; !found {
-			pendingQueue = append(pendingQueue, f)
+	for i, f := range s.queue {
+		if f.c == nil {
+			continue
+		}
+		if _, found := impacted[keyOf(f)]; found {
+			f.reservation.release()
+			clear(f.frame.Body)
+			s.queue[i] = txFrame{}
+			s.queueLive--
 		}
 	}
-	s.queue = pendingQueue
+	s.compactQueue(false)
 	// Place resent fragments ahead of later messages on the same channel.
 	prefix := make([]txFrame, 0, 256)
-	for k, c := range impacted {
+	keys := make([]key, 0, len(impacted))
+	for k := range impacted {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].channel != keys[j].channel {
+			return keys[i].channel < keys[j].channel
+		}
+		return keys[i].msg < keys[j].msg
+	})
+	for _, k := range keys {
+		c := impacted[k]
 		data := c.payloadForRecovery(k.msg)
 		if data == nil {
 			continue
@@ -183,11 +210,17 @@ func (s *Session) recoverMTUBlackhole(now time.Time) {
 		for i := 0; i < count; i++ {
 			start := i * fragmentSize
 			end := min(len(data), start+fragmentSize)
-			body := encodeDataSized(c.id, k.msg, uint64(len(data)), uint64(start), uint64(fragmentSize), data[start:end])
-			prefix = append(prefix, txFrame{frame: wire.Frame{Type: wire.FrameData, Body: body}, reliable: true, c: c, msgID: k.msg, reclaimCredit: start == 0})
+			total := uint64(len(data))
+			offset := uint64(start)
+			body := encodeDataSized(c.id, k.msg, total, offset, uint64(fragmentSize), data[start:end])
+			prefix = append(prefix, txFrame{frame: wire.Frame{Type: wire.FrameData, Body: body}, reliable: true, c: c, msgID: k.msg, dataTotal: total, dataOffset: offset, reclaimCredit: start == 0})
 		}
+		clear(data)
 	}
+	s.compactQueue(true)
 	s.queue = append(prefix, s.queue...)
+	s.queueLive += len(prefix)
+	s.compactQueue(true)
 	s.cwnd = max(2*wire.MaxDatagram, min(s.cwnd, 10*wire.MaxDatagram))
 	s.ssthresh = s.cwnd
 	s.nextPaced = time.Time{}

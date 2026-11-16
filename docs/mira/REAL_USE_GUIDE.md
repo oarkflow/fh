@@ -128,7 +128,7 @@ In your Go application, the basic server lifecycle is:
 ```go
 app := fh.New()
 server, err := app.ListenMIRATLS(udpAddr, tcpAddr, serverTLS, fh.MIRAOptions{
-    MaxSessions: 1000, MaxSessionsPerIdentity: 2, MaxChannels: 8,
+    MaxSessions: 16, MaxSessionsPerIdentity: 2, MaxChannels: 8,
 })
 if err != nil { return err }
 server.SetChannelAuthorizer(func(identity string, cfg protocol.ChannelConfig) bool {
@@ -205,7 +205,7 @@ go build -trimpath -o ./mira-tls-server ./cmd/mira-tls-server
   -udp :7447 -tcp :7448 \
   -cert /etc/mira/server.pem -key /etc/mira/server.key \
   -ca /etc/mira/client-ca.pem -allow-file /etc/mira/allow.txt \
-  -max-sessions 1000 -max-sessions-per-identity 4 -max-channels 16 \
+  -max-sessions 16 -max-sessions-per-identity 4 -max-channels 16 \
   -metrics 127.0.0.1:9109
 ```
 

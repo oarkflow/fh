@@ -3,10 +3,10 @@ package mira
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"net"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,11 +27,24 @@ type openResult struct {
 	err error
 }
 type sendRequest struct {
-	c        *Channel
-	id       uint64
-	data     []byte
-	reserved int64
+	c           *Channel
+	id          uint64
+	data        []byte
+	reservation *queueReservation
 }
+type queueReservation struct {
+	s        *Session
+	bytes    int64
+	released atomic.Bool
+}
+
+func (r *queueReservation) release() {
+	if r != nil && r.released.CompareAndSwap(false, true) {
+		r.s.releaseQueue(r.bytes)
+		r.s = nil
+	}
+}
+
 type closeRequest struct{ id uint64 }
 type receiptRequest struct{ frame wire.Frame }
 type terminateRequest struct{}
@@ -46,15 +59,36 @@ type mtuProbeRequest struct {
 }
 type statsRequest struct{ reply chan SessionStats }
 type inboundPacket struct {
-	raw  []byte
-	from *net.UDPAddr
+	raw    []byte
+	from   *net.UDPAddr
+	pooled bool
 }
+
+var inboundDatagramPool = sync.Pool{New: func() any {
+	b := make([]byte, wire.MaxDatagram+1)
+	return &b
+}}
+
+func acquireInboundBuffer() []byte {
+	b := *inboundDatagramPool.Get().(*[]byte)
+	return b[:wire.MaxDatagram+1]
+}
+
+func releaseInboundDatagram(b []byte) {
+	if cap(b) == wire.MaxDatagram+1 {
+		clear(b)
+		buffer := b[:wire.MaxDatagram+1]
+		inboundDatagramPool.Put(&buffer)
+	}
+}
+
 type candidatePath struct {
 	addr           *net.UDPAddr
 	token          [8]byte
 	first          time.Time
 	lastChallenge  time.Time
 	received, sent int
+	replay         replay.Window
 }
 
 // SessionStats is a consistent snapshot from the single-owner session worker.
@@ -92,64 +126,79 @@ type txFrame struct {
 	reliable      bool
 	c             *Channel
 	msgID         uint64
+	dataTotal     uint64
+	dataOffset    uint64
+	reservation   *queueReservation
 }
 type sentPacket struct {
-	raw   []byte
-	sent  time.Time
-	first time.Time
-	tries int
-	frame txFrame
-	size  int
+	raw      []byte
+	sent     time.Time
+	first    time.Time
+	tries    int
+	fastLost bool
+	frame    txFrame
+	size     int
 }
 
 // Session is a full-duplex session on a native UDP socket.
 type Session struct {
-	conn                        *net.UDPConn
-	connMu                      sync.RWMutex
-	remote                      *net.UDPAddr
-	remoteMu                    sync.RWMutex
-	path                        *candidatePath
-	migrations                  uint64
-	id                          uint64
-	identity                    string
-	client                      bool
-	bootstrapTLS                bool          // Require UDP return-path validation before transmitting data.
-	tlsReady                    chan struct{} // Client receives a valid authenticated UDP response.
-	tlsReadyOnce                sync.Once
-	validated                   bool // Only accessed from the session actor.
-	opts                        Options
-	tx, rx                      *cryptokit.Protector
-	rxPrevious                  *cryptokit.Protector
-	txChain, rxChain            [32]byte
-	schedule                    trafficSchedule
-	txEpoch, rxEpoch            uint16
-	pathMTU                     int
-	mtuProbeOutstanding         bool
-	mtuProbeTarget              int
-	mtuBlackholeRecoveries      uint64
-	mtuProbeFailures            int
-	lastSmallAck                time.Time
-	nextMTUProbe                time.Time
-	maxRecvPN                   uint64
-	server                      *Server
-	incoming                    chan inboundPacket
-	requests                    chan any
-	wake                        chan struct{}
-	accepts                     chan *Channel
-	done                        chan struct{}
-	finished                    chan struct{}
-	once                        sync.Once
-	recvBytes                   atomic.Int64
-	consumedBytes               atomic.Int64
-	queuedBytes                 atomic.Int64
-	channels                    map[uint64]*Channel
-	closedIDs                   map[uint64]struct{}
-	closedOrder                 []uint64
-	nextChannel                 uint64
-	nextPN                      uint64
-	pending                     map[uint64]*sentPacket
-	queue                       []txFrame
+	conn                   *net.UDPConn
+	connMu                 sync.RWMutex
+	remote                 *net.UDPAddr
+	remoteMu               sync.RWMutex
+	path                   *candidatePath
+	migrations             uint64
+	id                     uint64
+	identity               string
+	client                 bool
+	bootstrapTLS           bool          // Require UDP return-path validation before transmitting data.
+	tlsReady               chan struct{} // Client receives a valid authenticated UDP response.
+	tlsReadyOnce           sync.Once
+	validated              bool // Only accessed from the session actor.
+	opts                   Options
+	tx, rx                 *cryptokit.Protector
+	rxPrevious             *cryptokit.Protector
+	txChain, rxChain       [32]byte
+	schedule               trafficSchedule
+	txEpoch, rxEpoch       uint16
+	pathMTU                int
+	mtuProbeOutstanding    bool
+	mtuProbeTarget         int
+	mtuBlackholeRecoveries uint64
+	mtuProbeFailures       int
+	lastSmallAck           time.Time
+	nextMTUProbe           time.Time
+	maxRecvPN              uint64
+	server                 *Server
+	incoming               chan inboundPacket
+	requests               chan any
+	wake                   chan struct{}
+	accepts                chan *Channel
+	done                   chan struct{}
+	finished               chan struct{}
+	once                   sync.Once
+	readerMu               sync.Mutex
+	readerWG               sync.WaitGroup
+	recvBytes              atomic.Int64
+	consumedBytes          atomic.Int64
+	queuedBytes            atomic.Int64
+	channels               map[uint64]*Channel
+	closedIDs              map[uint64]struct{}
+	closedOrder            []uint64
+	closedOrderNext        int
+	nextChannel            uint64
+	nextPN                 uint64
+	pending                map[uint64]*sentPacket
+	queue                  []txFrame
+	// Per-channel indexes make dequeue proportional to active channels rather
+	// than queued fragments; sent or discarded slots are zeroed until compaction.
+	queueByChannel              map[uint64][]int
+	queueHeads                  map[uint64]int
+	queueLive                   int
 	control                     []txFrame
+	frameScratch                []byte
+	packetScratch               []byte
+	openScratch                 []byte // Actor-owned AEAD plaintext buffer; cleared after each packet.
 	replay                      replay.Window
 	started, lastRecv, lastSent time.Time
 	cwnd, ssthresh              int
@@ -165,7 +214,9 @@ type Session struct {
 	lastAckTime                 time.Time
 	ackRangesSent               uint64
 	acksPending                 map[uint64]struct{}
-	acksHistory                 []uint64
+	acksHistory                 [128]uint64
+	acksHistoryNext             int
+	acksHistoryCount            int
 	nextPaced                   time.Time
 	lastLoss                    time.Time
 	lastServedChannel           uint64
@@ -230,6 +281,9 @@ func (s *Session) writeUDP(raw []byte, to *net.UDPAddr) (int, error) {
 	if s.conn == nil {
 		return 0, ErrClosed
 	}
+	if s.server != nil {
+		return s.server.writeUDP(raw, to)
+	}
 	return s.conn.WriteToUDP(raw, to)
 }
 
@@ -263,6 +317,10 @@ func (s *Session) ProbeMTU(ctx context.Context, target int) (int, error) {
 	}
 }
 func (s *Session) RebindClient(ctx context.Context) error {
+	return s.rebindClient(ctx, nil)
+}
+
+func (s *Session) rebindClient(ctx context.Context, reply chan error) error {
 	if !s.client {
 		return errors.New("mira: only a client can rebind its UDP socket")
 	}
@@ -273,6 +331,10 @@ func (s *Session) RebindClient(ctx context.Context) error {
 	}
 	conn, err := net.ListenUDP("udp", nil)
 	if err != nil {
+		return err
+	}
+	if err := configureUDPBuffers(conn, s.opts); err != nil {
+		_ = conn.Close()
 		return err
 	}
 	s.connMu.Lock()
@@ -289,9 +351,9 @@ func (s *Session) RebindClient(ctx context.Context) error {
 	if previous != nil {
 		_ = previous.Close()
 	}
-	go s.readClient()
+	s.startClientReader(conn)
 	select {
-	case s.requests <- rebindProbeRequest{}:
+	case s.requests <- rebindProbeRequest{reply: reply}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -304,16 +366,9 @@ func (s *Session) RebindClient(ctx context.Context) error {
 // of a fresh authenticated PATH probe. Unlike RebindClient, completion
 // confirms the new return path is working rather than merely queued.
 func (s *Session) RebindAndWait(ctx context.Context) error {
-	if err := s.RebindClient(ctx); err != nil {
-		return err
-	}
 	ack := make(chan error, 1)
-	select {
-	case s.requests <- rebindProbeRequest{reply: ack}:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.done:
-		return ErrClosed
+	if err := s.rebindClient(ctx, ack); err != nil {
+		return err
 	}
 	select {
 	case err := <-ack:
@@ -403,15 +458,34 @@ func (s *Session) start() {
 	s.finished = make(chan struct{})
 	// Initial connection-level receive credit; retransmitted until ACKed.
 	s.control = append(s.control, txFrame{frame: wire.Frame{Type: wire.FrameCredit, Body: encodeCredit(uint64(s.opts.MaxReceiveBytes))}, reliable: true})
-	go s.run()
 	if s.client {
-		go s.readClient()
+		s.startClientReader(s.currentConn())
 	}
+	go s.run()
 }
+
+func (s *Session) startClientReader(conn *net.UDPConn) {
+	if conn == nil {
+		return
+	}
+	s.readerMu.Lock()
+	defer s.readerMu.Unlock()
+	select {
+	case <-s.done:
+		return
+	default:
+	}
+	s.readerWG.Add(1)
+	go func() {
+		defer s.readerWG.Done()
+		s.readClient(conn)
+	}()
+}
+
 func (s *Session) reserveQueue(n int64) bool {
 	for {
 		x := s.queuedBytes.Load()
-		if x+n > s.opts.MaxQueuedBytes {
+		if n < 0 || x < 0 || x > s.opts.MaxQueuedBytes || n > s.opts.MaxQueuedBytes-x {
 			return false
 		}
 		if s.queuedBytes.CompareAndSwap(x, x+n) {
@@ -421,14 +495,33 @@ func (s *Session) reserveQueue(n int64) bool {
 }
 func (s *Session) releaseQueue(n int64) { s.queuedBytes.Add(-n) }
 func (s *Session) reserveReceive(n int64) bool {
+	if n <= 0 {
+		return false
+	}
 	for {
 		x := s.recvBytes.Load()
-		if x+n > s.opts.MaxReceiveBytes {
+		if n < 0 || x < 0 || x > s.opts.MaxReceiveBytes || n > s.opts.MaxReceiveBytes-x {
 			return false
 		}
 		if s.recvBytes.CompareAndSwap(x, x+n) {
+			if s.server != nil && !s.server.reserveReceive(n) {
+				s.recvBytes.Add(-n)
+				return false
+			}
 			return true
 		}
+	}
+}
+func (s *Session) releaseReceive(n int64, consumed bool) {
+	if n <= 0 {
+		return
+	}
+	s.recvBytes.Add(-n)
+	if s.server != nil {
+		s.server.receiveBytes.Add(-n)
+	}
+	if consumed {
+		s.consumedBytes.Add(n)
 	}
 }
 func (s *Session) OpenChannel(ctx context.Context, cfg protocol.ChannelConfig) (protocol.Channel, error) {
@@ -462,22 +555,37 @@ func (s *Session) OpenChannel(ctx context.Context, cfg protocol.ChannelConfig) (
 	}
 }
 func (s *Session) AcceptChannel(ctx context.Context) (protocol.Channel, error) {
-	select {
-	case c := <-s.accepts:
-		return c, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-s.done:
-		return nil, ErrClosed
+	for {
+		select {
+		case c := <-s.accepts:
+			if c == nil {
+				continue
+			}
+			select {
+			case <-s.done:
+				return nil, ErrClosed
+			default:
+			}
+			select {
+			case <-c.closedCh:
+				continue
+			default:
+				return c, nil
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-s.done:
+			return nil, ErrClosed
+		}
 	}
 }
-func (s *Session) readClient() {
-	c := s.currentConn()
-	buf := make([]byte, wire.MaxDatagram+1)
+func (s *Session) readClient(c *net.UDPConn) {
+	var readErrorDelay time.Duration
 	for {
-		_ = c.SetReadDeadline(time.Now().Add(time.Second))
-		n, remote, err := c.ReadFromUDP(buf)
+		p := acquireInboundBuffer()
+		n, remote, err := c.ReadFromUDP(p)
 		if err != nil {
+			releaseInboundDatagram(p)
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
@@ -486,29 +594,118 @@ func (s *Session) readClient() {
 				return
 			default:
 			}
+			if !waitUDPReadRetry(s.done, &readErrorDelay) {
+				return
+			}
 			continue
 		}
+		readErrorDelay = 0
 		if !addrEqual(remote, s.getRemote()) || n > wire.MaxDatagram {
+			releaseInboundDatagram(p)
 			continue
 		}
-		p := append([]byte(nil), buf[:n]...)
+		p = p[:n]
 		select {
-		case s.incoming <- inboundPacket{raw: p, from: remote}:
+		case s.incoming <- inboundPacket{raw: p, from: remote, pooled: true}:
 		case <-s.done:
+			releaseInboundDatagram(p)
 			return
 		default:
+			releaseInboundDatagram(p)
 		}
 	}
 }
 func (s *Session) run() {
 	defer func() {
 		s.stop()
-		for _, c := range s.channels {
-			c.signalClose()
-		}
+		// Exclude registrations racing with shutdown before waiting for readers.
+		s.readerMu.Lock()
+		s.readerMu.Unlock()
+		s.readerWG.Wait()
 		if s.server != nil {
 			s.server.removeSession(s.id)
 		}
+		for {
+			select {
+			case packet := <-s.incoming:
+				if packet.pooled {
+					releaseInboundDatagram(packet.raw)
+				}
+			default:
+				goto drained
+			}
+		}
+	drained:
+		for _, c := range s.channels {
+			c.signalClose()
+			for _, a := range c.assemblies {
+				s.releaseReceive(int64(len(a.payload)), false)
+				clear(a.payload)
+			}
+			for _, m := range c.completed {
+				s.releaseReceive(int64(len(m.Payload)), false)
+				clear(m.Payload)
+			}
+			for {
+				select {
+				case m := <-c.recv:
+					s.releaseReceive(int64(len(m.Payload)), false)
+					clear(m.Payload)
+				default:
+					goto channelDrained
+				}
+			}
+		channelDrained:
+			c.assemblies = nil
+			c.completed = nil
+		}
+		for i := range s.queue {
+			f := &s.queue[i]
+			f.reservation.release()
+			clear(f.frame.Body)
+		}
+		for i := range s.control {
+			clear(s.control[i].frame.Body)
+		}
+		for _, p := range s.pending {
+			clear(p.frame.frame.Body)
+			clear(p.raw)
+		}
+		for {
+			select {
+			case req := <-s.requests:
+				if r, ok := req.(sendRequest); ok {
+					r.reservation.release()
+					clear(r.data)
+					r.c.signalClose()
+				}
+			default:
+				goto requestsDrained
+			}
+		}
+	requestsDrained:
+		s.channels = nil
+		s.closedIDs = nil
+		s.closedOrder = nil
+		s.pending = nil
+		s.queue = nil
+		s.queueLive = 0
+		s.control = nil
+		clear(s.frameScratch[:cap(s.frameScratch)])
+		s.frameScratch = nil
+		clear(s.packetScratch[:cap(s.packetScratch)])
+		s.packetScratch = nil
+		clear(s.openScratch[:cap(s.openScratch)])
+		s.openScratch = nil
+		s.queueByChannel = nil
+		s.queueHeads = nil
+		s.acksPending = nil
+		clear(s.schedule.master[:])
+		clear(s.txChain[:])
+		clear(s.rxChain[:])
+		s.tx = nil
+		s.rx = nil
+		s.rxPrevious = nil
 		close(s.finished)
 	}()
 	ticker := time.NewTicker(5 * time.Millisecond)
@@ -556,7 +753,7 @@ func (s *Session) run() {
 			s.publishCredit()
 		}
 		s.flush()
-		if len(s.queue) > 0 || len(s.control) > 0 {
+		if s.queueLive > 0 || len(s.control) > 0 {
 			if d := time.Until(s.nextPaced); d > 0 {
 				pace.Reset(d)
 			}
@@ -598,9 +795,8 @@ func (s *Session) handleRequest(req any) {
 	case sendRequest:
 		if r.c.closed.Load() || r.c.expired() || s.channels[r.c.id] != r.c {
 			r.c.signalClose()
-			if r.c.cfg.Delivery == protocol.BestEffort || r.c.cfg.Delivery == protocol.LatestState {
-				s.releaseQueue(r.reserved)
-			}
+			r.reservation.release()
+			clear(r.data)
 			return
 		}
 		reliable := r.c.cfg.Delivery != protocol.BestEffort && r.c.cfg.Delivery != protocol.LatestState
@@ -622,13 +818,7 @@ func (s *Session) handleRequest(req any) {
 		}
 		if r.c.cfg.Delivery == protocol.LatestState {
 			// Unsent, superseded states are dropped; in-flight states remain best-effort.
-			out := s.queue[:0]
-			for _, f := range s.queue {
-				if f.c != r.c {
-					out = append(out, f)
-				}
-			}
-			s.queue = out
+			s.discardQueueChannel(r.c.id)
 		}
 		for i := 0; i < count; i++ {
 			start := i * chunkSize
@@ -636,11 +826,17 @@ func (s *Session) handleRequest(req any) {
 			if end > len(r.data) {
 				end = len(r.data)
 			}
-			f := wire.Frame{Type: wire.FrameData, Body: encodeDataSized(r.c.id, r.id, uint64(len(r.data)), uint64(start), uint64(chunkSize), r.data[start:end])}
-			s.queue = append(s.queue, txFrame{frame: f, reliable: reliable, c: r.c, msgID: r.id})
+			total := uint64(len(r.data))
+			offset := uint64(start)
+			f := wire.Frame{Type: wire.FrameData, Body: encodeDataSized(r.c.id, r.id, total, offset, uint64(chunkSize), r.data[start:end])}
+			frame := txFrame{frame: f, reliable: reliable, c: r.c, msgID: r.id, dataTotal: total, dataOffset: offset}
+			if i == count-1 {
+				frame.reservation = r.reservation
+			}
+			s.enqueueQueueFrame(frame)
 		}
 		if !reliable {
-			s.releaseQueue(r.reserved)
+			clear(r.data)
 		}
 	case statsRequest:
 		r.reply <- s.snapshot()
@@ -674,35 +870,33 @@ func (s *Session) closeChannel(c *Channel) {
 	}
 	c.signalClose()
 	delete(s.channels, c.id)
+	s.discardQueueChannel(c.id)
 	s.closedIDs[c.id] = struct{}{}
-	s.closedOrder = append(s.closedOrder, c.id)
-	if len(s.closedOrder) > 4096 {
-		delete(s.closedIDs, s.closedOrder[0])
-		s.closedOrder[0] = 0
-		s.closedOrder = s.closedOrder[1:]
+	if len(s.closedOrder) < maxClosedChannelIDs {
+		s.closedOrder = append(s.closedOrder, c.id)
+	} else {
+		old := s.closedOrder[s.closedOrderNext]
+		delete(s.closedIDs, old)
+		s.closedOrder[s.closedOrderNext] = c.id
+		s.closedOrderNext = (s.closedOrderNext + 1) % maxClosedChannelIDs
 	}
 	for _, a := range c.assemblies {
-		s.recvBytes.Add(-int64(len(a.payload)))
-		s.consumedBytes.Add(int64(len(a.payload)))
+		s.releaseReceive(int64(len(a.payload)), true)
+		clear(a.payload)
 	}
 	c.assemblies = nil
 	for _, m := range c.completed {
-		s.recvBytes.Add(-int64(len(m.Payload)))
-		s.consumedBytes.Add(int64(len(m.Payload)))
+		s.releaseReceive(int64(len(m.Payload)), true)
+		clear(m.Payload)
 	}
 	c.completed = nil
 	// Only previously received messages in c.recv remain available for drain.
-	filtered := s.queue[:0]
-	for _, f := range s.queue {
-		if f.c != c {
-			filtered = append(filtered, f)
-		}
-	}
-	s.queue = filtered
 	for pn, p := range s.pending {
 		if p.frame.c == c {
 			delete(s.pending, pn)
 			s.inFlightBytes -= p.size
+			clear(p.frame.frame.Body)
+			clear(p.raw)
 		}
 	}
 }
@@ -719,7 +913,7 @@ func (s *Session) flush() {
 	if s.bootstrapTLS && !s.validated {
 		return
 	}
-	for len(s.queue) > 0 || len(s.control) > 0 {
+	for s.queueLive > 0 || len(s.control) > 0 {
 		if time.Now().Before(s.nextPaced) {
 			return
 		}
@@ -731,20 +925,22 @@ func (s *Session) flush() {
 		} else {
 			queueIndex = s.chooseQueueFrame()
 			if queueIndex < 0 {
+				if s.skipBlockedCredit() {
+					continue
+				}
 				return
 			}
 			f = s.queue[queueIndex]
 		}
-		// All packet types are governed by the in-flight congestion budget.
-		if len(s.pending) >= s.opts.MaxInflight || s.inFlightBytes+wire.MaxDatagram > s.cwnd {
+		// Account the encoded packet's actual size against the byte-oriented
+		// congestion window. Charging every packet as a full datagram needlessly
+		// throttles small messages to a fixed packet count per RTT.
+		packetSize := encodedPacketSize(f.frame)
+		if len(s.pending) >= s.opts.MaxInflight || s.inFlightBytes+packetSize > s.cwnd {
 			return
 		}
 		if f.frame.Type == wire.FrameData && f.reliable {
-			_, _, total, offset, _, ok := decodeData(f.frame.Body)
-			if !ok {
-				return
-			}
-			if offset == 0 && !f.reclaimCredit && (s.sentCredit > s.peerLimit || total > s.peerLimit-s.sentCredit) {
+			if f.dataOffset == 0 && !f.reclaimCredit && (s.sentCredit > s.peerLimit || f.dataTotal > s.peerLimit-s.sentCredit) {
 				// Allow fragments belonging to previously-started messages
 				// to progress even when a new message cannot claim credit.
 				if !control && s.skipBlockedCredit() {
@@ -752,25 +948,32 @@ func (s *Session) flush() {
 				}
 				return
 			}
-			if offset == 0 && !f.reclaimCredit {
-				s.sentCredit += total
+			if f.dataOffset == 0 && !f.reclaimCredit {
+				s.sentCredit += f.dataTotal
 			}
 		}
 		if control {
+			s.control[0] = txFrame{}
 			s.control = s.control[1:]
 		} else {
 			s.lastServedChannel = f.c.id
 			s.schedulerPackets++
-			copy(s.queue[queueIndex:], s.queue[queueIndex+1:])
-			s.queue[len(s.queue)-1] = txFrame{}
-			s.queue = s.queue[:len(s.queue)-1]
+			s.removeQueueFrame(queueIndex)
+			f.reservation.release()
 		}
-		var body []byte
-		body, err := wire.AppendFrame(nil, f.frame)
+		body, err := wire.AppendFrame(s.frameScratch[:0], f.frame)
 		if err != nil {
+			clear(f.frame.Body)
+			clear(body)
 			continue
 		}
+		if !f.reliable {
+			clear(f.frame.Body)
+		}
+		s.frameScratch = body
 		if s.nextPN >= (uint64(1)<<16)*keyEpochPackets {
+			clear(f.frame.Body)
+			clear(body)
 			s.stop()
 			return
 		}
@@ -782,14 +985,27 @@ func (s *Session) flush() {
 		}
 		protector, epoch, err := s.encryptor(pn)
 		if err != nil {
+			clear(f.frame.Body)
+			clear(body)
 			s.stop()
 			return
 		}
-		raw, err := sealedEpoch(protector, s.id, pn, wire.KindData, flag, epoch, body)
+		packetScratch := []byte(nil)
+		if !f.reliable {
+			packetScratch = s.packetScratch
+		}
+		raw, err := sealedEpochAppend(packetScratch, protector, s.id, pn, wire.KindData, flag, epoch, body)
+		clear(body)
 		if err != nil {
+			clear(f.frame.Body)
 			continue
 		}
+		if !f.reliable {
+			s.packetScratch = raw
+		}
 		if _, err = s.writeUDP(raw, s.getRemote()); err != nil {
+			clear(f.frame.Body)
+			clear(raw)
 			if f.probeMTU > 0 {
 				s.onProbeFailure()
 				if f.probeReply != nil {
@@ -812,39 +1028,141 @@ func (s *Session) flush() {
 	}
 }
 
+func encodedPacketSize(f wire.Frame) int {
+	var length [binary.MaxVarintLen64]byte
+	lengthBytes := binary.PutUvarint(length[:], uint64(len(f.Body)))
+	return wire.HeaderSize + wire.AuthTagSize + 2 + lengthBytes + len(f.Body)
+}
+
 // chooseQueueFrame services first queued frame of each channel, preserving
 // per-channel enqueue order while alternating independent channels. Larger
 // priority values receive preference, but every eighth packet intentionally
 // favors lower priorities so a busy channel cannot starve all others.
 func (s *Session) chooseQueueFrame() int {
-	seen := make(map[uint64]struct{}, min(len(s.queue), s.opts.MaxChannels))
 	selected := -1
 	bestPriority := int(-1)
 	pickLow := s.schedulerPackets%8 == 7
-	for i, f := range s.queue {
-		if f.c == nil {
+	for cid, indexes := range s.queueByChannel {
+		head := s.queueHeads[cid]
+		for head < len(indexes) && s.queue[indexes[head]].c == nil {
+			head++
+		}
+		if head == len(indexes) {
+			delete(s.queueByChannel, cid)
+			delete(s.queueHeads, cid)
 			continue
 		}
-		if _, ok := seen[f.c.id]; ok {
-			continue
-		}
-		seen[f.c.id] = struct{}{}
+		s.queueHeads[cid] = head
+		index := indexes[head]
+		f := s.queue[index]
 		if f.frame.Type == wire.FrameData && f.reliable {
-			_, _, total, offset, _, ok := decodeData(f.frame.Body)
-			if !ok {
-				continue
-			}
-			if offset == 0 && !f.reclaimCredit && (s.sentCredit > s.peerLimit || total > s.peerLimit-s.sentCredit) {
+			if f.dataOffset == 0 && !f.reclaimCredit && (s.sentCredit > s.peerLimit || f.dataTotal > s.peerLimit-s.sentCredit) {
 				continue
 			}
 		}
 		priority := int(f.c.cfg.Priority)
-		if selected < 0 || (pickLow && priority < bestPriority) || (!pickLow && priority > bestPriority) || (priority == bestPriority && f.c.id > s.lastServedChannel && s.queue[selected].c.id <= s.lastServedChannel) {
-			selected = i
+		better := selected < 0 || (pickLow && priority < bestPriority) || (!pickLow && priority > bestPriority)
+		if !better && priority == bestPriority {
+			selectedID := s.queue[selected].c.id
+			candidateAfter := cid > s.lastServedChannel
+			selectedAfter := selectedID > s.lastServedChannel
+			better = candidateAfter && !selectedAfter || candidateAfter == selectedAfter && cid < selectedID
+		}
+		if better {
+			selected = index
 			bestPriority = priority
 		}
 	}
 	return selected
+}
+
+func (s *Session) enqueueQueueFrame(f txFrame) {
+	if s.queueByChannel == nil {
+		s.queueByChannel = make(map[uint64][]int, min(s.opts.MaxChannels, 32))
+		s.queueHeads = make(map[uint64]int, min(s.opts.MaxChannels, 32))
+	}
+	index := len(s.queue)
+	s.queue = append(s.queue, f)
+	s.queueLive++
+	s.queueByChannel[f.c.id] = append(s.queueByChannel[f.c.id], index)
+}
+
+func (s *Session) removeQueueFrame(index int) {
+	if index < 0 || index >= len(s.queue) {
+		return
+	}
+	f := s.queue[index]
+	if f.c == nil {
+		return
+	}
+	s.queue[index] = txFrame{}
+	s.queueLive--
+	cid := f.c.id
+	indexes := s.queueByChannel[cid]
+	head := s.queueHeads[cid]
+	for head < len(indexes) && s.queue[indexes[head]].c == nil {
+		head++
+	}
+	if head == len(indexes) {
+		delete(s.queueByChannel, cid)
+		delete(s.queueHeads, cid)
+	} else if head >= 256 && head*2 >= len(indexes) {
+		s.queueByChannel[cid] = append([]int(nil), indexes[head:]...)
+		s.queueHeads[cid] = 0
+	} else {
+		s.queueHeads[cid] = head
+	}
+	s.compactQueue(false)
+}
+
+func (s *Session) discardQueueChannel(cid uint64) {
+	indexes := s.queueByChannel[cid]
+	head := s.queueHeads[cid]
+	for _, index := range indexes[head:] {
+		f := s.queue[index]
+		if f.c == nil {
+			continue
+		}
+		f.reservation.release()
+		clear(f.frame.Body)
+		s.queue[index] = txFrame{}
+		s.queueLive--
+	}
+	delete(s.queueByChannel, cid)
+	delete(s.queueHeads, cid)
+	s.compactQueue(false)
+}
+
+func (s *Session) compactQueue(force bool) {
+	if !force && len(s.queue) <= 2*s.queueLive+256 {
+		return
+	}
+	if s.queueLive == 0 {
+		clear(s.queue)
+		s.queue = s.queue[:0]
+		clear(s.queueByChannel)
+		clear(s.queueHeads)
+		return
+	}
+	if s.queueByChannel == nil {
+		s.queueByChannel = make(map[uint64][]int, min(s.opts.MaxChannels, 32))
+		s.queueHeads = make(map[uint64]int, min(s.opts.MaxChannels, 32))
+	} else {
+		clear(s.queueByChannel)
+		clear(s.queueHeads)
+	}
+	out := s.queue[:0]
+	for _, f := range s.queue {
+		if f.c == nil {
+			continue
+		}
+		index := len(out)
+		out = append(out, f)
+		cid := f.c.id
+		s.queueByChannel[cid] = append(s.queueByChannel[cid], index)
+	}
+	clear(s.queue[len(out):])
+	s.queue = out
 }
 
 // skipBlockedCredit rotates a previously-started fragment to the front.
@@ -853,15 +1171,30 @@ func (s *Session) chooseQueueFrame() int {
 func (s *Session) skipBlockedCredit() bool {
 	for i := 1; i < len(s.queue); i++ {
 		f := s.queue[i]
-		if f.frame.Type != wire.FrameData || !f.reliable {
+		if f.c == nil || f.frame.Type != wire.FrameData || !f.reliable {
 			continue
 		}
-		_, _, _, offset, _, ok := decodeData(f.frame.Body)
-		if !ok || offset == 0 {
+		if f.dataOffset == 0 {
+			continue
+		}
+		// Never pass an earlier queued frame on the same channel. This
+		// exception is only for continuations of an older message that sit
+		// behind a newer, credit-blocked message head.
+		indexes := s.queueByChannel[f.c.id]
+		head := s.queueHeads[f.c.id]
+		for head < len(indexes) && s.queue[indexes[head]].c == nil {
+			head++
+		}
+		if head >= len(indexes) {
+			continue
+		}
+		first := s.queue[indexes[head]]
+		if first.msgID <= f.msgID {
 			continue
 		}
 		copy(s.queue[1:i+1], s.queue[:i])
 		s.queue[0] = f
+		s.compactQueue(true)
 		return true
 	}
 	return false
@@ -878,9 +1211,10 @@ func (s *Session) queueAck(pn uint64) {
 		s.flushAcks()
 	}
 	if _, seen := s.acksPending[pn]; !seen {
-		s.acksHistory = append(s.acksHistory, pn)
-		if len(s.acksHistory) > 128 {
-			s.acksHistory = append([]uint64(nil), s.acksHistory[len(s.acksHistory)-128:]...)
+		s.acksHistory[s.acksHistoryNext] = pn
+		s.acksHistoryNext = (s.acksHistoryNext + 1) % len(s.acksHistory)
+		if s.acksHistoryCount < len(s.acksHistory) {
+			s.acksHistoryCount++
 		}
 	}
 	s.acksPending[pn] = struct{}{}
@@ -888,6 +1222,24 @@ func (s *Session) queueAck(pn uint64) {
 		s.flushAcks()
 	}
 }
+
+// insertAckNumber keeps the newest ACK packet numbers in descending order in
+// a fixed-size stack buffer, avoiding temporary slices, sorting, and maps.
+func insertAckNumber(numbers *[32]uint64, count *int, pn uint64) {
+	index := 0
+	for index < *count && numbers[index] > pn {
+		index++
+	}
+	if (index < *count && numbers[index] == pn) || index == len(numbers) {
+		return
+	}
+	if *count < len(numbers) {
+		*count = *count + 1
+	}
+	copy(numbers[index+1:*count], numbers[index:*count-1])
+	numbers[index] = pn
+}
+
 func (s *Session) flushAcks() {
 	if len(s.acksPending) == 0 {
 		return
@@ -898,29 +1250,19 @@ func (s *Session) flushAcks() {
 	}
 	// Service pending ACKs first, otherwise unsent older ACKs can become
 	// permanently shadowed by a hot history window and cause an ACK storm.
-	list := make([]uint64, 0, 32)
+	var numbers [32]uint64
+	count := 0
 	for pn := range s.acksPending {
-		list = append(list, pn)
+		insertAckNumber(&numbers, &count, pn)
 	}
-	sort.Slice(list, func(i, j int) bool { return list[i] > list[j] })
-	if len(list) > 32 {
-		list = list[:32]
-	}
-	if len(list) < 32 {
-		seen := make(map[uint64]struct{}, len(list))
-		for _, n := range list {
-			seen[n] = struct{}{}
-		}
-		for i := len(s.acksHistory) - 1; i >= 0 && len(list) < 32; i-- {
-			pn := s.acksHistory[i]
-			if _, ok := seen[pn]; !ok {
-				list = append(list, pn)
-				seen[pn] = struct{}{}
-			}
+	if count < len(numbers) {
+		for i := 0; i < s.acksHistoryCount && count < len(numbers); i++ {
+			index := (s.acksHistoryNext - 1 - i + len(s.acksHistory)) % len(s.acksHistory)
+			insertAckNumber(&numbers, &count, s.acksHistory[index])
 		}
 	}
-	sort.Slice(list, func(i, j int) bool { return list[i] > list[j] })
-	body, err := wire.AppendFrame(nil, wire.Frame{Type: wire.FrameAckRanges, Body: encodeAckRanges(list)})
+	list := numbers[:count]
+	body, err := wire.AppendFrame(nil, wire.Frame{Type: wire.FrameAckRanges, Body: encodeSortedAckRanges(list)})
 	if err != nil {
 		return
 	}
@@ -969,7 +1311,9 @@ func (s *Session) pacingDelay(bytes int) time.Duration {
 
 const (
 	// ackDelay bounds how long an accepted packet waits for its ACK.
-	ackDelay = time.Millisecond
+	ackDelay              = time.Millisecond
+	maxClosedChannelIDs   = 4096
+	maxCandidatePathBytes = 64 << 10
 	// minPacingRTT floors the RTT used to derive the pacing rate (cwnd/RTT).
 	// It was 25 ms, which throttled every low-latency path to cwnd/25ms
 	// regardless of its real RTT.
@@ -996,6 +1340,9 @@ func (s *Session) advancePacer(now time.Time, bytes int) {
 	s.nextPaced = s.nextPaced.Add(delay)
 }
 func (s *Session) processPacket(input inboundPacket) {
+	if input.pooled {
+		defer releaseInboundDatagram(input.raw)
+	}
 	p := input.raw
 	h, err := wire.ParseHeader(p)
 	if err != nil || h.Connection != s.id || h.Kind != wire.KindData || h.Flags & ^uint8(ackRequired) != 0 {
@@ -1012,12 +1359,16 @@ func (s *Session) processPacket(input inboundPacket) {
 	if err != nil {
 		return
 	}
-	_, body, err := openedEpoch(protector, p, wire.KindData)
+	body, err := protector.Open(s.openScratch[:0], p[wire.HeaderSize:], p[:wire.HeaderSize], h.Number)
 	if err != nil {
+		clear(s.openScratch[:cap(s.openScratch)])
+		s.openScratch = s.openScratch[:0]
 		return
 	}
-	frames, err := wire.ParseFrames(body, 1)
-	if err != nil || len(frames) != 1 || frames[0].Flags != 0 {
+	s.openScratch = body[:0]
+	defer clear(body)
+	f, err := wire.ParseSingleFrame(body)
+	if err != nil || f.Flags != 0 {
 		return
 	}
 	// An authenticated packet from a different source address alone does not
@@ -1027,7 +1378,10 @@ func (s *Session) processPacket(input inboundPacket) {
 		if s.server == nil {
 			return
 		} // server-side authenticated path validation
-		s.onCandidatePacket(input.from, len(p), frames[0])
+		if s.replay.Seen(h.Number) {
+			return
+		}
+		s.onCandidatePacket(input.from, len(p), h.Number, h.Flags, f)
 		return
 	}
 	s.lastRecv = time.Now()
@@ -1048,10 +1402,8 @@ func (s *Session) processPacket(input inboundPacket) {
 		return
 	}
 	accepted := true
-	for _, f := range frames {
-		if !s.onFrame(f) {
-			accepted = false
-		}
+	if !s.onFrame(f) {
+		accepted = false
 	}
 	if accepted {
 		s.replay.CheckAndMark(h.Number)
@@ -1066,7 +1418,7 @@ func (s *Session) processPacket(input inboundPacket) {
 // onCandidatePacket accepts only a valid encrypted PATH_RESPONSE from the
 // candidate address. A fresh challenge is bounded to <=3x authenticated bytes
 // observed from that address; a single candidate and timeout bound memory.
-func (s *Session) onCandidatePacket(addr *net.UDPAddr, n int, f wire.Frame) {
+func (s *Session) onCandidatePacket(addr *net.UDPAddr, n int, pn uint64, flags uint8, f wire.Frame) {
 	now := time.Now()
 	cand := s.path
 	if cand != nil && now.Sub(cand.first) > 5*time.Second {
@@ -1074,17 +1426,32 @@ func (s *Session) onCandidatePacket(addr *net.UDPAddr, n int, f wire.Frame) {
 		s.path = nil
 	}
 	if cand != nil && addrEqual(cand.addr, addr) {
-		cand.received += n
-		if f.Type == wire.FramePathResponse && len(f.Body) == 8 && string(f.Body) == string(cand.token[:]) {
+		if !cand.replay.CheckAndMark(pn) {
+			return
+		}
+		cand.received = min(maxCandidatePathBytes, cand.received+n)
+		if f.Type == wire.FramePathResponse && subtle.ConstantTimeCompare(f.Body, cand.token[:]) == 1 {
+			// This packet completes the address proof. Admit its packet number
+			// into the session replay window and acknowledge it only after the
+			// new route is validated, so the peer need not retransmit a response
+			// the server has already accepted.
+			if !s.replay.CheckAndMark(pn) {
+				return
+			}
 			s.setRemote(addr)
+			s.lastRecv = now
+			if pn > s.maxRecvPN {
+				s.maxRecvPN = pn
+			}
+			if flags&ackRequired != 0 {
+				s.queueAck(pn)
+			}
 			firstValidation := s.bootstrapTLS && !s.validated
 			s.validated = true
 			s.path = nil
 			if firstValidation {
 				// Only authenticated, return-path-validated clients are exposed to applications.
-				select {
-				case s.server.accepts <- s:
-				default:
+				if !s.server.deliverSession(s) {
 					s.stop()
 					return
 				}
@@ -1115,7 +1482,11 @@ func (s *Session) onCandidatePacket(addr *net.UDPAddr, n int, f wire.Frame) {
 	if cand != nil && now.Sub(cand.first) < 500*time.Millisecond {
 		return
 	}
-	cand = &candidatePath{addr: addr, first: now, received: n}
+	cand = &candidatePath{addr: addr, first: now}
+	if !cand.replay.CheckAndMark(pn) {
+		return
+	}
+	cand.received = n
 	if _, err := rand.Read(cand.token[:]); err != nil {
 		return
 	}
@@ -1178,39 +1549,44 @@ func (s *Session) admitApplicationBytes(n int) bool {
 func (s *Session) onFrame(f wire.Frame) bool {
 	switch f.Type {
 	case wire.FrameAck:
-		pn, n := binary.Uvarint(f.Body)
-		if n <= 0 || n != len(f.Body) {
+		pn, n, ok := readCanonicalUvarint(f.Body)
+		if !ok || n != len(f.Body) {
 			return false
 		}
 		s.onAck(pn)
 		return true
 	case wire.FrameAckRanges:
-		ranges, err := decodeAckRanges(f.Body)
+		var ranges [maxAckRanges]ackRange
+		rangeCount, err := decodeAckRangesInto(f.Body, &ranges)
 		if err != nil {
 			return false
 		}
+		decodedRanges := ranges[:rangeCount]
 		// Validate the entire authenticated ACK frame before mutating state.
-		for _, r := range ranges {
+		for _, r := range decodedRanges {
 			if r.hi >= s.nextPN || r.lo < 2 {
 				return false
 			}
 		}
-		highest := ranges[0].hi
-		for _, r := range ranges {
+		highest := decodedRanges[0].hi
+		for _, r := range decodedRanges {
 			for pn := r.lo; pn <= r.hi; pn++ {
 				s.onAck(pn)
 			}
 		}
-		// Packet-threshold loss detection with a reordering time guard.
-		// Retransmit the original ciphertext, never reseal a reused PN.
+		// Packet-threshold loss detection with a reordering time guard. Require
+		// at least one smoothed RTT before treating queued packets as lost.
+		// Retransmissions use fresh packet numbers and retain the application
+		// message ID, so replay filtering cannot age out a still-pending send.
 		now := time.Now()
-		reordering := s.srtt / 8
+		reordering := s.srtt
 		if reordering < 10*time.Millisecond {
 			reordering = 10 * time.Millisecond
 		}
 		for pn, p := range s.pending {
-			if highest > pn+3 && p.tries == 0 && now.Sub(p.sent) > reordering {
+			if highest > pn+3 && p.tries == 0 && !p.fastLost && now.Sub(p.sent) > reordering {
 				p.sent = now.Add(-2 * time.Second)
+				p.fastLost = true
 				s.fastLossSignals++
 			}
 		}
@@ -1218,12 +1594,12 @@ func (s *Session) onFrame(f wire.Frame) bool {
 	case wire.FrameOpen:
 		return s.onOpen(f.Body)
 	case wire.FrameReceipt:
-		cid, n := binary.Uvarint(f.Body)
-		if n <= 0 {
+		cid, n, ok := readCanonicalUvarint(f.Body)
+		if !ok {
 			return false
 		}
-		id, k := binary.Uvarint(f.Body[n:])
-		if k <= 0 || n+k+1 != len(f.Body) || id == 0 {
+		id, k, ok := readCanonicalUvarint(f.Body[n:])
+		if !ok || n+k+1 != len(f.Body) || id == 0 {
 			return false
 		}
 		level := protocol.ReceiptLevel(f.Body[n+k])
@@ -1235,8 +1611,8 @@ func (s *Session) onFrame(f wire.Frame) bool {
 		}
 		return true
 	case wire.FrameOpenAck:
-		id, n := binary.Uvarint(f.Body)
-		if n <= 0 || n != len(f.Body) {
+		id, n, ok := readCanonicalUvarint(f.Body)
+		if !ok || n != len(f.Body) || id == 0 {
 			return false
 		}
 		c := s.channels[id]
@@ -1254,8 +1630,8 @@ func (s *Session) onFrame(f wire.Frame) bool {
 	case wire.FrameData:
 		return s.onData(f.Body)
 	case wire.FrameClose, wire.FrameReset:
-		id, n := binary.Uvarint(f.Body)
-		if n <= 0 || n != len(f.Body) {
+		id, n, ok := readCanonicalUvarint(f.Body)
+		if !ok || n != len(f.Body) || id == 0 {
 			return false
 		}
 		c := s.channels[id]
@@ -1271,8 +1647,8 @@ func (s *Session) onFrame(f wire.Frame) bool {
 		}
 		return true
 	case wire.FrameCredit:
-		limit, n := binary.Uvarint(f.Body)
-		if n <= 0 || n != len(f.Body) {
+		limit, n, ok := readCanonicalUvarint(f.Body)
+		if !ok || n != len(f.Body) {
 			return false
 		}
 		if limit > s.peerLimit {
@@ -1293,12 +1669,12 @@ func (s *Session) onFrame(f wire.Frame) bool {
 		s.stop()
 		return true
 	case wire.FrameHalfClose:
-		id, n := binary.Uvarint(f.Body)
-		if n <= 0 {
+		id, n, ok := readCanonicalUvarint(f.Body)
+		if !ok {
 			return false
 		}
-		last, k := binary.Uvarint(f.Body[n:])
-		if k <= 0 || n+k != len(f.Body) || id == 0 {
+		last, k, ok := readCanonicalUvarint(f.Body[n:])
+		if !ok || n+k != len(f.Body) || id == 0 {
 			return false
 		}
 		if c := s.channels[id]; c != nil {
@@ -1370,6 +1746,8 @@ func (s *Session) onAck(pn uint64) {
 	if p.frame.c != nil && p.frame.reliable {
 		p.frame.c.ackFragment(p.frame.msgID)
 	}
+	clear(p.frame.frame.Body)
+	clear(p.raw)
 }
 func (s *Session) retry(now time.Time) {
 	if s.bootstrapTLS && !s.validated {
@@ -1391,7 +1769,7 @@ func (s *Session) retry(now time.Time) {
 	if timeout > time.Second {
 		timeout = time.Second
 	}
-	for _, p := range s.pending {
+	for oldPN, p := range s.pending {
 		backoff := time.Duration(1) << min(p.tries, 2)
 		if now.Sub(p.sent) < timeout*backoff {
 			continue
@@ -1412,6 +1790,8 @@ func (s *Session) retry(now time.Time) {
 				if check == p {
 					delete(s.pending, pn)
 					s.inFlightBytes -= p.size
+					clear(p.frame.frame.Body)
+					clear(p.raw)
 					break
 				}
 			}
@@ -1446,13 +1826,49 @@ func (s *Session) retry(now time.Time) {
 			s.cwnd = s.ssthresh
 			s.lastLoss = now
 		}
-		// Same byte-for-byte authenticated datagram retransmitted. No second
-		// encryption with a reused nonce occurs.
-		_, err := s.writeUDP(p.raw, s.getRemote())
+		// Retransmit the retained frame with a fresh packet number. Reusing the
+		// old number can make a still-lost reliable packet permanently too old
+		// for the receiver's replay window after later traffic advances it.
+		if s.nextPN >= (uint64(1)<<16)*keyEpochPackets {
+			s.stop()
+			return
+		}
+		frameBody, err := wire.AppendFrame(s.frameScratch[:0], p.frame.frame)
 		if err != nil {
 			s.stop()
 			return
 		}
+		s.frameScratch = frameBody
+		pn := s.nextPN
+		s.nextPN++
+		protector, epoch, err := s.encryptor(pn)
+		if err != nil {
+			clear(frameBody)
+			s.stop()
+			return
+		}
+		// Reuse the pending packet's backing buffer. The retained frame has the
+		// same encoded size, and its old ciphertext is no longer needed once the
+		// fresh packet number is allocated.
+		raw, err := sealedEpochAppend(p.raw[:0], protector, s.id, pn, wire.KindData, ackRequired, epoch, frameBody)
+		clear(frameBody)
+		if err != nil {
+			s.stop()
+			return
+		}
+		_, err = s.writeUDP(raw, s.getRemote())
+		if err != nil {
+			clear(raw)
+			s.stop()
+			return
+		}
+		delete(s.pending, oldPN)
+		oldSize := p.size
+		p.raw = raw
+		p.size = len(raw)
+		p.fastLost = false
+		s.inFlightBytes += p.size - oldSize
+		s.pending[pn] = p
 		p.tries++
 		s.retransmissions++
 		p.sent = now
@@ -1483,8 +1899,8 @@ func (s *Session) expireAssemblies(now time.Time) {
 		for id, a := range c.assemblies {
 			if now.Sub(a.last) > 30*time.Second {
 				delete(c.assemblies, id)
-				s.recvBytes.Add(-int64(len(a.payload)))
-				s.consumedBytes.Add(int64(len(a.payload)))
+				s.releaseReceive(int64(len(a.payload)), true)
+				clear(a.payload)
 			}
 		}
 	}
@@ -1525,17 +1941,18 @@ func (s *Session) publishCredit() {
 	s.enqueueControl(txFrame{frame: wire.Frame{Type: wire.FrameCredit, Body: encodeCredit(limit)}, reliable: true})
 }
 
-// Encryption/decryption uses packet-number-bound epochs; old datagrams are
-// retransmitted verbatim. Because packet numbers never reset, a key/nonce pair
-// cannot be reused within the session even when packets are reordered.
+// Encryption/decryption uses packet-number-bound epochs. A reliable retry
+// reseals its retained frame under a fresh packet number, so packet numbers
+// never reset and a key/nonce pair is never reused within the session.
 func (s *Session) encryptor(pn uint64) (*cryptokit.Protector, uint16, error) {
 	epoch := uint16(pn / keyEpochPackets)
 	if epoch < s.txEpoch || epoch > s.txEpoch+1 {
 		return nil, 0, wire.ErrInvalid
 	}
 	if epoch != s.txEpoch {
-		next := advanceChain(s.txChain, epoch)
-		p, err := s.schedule.fromChain(next, epoch, true)
+		next := advanceChain(&s.txChain, epoch)
+		defer clear(next[:])
+		p, err := s.schedule.fromChain(&next, epoch, true)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -1556,8 +1973,9 @@ func (s *Session) decryptor(epoch uint16) (*cryptokit.Protector, error) {
 	if epoch != s.rxEpoch+1 {
 		return nil, wire.ErrInvalid
 	}
-	next := advanceChain(s.rxChain, epoch)
-	p, err := s.schedule.fromChain(next, epoch, false)
+	next := advanceChain(&s.rxChain, epoch)
+	defer clear(next[:])
+	p, err := s.schedule.fromChain(&next, epoch, false)
 	if err != nil {
 		return nil, err
 	}

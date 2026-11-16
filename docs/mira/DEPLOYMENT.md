@@ -1,6 +1,6 @@
 # MIRA-T/1 deployment reference (security review required)
 
-**Not a claim of production security certification.** Run in a gated staging or internal network until the external work in `TASKS.md` is complete.
+**Not a claim of production security certification.** Run in a gated staging or internal network until the external work in [MIRA_TASKS.md](../../MIRA_TASKS.md) is complete.
 
 ## Network and trust boundaries
 
@@ -8,6 +8,8 @@
 - Every native device uses a separate CA-issued client certificate; trust roots and signing authority must be controlled by your organization.
 - Use `ListenTLS` and `DialTLS`. `Listen`/`Dial` reject non-loopback PSK by default and are only for local experiments.
 - UDP port and TCP port must route to the *same stateful node* unless your load balancer supports consistent per-session routing. Each node maintains its own in-memory UDP crypto state.
+- The stock `mira-tls-server` defaults to 16 sessions, 4 MiB queued per session, 8 MiB received per session, and a 128 MiB aggregate inbound receive-buffer cap (`-max-server-receive-bytes`). The aggregate cap bounds application payload memory across all sessions; per-session queue/receive limits and `-max-sessions-per-identity` remain independent. Size these limits against process memory and expected load before increasing them.
+- Monitor `mira_receive_buffered_bytes` against `mira_receive_buffer_limit_bytes`. When the shared cap is reached, reliable inbound packets are left unacknowledged for retry until consumers free space; best-effort traffic may be dropped.
 - Keep metrics bound to `127.0.0.1:9109`. Restrict access with your management network or a local scraper.
 - Set explicit `-allow-file` identities, with file permissions not readable by unauthorized local users. Access-control reload uses `SIGHUP`; removed identities have their sessions disconnected.
 - The browser gateway terminates browser TLS and is an application-level trust boundary. Use `-jwt-public-key`, `-jwt-kid`, `-jwt-issuer`, `-jwt-audience`, and `-origin`; do not use the demo shared bearer token for multiple users. Verify backend authorization for each principal.
@@ -29,7 +31,7 @@ Edit trust roots, key pair and/or `/etc/mira/allow.txt` with atomic rename, then
 
 The `cluster` package provides renewable fenced ownership, mTLS forwarding, transactional outbox and consumer progress. Actual PostgreSQL integration requires a trusted `database/sql` PostgreSQL driver and an owner-controlled multi-node test environment. Apply `cluster/sql/schema.sql` in a controlled migration. Use `ConsumerGroup.ConsumeNext` and perform the business effect in its SAME database transaction. Never claim exactly-once external calls.
 
-For persistent data, mount a durable encrypted WAL in a persistent volume; keep its historical decryption keys in a separate protected keyring, rotate with overlap, and test restore against a copy. Single-writer WAL files must never be shared by multiple concurrent processes.
+For persistent data, mount a durable encrypted WAL in a persistent volume; keep its historical decryption keys in a separate protected keyring, rotate with overlap, and test restore against a copy. The WAL must be a regular file with mode `0600` or stricter; symlink paths and group/world-accessible files are rejected. Single-writer WAL files must never be shared by multiple concurrent processes.
 
 ## Mobile and browsers
 
@@ -37,4 +39,4 @@ Run `scripts/build-mobile.sh android` on a properly configured Go/JDK/Android SD
 
 ## Release gates
 
-Before public traffic: independent cryptographic and transport audit, 24–72h soak tests, live PostgreSQL failover/partitions, real device lab for Android/iOS, IPv4/IPv6/NAT64/carrier field tests, DDoS/fairness tests, and compare against current WebSocket/QUIC implementations under matched TLS, reliability and network conditions. See `TASKS.md`.
+Before public traffic: independent cryptographic and transport audit, 24–72h soak tests, live PostgreSQL failover/partitions, real device lab for Android/iOS, IPv4/IPv6/NAT64/carrier field tests, DDoS/fairness tests, and compare against current WebSocket/QUIC implementations under matched TLS, reliability and network conditions. See [MIRA_TASKS.md](../../MIRA_TASKS.md) and [V7_IMPLEMENTATION_STATUS.md](../../V7_IMPLEMENTATION_STATUS.md).

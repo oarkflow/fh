@@ -1,16 +1,30 @@
 # Native MIRA TLS server image. Trust roots, private keys and access controls
 # must be mounted at runtime. Never bake secrets or the development CA into it.
-FROM golang:1.27.3-alpine AS builder
+FROM golang:1.27.4-alpine AS buildbase
 WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
 ENV CGO_ENABLED=0 GOOS=linux
+
+FROM buildbase AS builder
 RUN go build -trimpath -ldflags='-s -w' -o /out/mira-tls-server ./cmd/mira-tls-server \
- && go build -trimpath -ldflags='-s -w' -o /out/mira-healthcheck ./cmd/mira-healthcheck \
- && go build -trimpath -ldflags='-s -w' -o /out/mira-bench ./cmd/mira-bench \
+ && go build -trimpath -ldflags='-s -w' -o /out/mira-healthcheck ./cmd/mira-healthcheck
+
+FROM buildbase AS toolbuilder
+RUN go build -trimpath -ldflags='-s -w' -o /out/mira-bench ./cmd/mira-bench \
  && go build -trimpath -ldflags='-s -w' -o /out/mira-dev-certs ./cmd/mira-dev-certs
 
+FROM scratch AS tools
+COPY --from=builder /out/mira-tls-server /mira-tls-server
+COPY --from=builder /out/mira-healthcheck /mira-healthcheck
+COPY --from=toolbuilder /out/mira-bench /mira-bench
+COPY --from=toolbuilder /out/mira-dev-certs /mira-dev-certs
+USER 65532:65532
+
 FROM scratch
-COPY --from=builder /out/ /
+COPY --from=builder /out/mira-tls-server /mira-tls-server
+COPY --from=builder /out/mira-healthcheck /mira-healthcheck
 USER 65532:65532
 EXPOSE 7447/udp 7448/tcp
 HEALTHCHECK --interval=15s --timeout=4s --start-period=5s --retries=3 CMD ["/mira-healthcheck"]

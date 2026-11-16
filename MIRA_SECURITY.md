@@ -33,13 +33,14 @@
 
 - Data uses AES-256-GCM with 26-byte header as associated data, independently keyed send/receive directions, monotonic per-direction packet numbers, and authenticated replay windows.
 - Session traffic keys evolve in 4096-packet epochs via a one-way chain with bounded previous-key receive allowance. This can reduce past-key retention but **does not** provide post-compromise recovery or independent ephemeral DH exchanges during the session.
-- Packet ciphertext is retransmitted without resealing under the same nonce. No arbitrary 0-RTT application sends are permitted. TLS session resumption, when supported by the host TLS stack, establishes **new** MIRA traffic keys and a new UDP session.
+- A lost reliable frame is resealed under a fresh packet number; stable message IDs and duplicate suppression make delivery idempotent while keeping retries inside the receiver's replay window. Packet numbers are never reused with the same traffic key. No arbitrary 0-RTT application sends are permitted. TLS session resumption, when supported by the host TLS stack, establishes **new** MIRA traffic keys and a new UDP session.
+- Encrypted WAL envelope v2 authenticates principal, channel ID and message ID; it reads legacy v1 payload envelopes for migration. WAL cursors and other record metadata remain visible and are not cryptographically authenticated by the envelope.
 - Protocol and authenticated handshake composition, custom loss response, key ratchet and optional at-rest envelope must be audited by independent cryptographers/security engineers.
 
 ## Network and peer abuse
 
 - Authentication, anti-replay, bounded message sizes, queues, channels, sessions, flow credits, quotas and rate limits limit resource abuse; their limits are not a DDoS guarantee.
-- An authenticated new source address must pass PATH_CHALLENGE/PATH_RESPONSE before being accepted. ProbeMTU uses authenticated probe acknowledgments; there is **no** comprehensive probe-loss blackhole algorithm. Never assume 1400 bytes works on all paths.
+- An authenticated new source address must pass PATH_CHALLENGE/PATH_RESPONSE before being accepted. ProbeMTU uses authenticated probe acknowledgments. Repeated timeout of jumbo reliable DATA triggers a conservative recovery heuristic: reset to 1200 bytes and retransmit affected messages in smaller fragments. This does not detect every PMTU failure mode or establish WAN fairness. Never assume 1400 bytes works on all paths.
 - Ensure UDP and TCP bootstrap endpoints have consistent firewall/TLS policy and NAT reachability. Prefer allowlists in preaudit deployments. Use externally managed mitigations against spoofing, floods and handshake exhaustion.
 
 ## Browser gateway boundary

@@ -27,7 +27,7 @@ import (
 
 const maxUpload = 1 << 30
 
-// bulkInflight raises the sender's packets-in-flight cap from the default 32.
+// bulkInflight sets the sender's packets-in-flight cap for the bulk transfer.
 // Throughput is bounded by roughly inflight x MTU / RTT; measured on loopback,
 // 32 gives ~9 MiB/s and 128 gives ~20 MiB/s. Raise it only for bulk senders:
 // every in-flight packet is memory held until acknowledged.

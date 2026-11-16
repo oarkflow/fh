@@ -29,7 +29,7 @@ A native full-duplex custom Go UDP transport with concurrent sessions, multiplex
 - `mira/tlsbootstrap.go`: TLS 1.3 strict mutual CA verification, identity from verified client certificate, TLS exporter domain separation, random connection identifiers and UDP return-path validation. Normal data never rides TLS/TCP.
 - `mira/transport.go`: native UDP listening, peer/session management, admission controls and native PSK profile (legacy experimental only).
 - `mira/handshake.go`: AEAD and directional key evolution; legacy X25519/PSK handshake remains bespoke. TLS session crypto bypasses bespoke peer authentication but **not** the MIRA packet format.
-- `mira/session.go`: per-session actor, scheduler, ACK ranges, retransmission, congestion/pacing budget, address validation and PMTU probes, UDP socket migration, session close. Retained ciphertext is retransmitted identically.
+- `mira/session.go`: per-session actor, scheduler, ACK ranges, retransmission, congestion/pacing budget, address validation and PMTU probes, UDP socket migration, session close. Reliable retries use fresh packet numbers and stable message IDs for duplicate suppression.
 - `mira/channel.go`, `mira/receive.go`: channel open/close/write-half-close, ordered/unordered delivery, frame fragmentation/reassembly and per-message receipts. Sender's IDs advance only after send admission.
 - `durable/`, `journal/`: WAL fsync, CRC/compaction, per-principal replay and optional authenticated at-rest envelope. These guarantee persistence only at **explicit application commit**, not at transport receipt.
 - `gateway/`, `browser/`: authenticated HTTPS bridge to a Go MIRA client. Requests authenticate separately and gateway sessions bind to the authenticated principal.
@@ -54,7 +54,7 @@ A native full-duplex custom Go UDP transport with concurrent sessions, multiplex
 
 ## Mobility and MTU
 
-A packet arriving at a new UDP source address is not blindly accepted. Server sends authenticated challenge and switches only after an authenticated response, with amplification bounds. A Go client can switch its own socket via `Session.RebindClient(ctx)` without replacing the entire logical session. `Session.ProbeMTU(ctx, n)` explicitly tests a larger packet target (bounded by packet parser maximum); on success the sender may use larger fragments. No continuous MTU discovery or blackhole detection is implemented.
+A packet arriving at a new UDP source address is not blindly accepted. Server sends authenticated challenge and switches only after an authenticated response, with amplification bounds. A Go client can switch its own socket via `Session.RebindClient(ctx)` without replacing the entire logical session. `Session.ProbeMTU(ctx, n)` explicitly tests a larger packet target (bounded by packet parser maximum); on success the sender may use larger fragments. When jumbo reliable DATA packets repeatedly time out, a conservative heuristic resets the path MTU to 1200 bytes and retransmits affected messages in smaller fragments. This is not continuous MTU discovery, does not detect every PMTU failure mode, and is not evidence of WAN fairness.
 
 ## Cluster deployment semantics
 

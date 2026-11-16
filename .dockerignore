@@ -1,0 +1,15 @@
+.git
+**/.git
+benchmarks/
+**/node_modules/
+**/coverage/
+**/dist/
+**/build/
+dev-certs/
+certs/
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+.env
+.env.*

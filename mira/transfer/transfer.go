@@ -45,6 +45,9 @@ type Header struct {
 
 // Send streams r (exactly size bytes) and waits for the receiver's commit.
 func Send(ctx context.Context, ch protocol.Channel, name string, r io.Reader, size int64) (err error) {
+	if size < 0 {
+		return ErrTooLarge
+	}
 	// The receiver reports a rejection as a message on the same channel. Watch
 	// for it so a refused transfer aborts at once instead of streaming the
 	// whole file or waiting forever for a receipt that will never come.
@@ -83,7 +86,8 @@ func Send(ctx context.Context, ch protocol.Channel, name string, r io.Reader, si
 	buf[0] = 'D'
 	var sent int64
 	for sent < size {
-		n, err := io.ReadFull(io.LimitReader(r, size-sent), buf[1:])
+		want := int(min(int64(ChunkSize), size-sent))
+		n, err := io.ReadFull(r, buf[1:1+want])
 		if n > 0 {
 			h.Write(buf[1 : 1+n])
 			if _, serr := send(ctx, ch, buf[:1+n]); serr != nil {
@@ -112,15 +116,32 @@ func Send(ctx context.Context, ch protocol.Channel, name string, r io.Reader, si
 // send retries on local backpressure: the session queue is bounded on purpose.
 func send(ctx context.Context, ch protocol.Channel, b []byte) (uint64, error) {
 	delay := 200 * time.Microsecond
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		id, err := ch.Send(ctx, b)
 		if err == nil || !isBackpressure(err) {
 			return id, err
 		}
+		if timer == nil {
+			timer = time.NewTimer(delay)
+		} else {
+			timer.Reset(delay)
+		}
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return 0, ctx.Err()
-		case <-time.After(delay):
+		case <-timer.C:
 		}
 		delay = min(10*time.Millisecond, delay*2)
 	}
@@ -167,13 +188,19 @@ func Receive(ctx context.Context, ch protocol.Channel, dst io.Writer, maxSize in
 		switch m.Payload[0] {
 		case 'D':
 			data := m.Payload[1:]
-			got += int64(len(data))
-			if got > hdr.Size {
+			// Reject empty chunks and compare against remaining bytes before
+			// addition so an adversarial stream cannot wrap the signed counter.
+			if len(data) == 0 || int64(len(data)) > hdr.Size-got {
 				return reject(ErrIntegrity)
 			}
+			got += int64(len(data))
 			h.Write(data)
-			if _, err := dst.Write(data); err != nil {
+			written, err := dst.Write(data)
+			if err != nil {
 				return reject(fmt.Errorf("transfer: storage failed: %w", err))
+			}
+			if written != len(data) {
+				return reject(fmt.Errorf("transfer: storage failed: %w", io.ErrShortWrite))
 			}
 		case 'E':
 			if got != hdr.Size || subtle.ConstantTimeCompare(m.Payload[1:], h.Sum(nil)) != 1 {

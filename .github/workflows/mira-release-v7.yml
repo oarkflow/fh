@@ -65,7 +65,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python conformance dependency
-        run: python -m pip install 'cryptography>=44,<47'
+        run: python -m pip install 'cryptography==50.0.2'
 
       - name: Verify tagged source
         run: |

@@ -28,15 +28,20 @@ func DeriveTrafficKeys(inputSecret []byte, context []byte) (TrafficKeys, error) 
 	extract := hmac.New(sha256.New, salt)
 	extract.Write(inputSecret)
 	prk := extract.Sum(nil)
+	defer clear(prk)
 	info := append([]byte("MIRA-T/1 traffic keys "), context...)
 	okm := make([]byte, 44)
+	defer clear(okm)
 	var t []byte
+	defer func() { clear(t) }()
 	for i, pos := byte(1), 0; pos < len(okm); i++ {
 		h := hmac.New(sha256.New, prk)
 		h.Write(t)
 		h.Write(info)
 		h.Write([]byte{i})
-		t = h.Sum(nil)
+		next := h.Sum(nil)
+		clear(t)
+		t = next
 		pos += copy(okm[pos:], t)
 	}
 	var out TrafficKeys
@@ -51,6 +56,8 @@ type Protector struct {
 }
 
 func NewProtector(k TrafficKeys) (*Protector, error) {
+	defer clear(k.Key[:])
+	defer clear(k.IV[:])
 	block, err := aes.NewCipher(k.Key[:])
 	if err != nil {
 		return nil, err

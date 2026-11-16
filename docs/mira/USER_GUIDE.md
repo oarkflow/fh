@@ -540,6 +540,11 @@ On reconnect: replay(cursor) -> events after cursor -> replay_complete
 
 Create the key with a cryptographic random source, restrict file permissions to `0600`, and keep its backup separately from the WAL. The keyring parser expects a real 32-byte hex key, not the placeholder above. Prefer a dedicated secrets-management process in controlled staging; production HSM/KMS lifecycle remains a release gate.
 
+If a WAL write or `fsync` returns `durable.ErrUncertain`, stop using that
+`durable.Store`, close it, and reopen the WAL to recover its committed state.
+The store fails closed after ambiguous disk I/O so later appends cannot build
+on an in-memory cursor that may differ from the recovered log.
+
 **Note:** The supplied `cmd/mira-journal-client` is a **legacy device-PSK** journal demo. It is not a matching mTLS journal CLI. For mTLS journal access, integrate `journal.SendRequest` and `journal.ReadEvent` into an authenticated client. Do not expose the legacy journal client over public networks.
 
 ### Replay checkpoints
@@ -656,7 +661,7 @@ bash scripts/verify-v7.sh
 
 ### Benchmarks
 
-`cmd/mira-bench` connects to a **running mTLS echo server** and reports JSON with client count, message size, completion/failure counts, round trips per second and p50/p95/p99. Example:
+`cmd/mira-bench` connects to a **running mTLS echo server** and reports JSON with client count, message window, maximum unacknowledged packets, message size, completion/failure counts, round trips per second, p50/p95/p99/p99.9/maximum latency, retransmissions and fast-loss signals. TLS setup is excluded from the measured transfer duration. Use `-window 1` for request/response latency or a larger value up to 32 to study pipelined throughput and tail-latency tradeoffs. Sweep `-max-inflight` to size bulk throughput against per-session memory:
 
 ```bash
 go run ./cmd/mira-bench \
@@ -665,7 +670,7 @@ go run ./cmd/mira-bench \
   -key ./dev-certs/client.key \
   -ca ./dev-certs/root.pem \
   -name server.local \
-  -clients 2 -messages 50 -bytes 256
+  -clients 2 -messages 50 -bytes 256 -window 8 -max-inflight 256
 ```
 
 `make load` runs an isolated local workload using the loopback development profile; it is a smoke test rather than comparative proof. The independent Python parser/interoperability checks cover wire revision 4, while the encrypted Python peer uses only the development PSK profile.

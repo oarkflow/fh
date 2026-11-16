@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,9 +18,12 @@ import (
 	"github.com/oarkflow/fh/protocol"
 )
 
+const maxIPRateEntries = 8192
+
 type ipRate struct {
 	tokens float64
 	last   time.Time
+	slot   int
 }
 
 type handshake struct {
@@ -43,26 +47,42 @@ type PSKResolver func(identity string) ([]byte, bool)
 type ChannelAuthorizer func(identity string, cfg protocol.ChannelConfig) bool
 
 type Server struct {
-	secureOnly         atomic.Bool
-	conn               *net.UDPConn
-	opts               Options
-	psk                []byte
-	resolver           PSKResolver
-	done               chan struct{}
-	once               sync.Once
-	wg                 sync.WaitGroup
-	mu                 sync.RWMutex
-	handshakes         map[uint64]*handshake
-	sessions           map[uint64]*Session
-	accepts            chan *Session
-	ipRates            map[string]*ipRate
-	revoked            map[string]struct{}
-	authorize          ChannelAuthorizer
-	handshakeAttempts  atomic.Uint64
-	handshakesAccepted atomic.Uint64
-	datagramsRead      atomic.Uint64
-	datagramsDropped   atomic.Uint64
-	payloadBytesRead   atomic.Uint64
+	secureOnly            atomic.Bool
+	conn                  *net.UDPConn
+	opts                  Options
+	psk                   []byte
+	resolver              PSKResolver
+	globalHandshakeTokens float64
+	globalHandshakeLast   time.Time
+	done                  chan struct{}
+	once                  sync.Once
+	closeErr              error
+	wg                    sync.WaitGroup
+	mu                    sync.RWMutex
+	rateMu                sync.Mutex
+	handshakes            map[uint64]*handshake
+	sessions              map[uint64]*Session
+	identitySlots         map[string]int
+	receiveBytes          atomic.Int64
+	pendingHandshakes     int // Protected by mu; keeps global admission checks O(1).
+	accepts               chan *Session
+	ipRates               map[netip.Addr]*ipRate
+	ipRateOrder           []netip.Addr // FIFO replacement ring, protected by rateMu.
+	ipRateOrderCount      int
+	ipRateOrderNext       int
+	revoked               map[string]struct{}
+	authorize             ChannelAuthorizer
+	handshakeAttempts     atomic.Uint64
+	handshakeRateLimited  atomic.Uint64
+	tlsHandshakeAttempts  atomic.Uint64
+	tlsHandshakeLimited   atomic.Uint64
+	handshakesAccepted    atomic.Uint64
+	datagramsRead         atomic.Uint64
+	datagramsDropped      atomic.Uint64
+	payloadBytesRead      atomic.Uint64
+	datagramsSent         atomic.Uint64
+	datagramSendErrors    atomic.Uint64
+	payloadBytesSent      atomic.Uint64
 }
 
 func Listen(addr string, secret []byte, opts Options) (*Server, error) {
@@ -80,10 +100,16 @@ func Listen(addr string, secret []byte, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{conn: conn, opts: opts.normalized(), psk: append([]byte(nil), secret...),
-		done: make(chan struct{}), handshakes: make(map[uint64]*handshake), sessions: make(map[uint64]*Session), accepts: make(chan *Session, 64), ipRates: make(map[string]*ipRate), revoked: make(map[string]struct{})}
-	s.wg.Add(1)
+	opts = opts.normalized()
+	if err := configureUDPBuffers(conn, opts); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	s := &Server{conn: conn, opts: opts, psk: append([]byte(nil), secret...),
+		done: make(chan struct{}), handshakes: make(map[uint64]*handshake), sessions: make(map[uint64]*Session), identitySlots: make(map[string]int), accepts: make(chan *Session, 64), ipRates: make(map[netip.Addr]*ipRate), ipRateOrder: make([]netip.Addr, maxIPRateEntries), revoked: make(map[string]struct{})}
+	s.wg.Add(2)
 	go s.readLoop()
+	go s.sweepLoop()
 	return s, nil
 }
 
@@ -105,11 +131,52 @@ func ListenWithResolver(addr string, resolve PSKResolver, opts Options) (*Server
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{conn: conn, opts: opts.normalized(), resolver: resolve, done: make(chan struct{}),
-		handshakes: make(map[uint64]*handshake), sessions: make(map[uint64]*Session), accepts: make(chan *Session, 64), ipRates: make(map[string]*ipRate), revoked: make(map[string]struct{})}
-	s.wg.Add(1)
+	opts = opts.normalized()
+	if err := configureUDPBuffers(conn, opts); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	s := &Server{conn: conn, opts: opts, resolver: resolve, done: make(chan struct{}),
+		handshakes: make(map[uint64]*handshake), sessions: make(map[uint64]*Session), identitySlots: make(map[string]int), accepts: make(chan *Session, 64), ipRates: make(map[netip.Addr]*ipRate), ipRateOrder: make([]netip.Addr, maxIPRateEntries), revoked: make(map[string]struct{})}
+	s.wg.Add(2)
 	go s.readLoop()
+	go s.sweepLoop()
 	return s, nil
+}
+
+func configureUDPBuffers(conn *net.UDPConn, opts Options) error {
+	if opts.UDPReadBufferBytes > 0 {
+		if err := conn.SetReadBuffer(opts.UDPReadBufferBytes); err != nil {
+			return fmt.Errorf("mira: set UDP read buffer: %w", err)
+		}
+	}
+	if opts.UDPWriteBufferBytes > 0 {
+		if err := conn.SetWriteBuffer(opts.UDPWriteBufferBytes); err != nil {
+			return fmt.Errorf("mira: set UDP write buffer: %w", err)
+		}
+	}
+	return nil
+}
+
+// waitUDPReadRetry prevents a persistent socket receive error from spinning a
+// reader core. The caller owns delay; successful reads reset it to zero.
+func waitUDPReadRetry(done <-chan struct{}, delay *time.Duration) bool {
+	if *delay < time.Millisecond {
+		*delay = time.Millisecond
+	} else if *delay < 100*time.Millisecond {
+		*delay *= 2
+		if *delay > 100*time.Millisecond {
+			*delay = 100 * time.Millisecond
+		}
+	}
+	timer := time.NewTimer(*delay)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // SetChannelAuthorizer changes the policy for all subsequent remote opens.
@@ -145,7 +212,7 @@ func (s *Server) RevokeIdentity(identity string) int {
 	sessions := make([]*Session, 0)
 	for id, hs := range s.handshakes {
 		if hs.s.identity == identity {
-			delete(s.handshakes, id)
+			s.removeHandshakeLocked(id)
 		}
 	}
 	for _, sess := range s.sessions {
@@ -168,33 +235,116 @@ func (s *Server) AllowIdentity(identity string) {
 	s.mu.Unlock()
 }
 
+// ReplaceRevokedIdentities atomically replaces the in-memory revocation
+// snapshot and disconnects sessions outside the current allowlist. Explicitly
+// removed identities remain blocked for this reload; lingering sessions from
+// older reloads stay blocked until they finish. The supplied maps are copied
+// and bounded by the configured identity and session ceilings.
+func (s *Server) ReplaceRevokedIdentities(identities, allowed map[string]struct{}) error {
+	if len(identities) > maxConfiguredSessions || len(allowed) > maxConfiguredSessions {
+		return errors.New("mira: revocation snapshot exceeds identity limit")
+	}
+	next := make(map[string]struct{}, len(identities))
+	for identity := range identities {
+		if identity == "" || len(identity) > 256 {
+			return errors.New("mira: invalid identity in revocation snapshot")
+		}
+		next[identity] = struct{}{}
+	}
+	permittedIDs := make(map[string]struct{}, len(allowed))
+	for identity := range allowed {
+		if identity == "" || len(identity) > 256 {
+			return errors.New("mira: invalid identity in allowlist snapshot")
+		}
+		permittedIDs[identity] = struct{}{}
+	}
+	var sessions []*Session
+	s.mu.Lock()
+	for id, hs := range s.handshakes {
+		_, explicitlyRevoked := next[hs.s.identity]
+		_, permitted := permittedIDs[hs.s.identity]
+		if explicitlyRevoked || !permitted {
+			if hs.s.identity != "" {
+				next[hs.s.identity] = struct{}{}
+			}
+			s.removeHandshakeLocked(id)
+		}
+	}
+	for _, sess := range s.sessions {
+		_, explicitlyRevoked := next[sess.identity]
+		_, permitted := permittedIDs[sess.identity]
+		if explicitlyRevoked || !permitted {
+			if sess.identity != "" {
+				next[sess.identity] = struct{}{}
+			}
+			sessions = append(sessions, sess)
+		}
+	}
+	s.revoked = next
+	s.mu.Unlock()
+	for _, sess := range sessions {
+		sess.disconnect()
+	}
+	return nil
+}
+
 // ServerStats contains only bounded metadata and does not expose secrets.
 type ServerStats struct {
-	ActiveSessions     int
-	PendingHandshakes  int
-	BlockedIdentities  int
-	TotalSessionSlots  int
-	HandshakeAttempts  uint64
-	HandshakesAccepted uint64
-	DatagramsRead      uint64
-	DatagramsDropped   uint64
-	PayloadBytesRead   uint64
+	ActiveSessions       int
+	PendingHandshakes    int
+	BlockedIdentities    int
+	TotalSessionSlots    int
+	ReceiveBufferedBytes int64
+	ReceiveBufferLimit   int64
+	HandshakeAttempts    uint64
+	HandshakeRateLimited uint64
+	TLSHandshakeAttempts uint64
+	TLSHandshakeLimited  uint64
+	HandshakesAccepted   uint64
+	DatagramsRead        uint64
+	DatagramsDropped     uint64
+	PayloadBytesRead     uint64
+	DatagramsSent        uint64
+	DatagramSendErrors   uint64
+	PayloadBytesSent     uint64
 }
 
 func (s *Server) Stats() ServerStats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	pending := 0
-	for _, hs := range s.handshakes {
-		if !hs.established {
-			pending++
+	return ServerStats{
+		ActiveSessions: len(s.sessions), PendingHandshakes: s.pendingHandshakes,
+		BlockedIdentities: len(s.revoked), TotalSessionSlots: s.opts.MaxSessions,
+		ReceiveBufferedBytes: s.receiveBytes.Load(), ReceiveBufferLimit: s.opts.MaxServerReceiveBytes,
+		HandshakeAttempts: s.handshakeAttempts.Load(), HandshakeRateLimited: s.handshakeRateLimited.Load(), TLSHandshakeAttempts: s.tlsHandshakeAttempts.Load(), TLSHandshakeLimited: s.tlsHandshakeLimited.Load(), HandshakesAccepted: s.handshakesAccepted.Load(), DatagramsRead: s.datagramsRead.Load(), DatagramsDropped: s.datagramsDropped.Load(), PayloadBytesRead: s.payloadBytesRead.Load(),
+		DatagramsSent: s.datagramsSent.Load(), DatagramSendErrors: s.datagramSendErrors.Load(), PayloadBytesSent: s.payloadBytesSent.Load(),
+	}
+}
+
+func (s *Server) reserveReceive(n int64) bool {
+	if n <= 0 {
+		return false
+	}
+	for {
+		x := s.receiveBytes.Load()
+		if x < 0 || x > s.opts.MaxServerReceiveBytes || n > s.opts.MaxServerReceiveBytes-x {
+			return false
+		}
+		if s.receiveBytes.CompareAndSwap(x, x+n) {
+			return true
 		}
 	}
-	return ServerStats{
-		ActiveSessions: len(s.sessions), PendingHandshakes: pending,
-		BlockedIdentities: len(s.revoked), TotalSessionSlots: s.opts.MaxSessions,
-		HandshakeAttempts: s.handshakeAttempts.Load(), HandshakesAccepted: s.handshakesAccepted.Load(), DatagramsRead: s.datagramsRead.Load(), DatagramsDropped: s.datagramsDropped.Load(), PayloadBytesRead: s.payloadBytesRead.Load(),
+}
+
+func (s *Server) writeUDP(raw []byte, to *net.UDPAddr) (int, error) {
+	n, err := s.conn.WriteToUDP(raw, to)
+	if err != nil {
+		s.datagramSendErrors.Add(1)
+	} else {
+		s.datagramsSent.Add(1)
+		s.payloadBytesSent.Add(uint64(n))
 	}
+	return n, err
 }
 
 // WritePrometheus exports only aggregate counters, never device identities,
@@ -208,12 +358,20 @@ func (s *Server) WritePrometheus(w io.Writer) error {
 		v    uint64
 	}{
 		{"mira_active_sessions", "gauge", uint64(m.ActiveSessions)},
+		{"mira_receive_buffered_bytes", "gauge", uint64(m.ReceiveBufferedBytes)},
+		{"mira_receive_buffer_limit_bytes", "gauge", uint64(m.ReceiveBufferLimit)},
 		{"mira_pending_handshakes", "gauge", uint64(m.PendingHandshakes)},
 		{"mira_handshake_attempts_total", "counter", m.HandshakeAttempts},
+		{"mira_handshake_rate_limited_total", "counter", m.HandshakeRateLimited},
+		{"mira_tls_handshake_attempts_total", "counter", m.TLSHandshakeAttempts},
+		{"mira_tls_handshake_rate_limited_total", "counter", m.TLSHandshakeLimited},
 		{"mira_handshakes_accepted_total", "counter", m.HandshakesAccepted},
 		{"mira_datagrams_read_total", "counter", m.DatagramsRead},
 		{"mira_datagrams_dropped_total", "counter", m.DatagramsDropped},
 		{"mira_payload_bytes_read_total", "counter", m.PayloadBytesRead},
+		{"mira_datagrams_sent_total", "counter", m.DatagramsSent},
+		{"mira_datagram_send_errors_total", "counter", m.DatagramSendErrors},
+		{"mira_payload_bytes_sent_total", "counter", m.PayloadBytesSent},
 	} {
 		if _, err := fmt.Fprintf(w, "# TYPE %s %s\n%s %d\n", line.name, line.typ, line.name, line.v); err != nil {
 			return err
@@ -223,13 +381,28 @@ func (s *Server) WritePrometheus(w io.Writer) error {
 }
 func (s *Server) Addr() net.Addr { return s.conn.LocalAddr() }
 func (s *Server) Accept(ctx context.Context) (*Session, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-s.done:
-		return nil, ErrClosed
-	case sess := <-s.accepts:
-		return sess, nil
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-s.done:
+			return nil, ErrClosed
+		case sess := <-s.accepts:
+			if sess == nil {
+				continue
+			}
+			select {
+			case <-s.done:
+				return nil, ErrClosed
+			default:
+			}
+			select {
+			case <-sess.done:
+				continue
+			default:
+				return sess, nil
+			}
+		}
 	}
 }
 func (s *Server) Close() error {
@@ -244,29 +417,141 @@ func (s *Server) Close() error {
 		for _, sess := range snapshot {
 			sess.disconnect()
 		}
-		deadline := time.Now().Add(2 * time.Second)
-		for _, sess := range snapshot {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				sess.stop()
+		graceTimer := time.NewTimer(2 * time.Second)
+		for i, sess := range snapshot {
+			select {
+			case <-sess.finished:
 				continue
+			default:
 			}
 			select {
 			case <-sess.finished:
-			case <-time.After(remaining):
-				sess.stop()
+			case <-graceTimer.C:
+				for _, pending := range snapshot[i:] {
+					pending.stop()
+				}
+				goto gracefulDrainDone
 			}
 		}
+	gracefulDrainDone:
+		graceTimer.Stop()
+		// The first deadline is a graceful drain. All remaining sessions have
+		// been stopped above; give their owner goroutines one bounded cleanup
+		// interval before clearing shared server state.
+		cleanupTimer := time.NewTimer(2 * time.Second)
+		defer cleanupTimer.Stop()
+		for _, sess := range snapshot {
+			select {
+			case <-sess.finished:
+			case <-cleanupTimer.C:
+				for _, pending := range snapshot {
+					select {
+					case <-pending.finished:
+					default:
+						s.closeErr = ErrTimeout
+						goto sessionsStopped
+					}
+				}
+				goto sessionsStopped
+			}
+		}
+	sessionsStopped:
 		_ = s.conn.Close()
 	})
 	s.wg.Wait()
-	return nil
+	s.mu.Lock()
+	for id, hs := range s.handshakes {
+		clear(hs.hello)
+		clear(hs.helloAck)
+		clear(hs.ready)
+		s.removeHandshakeLocked(id)
+	}
+	clear(s.handshakes)
+	clear(s.psk)
+	s.psk = nil
+	s.mu.Unlock()
+	s.rateMu.Lock()
+	clear(s.ipRates)
+	s.rateMu.Unlock()
+	return s.closeErr
 }
 func (s *Server) removeSession(id uint64) {
 	s.mu.Lock()
+	sess := s.sessions[id]
+	hs := s.handshakes[id]
 	delete(s.sessions, id)
 	delete(s.handshakes, id)
+	if sess != nil {
+		s.removeIdentitySlotLocked(sess.identity)
+	} else if hs != nil && !hs.established {
+		s.pendingHandshakes--
+		s.removeIdentitySlotLocked(hs.s.identity)
+	}
 	s.mu.Unlock()
+}
+
+func (s *Server) removeIdentitySlotLocked(identity string) {
+	if count := s.identitySlots[identity]; count <= 1 {
+		delete(s.identitySlots, identity)
+	} else {
+		s.identitySlots[identity] = count - 1
+	}
+}
+
+func (s *Server) removeHandshakeLocked(id uint64) {
+	hs := s.handshakes[id]
+	if hs == nil {
+		return
+	}
+	delete(s.handshakes, id)
+	if !hs.established {
+		s.pendingHandshakes--
+		s.removeIdentitySlotLocked(hs.s.identity)
+	}
+}
+
+// deliverSession linearizes application delivery against identity revocation.
+// The session must already be registered in the server's active-session map.
+func (s *Server) deliverSession(sess *Session) bool {
+	s.mu.RLock()
+	_, denied := s.revoked[sess.identity]
+	deliver := !denied && s.sessions[sess.id] == sess
+	select {
+	case <-sess.done:
+		deliver = false
+	default:
+	}
+	if deliver {
+		select {
+		case s.accepts <- sess:
+		default:
+			deliver = false
+		}
+	}
+	s.mu.RUnlock()
+	return deliver
+}
+
+// deliverChannel rechecks session ownership and revocation after the channel
+// policy callback has run, then linearizes application delivery with revokes.
+func (s *Server) deliverChannel(sess *Session, ch *Channel) bool {
+	s.mu.RLock()
+	_, denied := s.revoked[sess.identity]
+	deliver := !denied && s.sessions[sess.id] == sess
+	select {
+	case <-sess.done:
+		deliver = false
+	default:
+	}
+	if deliver {
+		select {
+		case sess.accepts <- ch:
+		default:
+			deliver = false
+		}
+	}
+	s.mu.RUnlock()
+	return deliver
 }
 
 func addrEqual(a, b *net.UDPAddr) bool {
@@ -275,17 +560,17 @@ func addrEqual(a, b *net.UDPAddr) bool {
 
 func (s *Server) readLoop() {
 	defer s.wg.Done()
-	buf := make([]byte, wire.MaxDatagram+1)
-	sweep := time.Now()
+	var readErrorDelay time.Duration
 	for {
 		select {
 		case <-s.done:
 			return
 		default:
 		}
-		_ = s.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		n, addr, err := s.conn.ReadFromUDP(buf)
+		packet := acquireInboundBuffer()
+		n, addr, err := s.conn.ReadFromUDP(packet)
 		if err != nil {
+			releaseInboundDatagram(packet)
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
@@ -294,54 +579,91 @@ func (s *Server) readLoop() {
 				return
 			default:
 			}
-			var ne net.Error
-			if !errors.As(err, &ne) || !ne.Timeout() {
-				continue
+			if !waitUDPReadRetry(s.done, &readErrorDelay) {
+				return
 			}
-		} else if n >= wire.HeaderSize && n <= wire.MaxDatagram {
-			s.datagramsRead.Add(1)
-			s.payloadBytesRead.Add(uint64(n))
-			p := append([]byte(nil), buf[:n]...)
-			h, e := wire.ParseHeader(p)
-			if e == nil {
-				switch h.Kind {
-				case wire.KindHello:
-					s.onHello(h, p, addr)
-				case wire.KindFinish:
-					s.onFinish(h, p, addr)
-				case wire.KindData:
-					s.mu.RLock()
-					ss := s.sessions[h.Connection]
-					s.mu.RUnlock()
-					if ss != nil {
-						select {
-						case ss.incoming <- inboundPacket{raw: p, from: addr}:
-						default:
-							s.datagramsDropped.Add(1)
-						}
-					} else {
-						s.datagramsDropped.Add(1)
+			continue
+		}
+		readErrorDelay = 0
+		select {
+		case <-s.done:
+			releaseInboundDatagram(packet)
+			return
+		default:
+		}
+		if n < wire.HeaderSize || n > wire.MaxDatagram {
+			s.datagramsDropped.Add(1)
+			releaseInboundDatagram(packet)
+			continue
+		}
+		s.datagramsRead.Add(1)
+		s.payloadBytesRead.Add(uint64(n))
+		packet = packet[:n]
+		h, parseErr := wire.ParseHeader(packet)
+		if parseErr != nil {
+			s.datagramsDropped.Add(1)
+		}
+		transferred := false
+		if parseErr == nil {
+			switch h.Kind {
+			case wire.KindHello:
+				s.onHello(h, packet, addr)
+			case wire.KindFinish:
+				s.onFinish(h, packet, addr)
+			case wire.KindData:
+				s.mu.RLock()
+				ss := s.sessions[h.Connection]
+				if ss != nil {
+					select {
+					case <-ss.done:
+					case ss.incoming <- inboundPacket{raw: packet, from: addr, pooled: true}:
+						transferred = true
+					default:
 					}
+				}
+				// Keep removal from overtaking a packet enqueue; the session
+				// actor drains the queue after it leaves the session map.
+				s.mu.RUnlock()
+				if !transferred {
+					s.datagramsDropped.Add(1)
 				}
 			}
 		}
-		if time.Since(sweep) > time.Second*2 {
-			s.expireHandshakes()
-			sweep = time.Now()
+		if !transferred {
+			releaseInboundDatagram(packet)
 		}
 	}
 }
+
+// sweepLoop expires admission state independently of packet traffic. Keeping
+// deadlines out of readLoop avoids a deadline syscall for every datagram.
+func (s *Server) sweepLoop() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			s.expireHandshakes()
+		}
+	}
+}
+
 func (s *Server) expireHandshakes() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.rateMu.Lock()
 	for ip, rate := range s.ipRates {
 		if time.Since(rate.last) > time.Minute {
 			delete(s.ipRates, ip)
 		}
 	}
+	s.rateMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for cid, hs := range s.handshakes {
 		if !hs.established && time.Since(hs.received) > s.opts.HandshakeTimeout {
-			delete(s.handshakes, cid)
+			s.removeHandshakeLocked(cid)
 		}
 		if hs.established && time.Since(hs.received) > 10*time.Second {
 			delete(s.handshakes, cid)
@@ -349,17 +671,47 @@ func (s *Server) expireHandshakes() {
 	}
 }
 
-// admitIP enforces a bounded, per-source token bucket before cryptographic work.
-// Called only from the server UDP read loop.
-func (s *Server) admitIP(addr *net.UDPAddr) bool {
-	key := addr.IP.String()
-	rate := s.ipRates[key]
+// admitIP enforces endpoint-wide and per-source token buckets before handshake
+// cryptographic work. rateMu protects both buckets across UDP and TLS listeners.
+func (s *Server) admitIP(ip net.IP) bool {
+	key, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	key = key.Unmap()
 	now := time.Now()
-	if rate == nil {
-		if len(s.ipRates) >= 8192 {
-			return false
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	rateLimit := float64(s.opts.MaxHandshakeAttemptsPerSecond)
+	burst := 2 * rateLimit
+	if s.globalHandshakeLast.IsZero() {
+		s.globalHandshakeTokens = burst
+	} else {
+		s.globalHandshakeTokens += now.Sub(s.globalHandshakeLast).Seconds() * rateLimit
+		if s.globalHandshakeTokens > burst {
+			s.globalHandshakeTokens = burst
 		}
-		s.ipRates[key] = &ipRate{tokens: 99, last: now}
+	}
+	s.globalHandshakeLast = now
+	if s.globalHandshakeTokens < 1 {
+		return false
+	}
+	rate := s.ipRates[key]
+	if rate == nil {
+		slot := s.ipRateOrderCount
+		if s.ipRateOrderCount < maxIPRateEntries {
+			s.ipRateOrderCount++
+		} else {
+			slot = s.ipRateOrderNext
+			oldKey := s.ipRateOrder[slot]
+			if old := s.ipRates[oldKey]; old != nil && old.slot == slot {
+				delete(s.ipRates, oldKey)
+			}
+			s.ipRateOrderNext = (slot + 1) % maxIPRateEntries
+		}
+		s.ipRateOrder[slot] = key
+		s.ipRates[key] = &ipRate{tokens: 99, last: now, slot: slot}
+		s.globalHandshakeTokens--
 		return true
 	}
 	rate.tokens += now.Sub(rate.last).Seconds() * 50
@@ -371,6 +723,7 @@ func (s *Server) admitIP(addr *net.UDPAddr) bool {
 		return false
 	}
 	rate.tokens--
+	s.globalHandshakeTokens--
 	return true
 }
 func (s *Server) onHello(h wire.Header, p []byte, addr *net.UDPAddr) {
@@ -378,7 +731,8 @@ func (s *Server) onHello(h wire.Header, p []byte, addr *net.UDPAddr) {
 		return
 	}
 	s.handshakeAttempts.Add(1)
-	if !s.admitIP(addr) {
+	if !s.admitIP(addr.IP) {
+		s.handshakeRateLimited.Add(1)
 		return
 	}
 	if h.Number != 0 || h.Flags != 0 || h.Epoch != 0 {
@@ -417,16 +771,11 @@ func (s *Server) onHello(h wire.Header, p []byte, addr *net.UDPAddr) {
 	s.mu.RLock()
 	hs := s.handshakes[h.Connection]
 	active := s.sessions[h.Connection]
-	n := len(s.sessions)
-	for _, h := range s.handshakes {
-		if !h.established {
-			n++
-		}
-	}
+	n := len(s.sessions) + s.pendingHandshakes
 	s.mu.RUnlock()
 	if hs != nil {
 		if sameHello(hs.hello, p) && addrEqual(hs.s.getRemote(), addr) {
-			_, _ = s.conn.WriteToUDP(hs.helloAck, addr)
+			_, _ = s.writeUDP(hs.helloAck, addr)
 		}
 		return
 	}
@@ -434,18 +783,8 @@ func (s *Server) onHello(h wire.Header, p []byte, addr *net.UDPAddr) {
 		return
 	}
 	if s.opts.MaxSessionsPerIdentity > 0 && identity != "" {
-		count := 0
 		s.mu.RLock()
-		for _, v := range s.sessions {
-			if v.identity == identity {
-				count++
-			}
-		}
-		for _, v := range s.handshakes {
-			if !v.established && v.s.identity == identity {
-				count++
-			}
-		}
+		count := s.identitySlots[identity]
 		s.mu.RUnlock()
 		if count >= s.opts.MaxSessionsPerIdentity {
 			return
@@ -467,41 +806,29 @@ func (s *Server) onHello(h wire.Header, p []byte, addr *net.UDPAddr) {
 	if err != nil {
 		return
 	}
-	ss := newSession(s.conn, addr, h.Connection, tx, rx, schedule, false, s.opts, s)
+	defer clear(schedule.master[:])
+	ss := newSession(s.conn, addr, h.Connection, tx, rx, &schedule, false, s.opts, s)
 	ss.identity = identity
-	hs = &handshake{received: time.Now(), hello: p, helloAck: ack, s: ss}
+	hs = &handshake{received: time.Now(), hello: append([]byte(nil), p...), helloAck: ack, s: ss}
 	s.mu.Lock()
-	activeCount := len(s.sessions)
-	for _, h := range s.handshakes {
-		if !h.established {
-			activeCount++
-		}
-	}
+	activeCount := len(s.sessions) + s.pendingHandshakes
 	_, denied = s.revoked[identity]
-	if denied || s.handshakes[h.Connection] != nil || s.sessions[h.Connection] != nil || activeCount >= s.opts.MaxSessions {
+	select {
+	case <-s.done:
+		s.mu.Unlock()
+		return
+	default:
+	}
+	if denied || s.handshakes[h.Connection] != nil || s.sessions[h.Connection] != nil || activeCount >= s.opts.MaxSessions ||
+		(s.opts.MaxSessionsPerIdentity > 0 && identity != "" && s.identitySlots[identity] >= s.opts.MaxSessionsPerIdentity) {
 		s.mu.Unlock()
 		return
 	}
-	if s.opts.MaxSessionsPerIdentity > 0 && identity != "" {
-		count := 0
-		for _, v := range s.sessions {
-			if v.identity == identity {
-				count++
-			}
-		}
-		for _, v := range s.handshakes {
-			if !v.established && v.s.identity == identity {
-				count++
-			}
-		}
-		if count >= s.opts.MaxSessionsPerIdentity {
-			s.mu.Unlock()
-			return
-		}
-	}
 	s.handshakes[h.Connection] = hs
+	s.pendingHandshakes++
+	s.identitySlots[identity]++
 	s.mu.Unlock()
-	_, _ = s.conn.WriteToUDP(ack, addr)
+	_, _ = s.writeUDP(ack, addr)
 }
 func (s *Server) onFinish(h wire.Header, p []byte, addr *net.UDPAddr) {
 	if h.Number != 1 || h.Epoch != 0 || h.Flags != 0 {
@@ -528,7 +855,13 @@ func (s *Server) onFinish(h wire.Header, p []byte, addr *net.UDPAddr) {
 	previousReady := hs.ready
 	s.mu.RUnlock()
 	if already {
-		_, _ = s.conn.WriteToUDP(previousReady, addr)
+		s.mu.RLock()
+		current := s.handshakes[h.Connection] == hs && s.sessions[h.Connection] == hs.s
+		_, denied := s.revoked[hs.s.identity]
+		s.mu.RUnlock()
+		if current && !denied {
+			_, _ = s.writeUDP(previousReady, addr)
+		}
 		return
 	}
 	frame, err := wire.AppendFrame(nil, wire.Frame{Type: wire.FramePing, Body: []byte("READY")})
@@ -540,22 +873,25 @@ func (s *Server) onFinish(h wire.Header, p []byte, addr *net.UDPAddr) {
 		return
 	}
 	s.mu.Lock()
-	if hs.established {
+	_, denied = s.revoked[hs.s.identity]
+	if denied || s.handshakes[h.Connection] != hs || s.sessions[h.Connection] != nil || hs.established {
 		s.mu.Unlock()
 		return
 	}
 	hs.ready = ready
 	hs.established = true
+	s.pendingHandshakes--
 	s.sessions[h.Connection] = hs.s
-	s.mu.Unlock()
-	s.handshakesAccepted.Add(1)
+	// Publish only after the session owner and finished channel are initialized;
+	// concurrent Server.Close snapshots sessions under this same lock.
 	hs.s.start()
-	_, _ = s.conn.WriteToUDP(ready, addr)
-	select {
-	case s.accepts <- hs.s:
-	default:
+	s.mu.Unlock()
+	if !s.deliverSession(hs.s) {
 		hs.s.stop()
+		return
 	}
+	s.handshakesAccepted.Add(1)
+	_, _ = s.writeUDP(ready, addr)
 }
 
 // Dial establishes an encrypted session. The same secret must be provisioned
@@ -579,6 +915,10 @@ func DialWithIdentity(ctx context.Context, addr, identity string, secret []byte,
 	}
 	conn, err := net.ListenUDP("udp", nil)
 	if err != nil {
+		return nil, err
+	}
+	if err := configureUDPBuffers(conn, o); err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 	defer func() {
@@ -683,6 +1023,7 @@ func DialWithIdentity(ctx context.Context, addr, identity string, secret []byte,
 	if err != nil {
 		return nil, err
 	}
+	defer clear(schedule.master[:])
 	finish, err := sealed(tx, cid, 1, wire.KindFinish, 0, []byte("MIRA-T/1 CLIENT FINISH"))
 	if err != nil {
 		return nil, err
@@ -739,7 +1080,7 @@ func DialWithIdentity(ctx context.Context, addr, identity string, secret []byte,
 	}
 	transferred = true
 	stateMu.Unlock()
-	ss := newSession(conn, target, cid, tx, rx, schedule, true, o, nil)
+	ss := newSession(conn, target, cid, tx, rx, &schedule, true, o, nil)
 	ss.identity = identity
 	ss.start()
 	conn = nil // session owns socket
@@ -747,10 +1088,14 @@ func DialWithIdentity(ctx context.Context, addr, identity string, secret []byte,
 }
 
 // Client and server share this same encrypted session engine.
-func newSession(conn *net.UDPConn, remote *net.UDPAddr, cid uint64, tx, rx *cryptokit.Protector, schedule trafficSchedule, client bool, opts Options, srv *Server) *Session {
-	ss := &Session{conn: conn, remote: remote, id: cid, tx: tx, rx: rx, schedule: schedule, client: client, opts: opts, server: srv,
+func newSession(conn *net.UDPConn, remote *net.UDPAddr, cid uint64, tx, rx *cryptokit.Protector, schedule *trafficSchedule, client bool, opts Options, srv *Server) *Session {
+	// The admission queue is deliberately smaller than the active-channel cap:
+	// a slow application must not turn a large configured channel limit into a
+	// correspondingly large pointer array for every session.
+	acceptQueue := min(opts.MaxChannels, 64)
+	ss := &Session{conn: conn, remote: remote, id: cid, tx: tx, rx: rx, schedule: *schedule, client: client, opts: opts, server: srv,
 		incoming: make(chan inboundPacket, 256), requests: make(chan any, 128), done: make(chan struct{}),
-		accepts: make(chan *Channel, opts.MaxChannels), channels: make(map[uint64]*Channel), closedIDs: make(map[uint64]struct{}), pending: make(map[uint64]*sentPacket),
+		accepts: make(chan *Channel, acceptQueue), channels: make(map[uint64]*Channel), closedIDs: make(map[uint64]struct{}), pending: make(map[uint64]*sentPacket),
 		nextPN: 2, pathMTU: 1200, started: time.Now(), lastRecv: time.Now(), cwnd: 10 * wire.MaxDatagram, ssthresh: 1 << 30}
 	if client {
 		ss.nextChannel = 1
@@ -759,6 +1104,7 @@ func newSession(conn *net.UDPConn, remote *net.UDPAddr, cid uint64, tx, rx *cryp
 	}
 	ss.txChain = schedule.initialChain(true)
 	ss.rxChain = schedule.initialChain(false)
+	clear(schedule.master[:])
 	clear(ss.schedule.master[:]) // Do not retain initial exporter/handshake master.
 	return ss
 }

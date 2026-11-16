@@ -25,22 +25,46 @@ import (
 const tlsALPN = "mira-t/1-udp-bootstrap"
 const tlsExporter = "EXPORTER-MIRA-T1-UDP-v1"
 
+// IdentityAuthorizer admits a verified TLS certificate identity before MIRA
+// allocates a session. Implementations must be safe for concurrent calls and
+// should be nonblocking.
+type IdentityAuthorizer func(identity string) bool
+
 // SecureServer adds an authenticated TLS 1.3 control port to a native MIRA UDP
 // server. It rejects the legacy PSK handshake entirely. Only mutual-TLS peers
 // with a proven UDP return path are delivered to Accept.
 type SecureServer struct {
 	*Server
 	listener  net.Listener
+	authorize IdentityAuthorizer
 	stopped   chan struct{}
 	closeOnce sync.Once
+	closeErr  error
 	wg        sync.WaitGroup
 	limit     chan struct{}
+	connMu    sync.Mutex
+	conns     map[net.Conn]string
+	ipCounts  map[string]int
 }
 
 // ListenTLS requires a CA-verified client certificate and TLS 1.3 server
 // certificate. tcpAddr and udpAddr may be different ports. Certificates must
 // identify each client by a non-empty URI SAN or Subject CommonName.
 func ListenTLS(udpAddr, tcpAddr string, cfg *tls.Config, opts Options) (*SecureServer, error) {
+	return listenTLS(udpAddr, tcpAddr, cfg, opts, nil)
+}
+
+// ListenTLSWithIdentityAuthorizer rejects verified certificates that are not
+// admitted by authorize before allocating a MIRA session. The callback may be
+// backed by an atomically replaced allowlist.
+func ListenTLSWithIdentityAuthorizer(udpAddr, tcpAddr string, cfg *tls.Config, authorize IdentityAuthorizer, opts Options) (*SecureServer, error) {
+	if authorize == nil {
+		return nil, errors.New("mira: nil TLS identity authorizer")
+	}
+	return listenTLS(udpAddr, tcpAddr, cfg, opts, authorize)
+}
+
+func listenTLS(udpAddr, tcpAddr string, cfg *tls.Config, opts Options, authorize IdentityAuthorizer) (*SecureServer, error) {
 	if cfg == nil || len(cfg.Certificates) == 0 || cfg.ClientCAs == nil {
 		return nil, errors.New("mira: TLS server certificates and client CA are mandatory")
 	}
@@ -51,6 +75,38 @@ func ListenTLS(udpAddr, tcpAddr string, cfg *tls.Config, opts Options) (*SecureS
 	c.MinVersion = tls.VersionTLS13
 	c.MaxVersion = tls.VersionTLS13
 	c.NextProtos = []string{tlsALPN}
+	if getConfig := c.GetConfigForClient; getConfig != nil {
+		clientCAs := c.ClientCAs
+		verifyPeerCertificate := c.VerifyPeerCertificate
+		verifyConnection := c.VerifyConnection
+		c.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			selected, err := getConfig(hello)
+			if err != nil || selected == nil {
+				return selected, err
+			}
+			selected = selected.Clone()
+			// A dynamic SNI config must not weaken this listener's mandatory
+			// client-certificate verification or change its TLS/ALPN profile.
+			selected.MinVersion = tls.VersionTLS13
+			selected.MaxVersion = tls.VersionTLS13
+			selected.ClientAuth = tls.RequireAndVerifyClientCert
+			if selected.ClientCAs == nil {
+				selected.ClientCAs = clientCAs
+			}
+			if selected.ClientCAs == nil {
+				return nil, errors.New("mira: dynamic TLS config has no client CA")
+			}
+			selected.NextProtos = []string{tlsALPN}
+			selected.GetConfigForClient = nil
+			if selected.VerifyPeerCertificate == nil {
+				selected.VerifyPeerCertificate = verifyPeerCertificate
+			}
+			if selected.VerifyConnection == nil {
+				selected.VerifyConnection = verifyConnection
+			}
+			return selected, nil
+		}
+	}
 	listener, err := tls.Listen("tcp", tcpAddr, c)
 	if err != nil {
 		return nil, err
@@ -67,7 +123,7 @@ func ListenTLS(udpAddr, tcpAddr string, cfg *tls.Config, opts Options) (*SecureS
 	}
 	// No legacy stateless UDP handshake may create a session in this mode.
 	srv.secureOnly.Store(true)
-	sec := &SecureServer{Server: srv, listener: listener, stopped: make(chan struct{}), limit: make(chan struct{}, 128)}
+	sec := &SecureServer{Server: srv, listener: listener, authorize: authorize, stopped: make(chan struct{}), limit: make(chan struct{}, 128), conns: make(map[net.Conn]string), ipCounts: make(map[string]int)}
 	sec.wg.Add(1)
 	go sec.acceptTLS()
 	return sec, nil
@@ -79,10 +135,15 @@ func (s *SecureServer) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.stopped)
 		_ = s.listener.Close()
-		_ = s.Server.Close()
+		s.connMu.Lock()
+		for conn := range s.conns {
+			_ = conn.Close()
+		}
+		s.connMu.Unlock()
+		s.closeErr = s.Server.Close()
 		s.wg.Wait()
 	})
-	return nil
+	return s.closeErr
 }
 
 func (s *SecureServer) acceptTLS() {
@@ -102,13 +163,73 @@ func (s *SecureServer) acceptTLS() {
 			return
 		}
 		select {
-		case s.limit <- struct{}{}:
-			s.wg.Add(1)
-			go func() { defer s.wg.Done(); defer func() { <-s.limit }(); s.acceptOneTLS(conn) }()
+		case <-s.stopped:
+			_ = conn.Close()
+			return
+		case <-s.done:
+			_ = conn.Close()
+			return
 		default:
+		}
+		remote, ok := conn.RemoteAddr().(*net.TCPAddr)
+		if !ok || remote.IP == nil {
+			_ = conn.Close()
+			continue
+		}
+		s.tlsHandshakeAttempts.Add(1)
+		if !s.Server.admitIP(remote.IP) {
+			s.tlsHandshakeLimited.Add(1)
+			_ = conn.Close()
+			continue
+		}
+		ip := remote.IP.String()
+		select {
+		case s.limit <- struct{}{}:
+			s.connMu.Lock()
+			select {
+			case <-s.stopped:
+				s.connMu.Unlock()
+				<-s.limit
+				_ = conn.Close()
+				return
+			default:
+				if s.ipCounts[ip] >= s.opts.MaxTLSHandshakesPerIP {
+					s.connMu.Unlock()
+					<-s.limit
+					s.tlsHandshakeLimited.Add(1)
+					_ = conn.Close()
+					continue
+				}
+				s.conns[conn] = ip
+				s.ipCounts[ip]++
+			}
+			s.connMu.Unlock()
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				defer func() { <-s.limit }()
+				defer s.removeTLSConn(conn)
+				s.acceptOneTLS(conn)
+			}()
+		default:
+			s.tlsHandshakeLimited.Add(1)
 			_ = conn.Close()
 		}
 	}
+}
+
+func (s *SecureServer) removeTLSConn(conn net.Conn) {
+	_ = conn.Close()
+	s.connMu.Lock()
+	if ip := s.conns[conn]; ip != "" {
+		delete(s.conns, conn)
+		if s.ipCounts[ip] <= 1 {
+			delete(s.ipCounts, ip)
+		} else {
+			s.ipCounts[ip]--
+		}
+	}
+	s.connMu.Unlock()
 }
 
 func certIdentity(state tls.ConnectionState) string {
@@ -139,7 +260,10 @@ func (s *SecureServer) acceptOneTLS(c net.Conn) {
 		return
 	}
 	identity := certIdentity(state)
-	if identity == "" {
+	if identity == "" || len(identity) > 256 {
+		return
+	}
+	if s.authorize != nil && !s.authorize(identity) {
 		return
 	}
 	var remoteIP net.IP
@@ -151,13 +275,8 @@ func (s *SecureServer) acceptOneTLS(c net.Conn) {
 	}
 	s.mu.RLock()
 	_, revoked := s.revoked[identity]
-	count := len(s.sessions)
-	perIdentity := 0
-	for _, existing := range s.sessions {
-		if existing.identity == identity {
-			perIdentity++
-		}
-	}
+	count := len(s.sessions) + s.pendingHandshakes
+	perIdentity := s.identitySlots[identity]
 	s.mu.RUnlock()
 	if revoked || count >= s.opts.MaxSessions || (s.opts.MaxSessionsPerIdentity > 0 && perIdentity >= s.opts.MaxSessionsPerIdentity) {
 		return
@@ -175,6 +294,7 @@ func (s *SecureServer) acceptOneTLS(c net.Conn) {
 		return
 	}
 	var schedule trafficSchedule
+	defer clear(schedule.master[:])
 	copy(schedule.master[:], exported)
 	clear(exported)
 	schedule.id = cid
@@ -189,36 +309,38 @@ func (s *SecureServer) acceptOneTLS(c net.Conn) {
 	}
 	// The client UDP port is unknown until an encrypted packet proves reachability.
 	remote := &net.UDPAddr{IP: remoteIP, Port: 0}
-	ss := newSession(s.conn, remote, cid, tx, rx, schedule, false, s.opts, s.Server)
+	ss := newSession(s.conn, remote, cid, tx, rx, &schedule, false, s.opts, s.Server)
 	ss.identity = identity
 	ss.bootstrapTLS = true
 	s.mu.Lock()
 	_, revoked = s.revoked[identity]
-	if revoked || s.sessions[cid] != nil || len(s.sessions) >= s.opts.MaxSessions {
+	select {
+	case <-s.done:
+		s.mu.Unlock()
+		return
+	default:
+	}
+	if revoked || s.sessions[cid] != nil || len(s.sessions)+s.pendingHandshakes >= s.opts.MaxSessions {
 		s.mu.Unlock()
 		return
 	}
-	if s.opts.MaxSessionsPerIdentity > 0 {
-		n := 0
-		for _, other := range s.sessions {
-			if other.identity == identity {
-				n++
-			}
-		}
-		if n >= s.opts.MaxSessionsPerIdentity {
-			s.mu.Unlock()
-			return
-		}
+	if s.opts.MaxSessionsPerIdentity > 0 && s.identitySlots[identity] >= s.opts.MaxSessionsPerIdentity {
+		s.mu.Unlock()
+		return
 	}
 	s.sessions[cid] = ss
+	s.identitySlots[identity]++
+	// Start before publishing the map lock so Close cannot observe an
+	// unstarted session without its completion channel or owner goroutine.
+	ss.start()
 	s.mu.Unlock()
 	// TLS only transfers the random connection ID; traffic keys stay inside
 	// TLS exporters and never appear in a plaintext bootstrap packet.
 	if _, err := tc.Write(cidBytes[:]); err != nil {
-		s.removeSession(cid)
+		ss.stop()
+		<-ss.finished
 		return
 	}
-	ss.start()
 	s.handshakesAccepted.Add(1)
 }
 
@@ -242,6 +364,8 @@ func DialTLS(ctx context.Context, serverTCPAddr, serverUDPAddr string, cfg *tls.
 		return nil, err
 	}
 	defer bootstrap.Close()
+	stopCancel := context.AfterFunc(ctx, func() { _ = bootstrap.Close() })
+	defer stopCancel()
 	tc, ok := bootstrap.(*tls.Conn)
 	if !ok {
 		return nil, errors.New("mira: TLS connection required")
@@ -253,6 +377,12 @@ func DialTLS(ctx context.Context, serverTCPAddr, serverUDPAddr string, cfg *tls.
 	_ = tc.SetReadDeadline(time.Now().Add(o.HandshakeTimeout))
 	var cidBytes [8]byte
 	if _, err = io.ReadFull(tc, cidBytes[:]); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	cid := binary.BigEndian.Uint64(cidBytes[:])
@@ -264,6 +394,7 @@ func DialTLS(ctx context.Context, serverTCPAddr, serverUDPAddr string, cfg *tls.
 		return nil, err
 	}
 	var schedule trafficSchedule
+	defer clear(schedule.master[:])
 	copy(schedule.master[:], exported)
 	clear(exported)
 	schedule.id = cid
@@ -284,7 +415,11 @@ func DialTLS(ctx context.Context, serverTCPAddr, serverUDPAddr string, cfg *tls.
 	if err != nil {
 		return nil, err
 	}
-	ss := newSession(conn, remote, cid, tx, rx, schedule, true, o, nil)
+	if err := configureUDPBuffers(conn, o); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	ss := newSession(conn, remote, cid, tx, rx, &schedule, true, o, nil)
 	ss.identity = certIdentity(state) // Client peer identity is the server certificate; primarily diagnostic.
 	ss.tlsReady = make(chan struct{})
 	ss.start()
@@ -296,10 +431,10 @@ func DialTLS(ctx context.Context, serverTCPAddr, serverUDPAddr string, cfg *tls.
 	for {
 		select {
 		case <-ctx.Done():
-			_ = ss.Close(context.Background())
+			ss.stop()
 			return nil, ctx.Err()
 		case <-deadline.C:
-			_ = ss.Close(context.Background())
+			ss.stop()
 			return nil, ErrTimeout
 		case <-ss.done:
 			return nil, ErrClosed
