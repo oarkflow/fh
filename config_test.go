@@ -103,14 +103,14 @@ func TestSecureByDefaultResolvesFailClosedBaseline(t *testing.T) {
 	if !app.cfg.DisableH2C {
 		t.Fatal("secure baseline did not disable cleartext HTTP/2")
 	}
-	if app.cfg.ReadHeaderTimeout != 5*time.Second || app.cfg.ReadTimeout != 10*time.Second || app.cfg.WriteTimeout != 30*time.Second || app.cfg.IdleTimeout != 60*time.Second {
-		t.Fatalf("timeouts were not bounded: %#v", app.cfg)
+	if app.cfg.ReadHeaderTimeout != time.Minute || app.cfg.ReadTimeout != time.Minute || app.cfg.WriteTimeout != time.Minute || app.cfg.IdleTimeout != time.Hour {
+		t.Fatalf("explicit timeouts were not retained: %#v", app.cfg)
 	}
-	if app.cfg.ReadBufferSize != 16<<10 || app.cfg.MaxConnections != 10_000 || app.cfg.MaxConnectionsPerIP != 100 {
-		t.Fatalf("connection resources were not bounded: %#v", app.cfg)
+	if app.cfg.ReadBufferSize != 1<<20 || app.cfg.MaxConnections != 100_000 || app.cfg.MaxConnectionsPerIP != 100 {
+		t.Fatalf("explicit connection resources were not retained: %#v", app.cfg)
 	}
-	if app.cfg.MaxRequestBodySize != 4<<20 || app.cfg.MaxHeaderListSize != 32<<10 || app.cfg.MaxHeaderCount != 64 || app.cfg.MaxRequestLineSize != 8<<10 || app.cfg.MaxConcurrentStreams != 128 {
-		t.Fatalf("input limits were not bounded: %#v", app.cfg)
+	if app.cfg.MaxRequestBodySize != 64<<20 || app.cfg.MaxHeaderListSize != 1<<20 || app.cfg.MaxHeaderCount != 1000 || app.cfg.MaxRequestLineSize != 64<<10 || app.cfg.MaxConcurrentStreams != 1000 {
+		t.Fatalf("explicit input limits were not retained: %#v", app.cfg)
 	}
 	if app.cfg.MaxInFlightRequests != 5000 || app.cfg.MaxGoroutines != 20_000 || app.cfg.MaxHeapBytes != 1<<30 || app.cfg.ResourceCheckInterval != 250*time.Millisecond {
 		t.Fatalf("resource guard was not bounded: %#v", app.cfg)

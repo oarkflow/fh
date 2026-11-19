@@ -116,6 +116,76 @@ for the full breakdown of what each constructor does and does not cover.
 | `MaxRequestLineSize` | 8KB | Maximum request line length |
 | `MaxConnectionsPerIP` | 100 in production/secure profiles | Maximum simultaneous TCP connections from one socket peer |
 | `MaxInFlightRequests` | Disabled; 5,000 with `SecureByDefault` | Caps concurrent handlers; HTTP/2 refuses excess streams before starting handler goroutines |
+| `MaxGoroutines` | Disabled; 20,000 with `SecureByDefault` | Rejects requests after sampled goroutine count crosses the ceiling |
+| `MaxHeapBytes` | Disabled; 1GiB with `SecureByDefault` | Rejects requests after sampled heap allocation crosses the ceiling |
+| `ResourceCheckInterval` | 250ms with resource guards | Sampling interval for goroutine and heap ceilings |
+
+Secure defaults are starting values. An explicitly configured positive limit or
+timeout is retained, including values above the built-in baseline. This lets an
+operator tune the profile for the workload; choose ceilings with the available
+memory and traffic capacity in mind. Zero or omitted values select the secure
+profile's built-in value.
+
+### Environment and dotenv configuration
+
+`pkg/config` prepends one prefix to every supported environment key.
+`ApplyEnv` and `LoadEnvFile` use their `prefix` argument when supplied. If it is
+empty, they use `FH_ENV_PREFIX` from process environment or the dotenv file,
+then fall back to `Config.Prefix`, and finally to `FH`. `LoadEnvFile` does not
+mutate process-global environment; process variables take precedence over file
+values. Values are loaded during startup, so restart the server to apply
+changes.
+
+```go
+import (
+	"log"
+	appconfig "github.com/oarkflow/fh/pkg/config"
+)
+
+cfg, err := appconfig.LoadEnvFile(".env", appconfig.Config{})
+if err != nil {
+	log.Fatal(err)
+}
+app, err := appconfig.NewApp(cfg)
+if err != nil {
+	log.Fatal(err)
+}
+_ = app // configure routes, then start serving
+```
+
+For example:
+
+```dotenv
+FH_ENV_PREFIX=APP
+APP_SECURE_BY_DEFAULT=true
+APP_ALLOWED_HOSTS=api.example.com,admin.example.com
+APP_MAX_HEAP_BYTES=2GiB
+APP_MAX_GOROUTINES=30000
+APP_MAX_IN_FLIGHT_REQUESTS=8000
+APP_RESOURCE_CHECK_INTERVAL=500ms
+APP_MAX_BUFFERED_REQUEST_BYTES=128000000
+APP_MAX_BUFFERED_RESPONSE_BYTES=128000000
+APP_HSTS_PRELOAD=false
+```
+
+Heap values accept bytes or `KiB`/`MiB`/`GiB` (also `KB`/`MB`/`GB`). The
+configuration package also maps allowed hosts, CSP, transport timeouts,
+connections, body/header/request-line limits, read buffers, and HTTP/2 streams.
+Applications that already manage their own environment can use `ApplyEnv`
+instead of loading a dotenv file. JSON configuration rejects unknown fields and
+trailing values; JSON and dotenv inputs are limited to 1 MiB.
+
+The default environment key suffixes are exported as `appconfig.EnvKey*`
+constants in one place. Override any suffix for an application without editing
+fh:
+
+```go
+keys := appconfig.EnvKeys{appconfig.EnvKeyMaxHeapBytes: "HEAP_LIMIT"}
+cfg, err := appconfig.LoadEnvFileWithKeys(".env", appconfig.Config{}, "FH", keys)
+```
+
+That example reads `FH_HEAP_LIMIT`; all other variables keep their default
+suffixes. `appconfig.ApplyEnvWithKeys` provides the same remapping for process variables.
 
 ### HTTP/2
 

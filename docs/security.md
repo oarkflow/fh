@@ -25,8 +25,11 @@ resource usage up through many such connections or expensive handlers.
 Requests are rejected with `503 Service Unavailable` once a bound is
 crossed. Configure explicit values with `WithMaxInFlightRequests`,
 `WithMaxGoroutines`, `WithMaxHeapBytes`, and `WithResourceCheckInterval`;
-`SecureByDefault` sets a bound (5000 in-flight requests, 20,000 goroutines,
-1GiB heap) when the caller has not set a stricter one. This complements,
+`SecureByDefault` supplies defaults (5000 in-flight requests, 20,000 goroutines,
+1GiB heap) only when the caller leaves them unset. Explicit settings are retained,
+so deployments can tune these ceilings. `pkg/config.LoadEnvFile` and
+`pkg/config.ApplyEnv` support startup overrides such as `FH_MAX_HEAP_BYTES=2GiB`;
+restart the process to apply changes. This complements,
 rather than replaces, `mw/loadshed` and `mw/backpressure` for
 application-tunable shedding policy (custom `Retry-After`, per-route/tenant
 metrics, etc.).

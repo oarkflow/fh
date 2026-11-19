@@ -265,78 +265,78 @@ func applySecureDefaults(cfg *Config) {
 	cfg.ServerHeader = ""
 	cfg.DisableH2C = true
 
-	// Bound every untrusted request dimension. Preserve stricter caller values,
-	// but do not allow permissive values to weaken the baseline.
-	if cfg.ReadBufferSize <= 0 || cfg.ReadBufferSize > 64<<10 {
+	// Supply a bounded profile when values are omitted. Explicit values are
+	// operator policy and intentionally override these profile defaults.
+	if cfg.ReadBufferSize <= 0 {
 		cfg.ReadBufferSize = 16 << 10
 	}
-	if cfg.MaxConnections <= 0 || cfg.MaxConnections > 10_000 {
+	if cfg.MaxConnections <= 0 {
 		cfg.MaxConnections = 10_000
 	}
-	if cfg.MaxConnectionsPerIP <= 0 || cfg.MaxConnectionsPerIP > 100 {
+	if cfg.MaxConnectionsPerIP <= 0 {
 		cfg.MaxConnectionsPerIP = 100
 	}
-	if cfg.MaxRequestBodySize <= 0 || cfg.MaxRequestBodySize > 4<<20 {
+	if cfg.MaxRequestBodySize <= 0 {
 		cfg.MaxRequestBodySize = 4 << 20
 	}
-	if cfg.MaxHeaderListSize <= 0 || cfg.MaxHeaderListSize > 32<<10 {
+	if cfg.MaxHeaderListSize <= 0 || (cfg.MaxHeaderListSize == defaultConfig.MaxHeaderListSize && !cfg.secureHeaderListExplicit) {
 		cfg.MaxHeaderListSize = 32 << 10
 	}
-	if cfg.MaxHeaderCount <= 0 || cfg.MaxHeaderCount > 64 {
+	if cfg.MaxHeaderCount <= 0 {
 		cfg.MaxHeaderCount = 64
 	}
-	if cfg.MaxRequestLineSize <= 0 || cfg.MaxRequestLineSize > 8<<10 {
+	if cfg.MaxRequestLineSize <= 0 {
 		cfg.MaxRequestLineSize = 8 << 10
 	}
-	if cfg.MaxConcurrentStreams == 0 || cfg.MaxConcurrentStreams > 128 {
+	if cfg.MaxConcurrentStreams == 0 {
 		cfg.MaxConcurrentStreams = 128
 	}
-	if cfg.ReadHeaderTimeout <= 0 || cfg.ReadHeaderTimeout > 5*time.Second {
+	if cfg.ReadHeaderTimeout <= 0 {
 		cfg.ReadHeaderTimeout = 5 * time.Second
 	}
-	if cfg.ReadTimeout <= 0 || cfg.ReadTimeout > 10*time.Second {
+	if cfg.ReadTimeout <= 0 {
 		cfg.ReadTimeout = 10 * time.Second
 	}
-	if cfg.WriteTimeout <= 0 || cfg.WriteTimeout > 30*time.Second {
+	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = 30 * time.Second
 	}
-	if cfg.IdleTimeout <= 0 || cfg.IdleTimeout > 60*time.Second {
+	if cfg.IdleTimeout <= 0 || (cfg.IdleTimeout == defaultConfig.IdleTimeout && !cfg.secureIdleTimeoutExplicit) {
 		cfg.IdleTimeout = 60 * time.Second
 	}
-	if cfg.RequestBodyTimeout <= 0 || cfg.RequestBodyTimeout > 10*time.Second {
+	if cfg.RequestBodyTimeout <= 0 {
 		cfg.RequestBodyTimeout = 10 * time.Second
 	}
-	if cfg.TLSHandshakeTimeout <= 0 || cfg.TLSHandshakeTimeout > 10*time.Second {
+	if cfg.TLSHandshakeTimeout <= 0 {
 		cfg.TLSHandshakeTimeout = 10 * time.Second
 	}
-	if cfg.HTTP2IdleTimeout <= 0 || cfg.HTTP2IdleTimeout > 60*time.Second {
+	if cfg.HTTP2IdleTimeout <= 0 || (cfg.HTTP2IdleTimeout == defaultConfig.HTTP2IdleTimeout && !cfg.secureHTTP2IdleTimeoutExplicit) {
 		cfg.HTTP2IdleTimeout = 60 * time.Second
 	}
 	// Bound aggregate request-body buffering before dispatch. Per-request body
 	// limits and handler in-flight limits do not constrain bodies buffered while
-	// requests are still being received. Keep stricter caller budgets intact.
-	if cfg.MaxBufferedRequestBytes <= 0 || cfg.MaxBufferedRequestBytes > 64<<20 {
+	// requests are still being received. Keep explicit caller budgets intact.
+	if cfg.MaxBufferedRequestBytes <= 0 {
 		cfg.MaxBufferedRequestBytes = 64 << 20
 	}
 	// Bound aggregate intermediate response buffering from transforms and
 	// buffered streams; direct handler-owned response values remain application
 	// allocations and are not covered by this budget.
-	if cfg.MaxBufferedResponseBytes <= 0 || cfg.MaxBufferedResponseBytes > 64<<20 {
+	if cfg.MaxBufferedResponseBytes <= 0 {
 		cfg.MaxBufferedResponseBytes = 64 << 20
 	}
 
 	// Defense-in-depth against slowloris-style goroutine/heap exhaustion and
 	// sudden request bursts, beyond what connection counts and timeouts catch.
-	if cfg.MaxInFlightRequests <= 0 || cfg.MaxInFlightRequests > 5000 {
+	if cfg.MaxInFlightRequests <= 0 {
 		cfg.MaxInFlightRequests = 5000
 	}
-	if cfg.MaxGoroutines <= 0 || cfg.MaxGoroutines > 20_000 {
+	if cfg.MaxGoroutines <= 0 {
 		cfg.MaxGoroutines = 20_000
 	}
-	if cfg.MaxHeapBytes <= 0 || cfg.MaxHeapBytes > 1<<30 {
+	if cfg.MaxHeapBytes == 0 {
 		cfg.MaxHeapBytes = 1 << 30
 	}
-	if cfg.ResourceCheckInterval <= 0 || cfg.ResourceCheckInterval > time.Second {
+	if cfg.ResourceCheckInterval <= 0 {
 		cfg.ResourceCheckInterval = 250 * time.Millisecond
 	}
 }

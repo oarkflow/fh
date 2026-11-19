@@ -16,8 +16,8 @@ allow-list.** Both are real, but they only cover protocol/transport hygiene:
 | | `NewProduction()` (`ModeProduction`) | `WithSecureByDefault(true)` |
 |---|---|---|
 | Stricter protocol validation | ✅ | ✅ |
-| Read/write/body/HTTP-2-idle timeout floors | ✅ (flagged by `ValidateSecurity` if unset) | ✅ (sets bounds) |
-| Connection/body-size ceilings | partial | ✅ (sets bounds) |
+| Read/write/body/HTTP-2-idle timeout floors | ✅ (flagged by `ValidateSecurity` if unset) | ✅ (supplies defaults) |
+| Connection/body-size ceilings | partial | ✅ (supplies defaults) |
 | Hardened response headers (HSTS, COOP/CORP, `Referrer-Policy`) | ✗ | ✅ |
 | h2c (cleartext HTTP/2) disabled | ✗ (flagged if left on) | ✅ |
 | Authentication / authorization | ✗ — always your middleware | ✗ — always your middleware |

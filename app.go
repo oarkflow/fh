@@ -67,6 +67,9 @@ type Hooks struct {
 
 // Config holds server configuration.
 type Config struct {
+	secureIdleTimeoutExplicit      bool
+	secureHTTP2IdleTimeoutExplicit bool
+	secureHeaderListExplicit       bool
 	// Kernel enables Linux epoll/io_uring accept reactors, SO_REUSEPORT CPU steering,
 	// socket tuning and optional XDP packet admission. Portable serving remains the fallback.
 	Kernel KernelConfig
@@ -118,17 +121,16 @@ type Config struct {
 	// disables the per-peer limit; SecureByDefault caps it at 100.
 	MaxConnectionsPerIP int
 	// MaxInFlightRequests caps requests concurrently executing in handlers across
-	// the whole server. Zero disables the check. SecureByDefault sets a bound so
-	// a burst of slow/expensive requests cannot exhaust goroutines/memory before
-	// application-level rate limiting is installed.
+	// the whole server. Zero disables the check. SecureByDefault supplies a
+	// default when unset; an explicit positive value overrides that default.
 	MaxInFlightRequests int64
 	// MaxGoroutines rejects new requests once runtime.NumGoroutine() (sampled at
 	// ResourceCheckInterval) exceeds this bound. Zero disables the check.
-	// SecureByDefault sets a bound as defense-in-depth against slowloris-style
-	// goroutine exhaustion beyond what connection/timeout limits catch.
+	// SecureByDefault supplies a default as defense-in-depth against
+	// slowloris-style goroutine exhaustion beyond connection/timeout limits.
 	MaxGoroutines int
 	// MaxHeapBytes rejects new requests once sampled heap allocation exceeds this
-	// bound. Zero disables the check. SecureByDefault sets a bound.
+	// bound. Zero disables the check. SecureByDefault supplies a default.
 	MaxHeapBytes uint64
 	// ResourceCheckInterval controls how often goroutine/heap stats are resampled
 	// for MaxGoroutines/MaxHeapBytes. Defaults to 250ms.
@@ -264,7 +266,7 @@ func WithWriteTimeout(d time.Duration) Option {
 	return func(c *Config) { c.WriteTimeout = d }
 }
 func WithIdleTimeout(d time.Duration) Option {
-	return func(c *Config) { c.IdleTimeout = d }
+	return func(c *Config) { c.IdleTimeout = d; c.secureIdleTimeoutExplicit = true }
 }
 func WithHandlerTimeout(d time.Duration) Option {
 	return func(c *Config) { c.HandlerTimeout = d }
@@ -279,7 +281,7 @@ func WithTLSHandshakeTimeout(d time.Duration) Option {
 	return func(c *Config) { c.TLSHandshakeTimeout = d }
 }
 func WithHTTP2IdleTimeout(d time.Duration) Option {
-	return func(c *Config) { c.HTTP2IdleTimeout = d }
+	return func(c *Config) { c.HTTP2IdleTimeout = d; c.secureHTTP2IdleTimeoutExplicit = true }
 }
 func WithShutdownTimeout(d time.Duration) Option {
 	return func(c *Config) { c.ShutdownTimeout = d }
@@ -318,7 +320,7 @@ func WithMaxBufferedResponseBytes(n int64) Option {
 	return func(c *Config) { c.MaxBufferedResponseBytes = n }
 }
 func WithMaxHeaderListSize(n int) Option {
-	return func(c *Config) { c.MaxHeaderListSize = n }
+	return func(c *Config) { c.MaxHeaderListSize = n; c.secureHeaderListExplicit = true }
 }
 func WithMaxHeaderCount(n int) Option {
 	return func(c *Config) { c.MaxHeaderCount = n }
@@ -348,8 +350,9 @@ func WithSendKeepAliveHeader(enabled bool) Option {
 // WithSecureByDefault enables the fail-closed framework security baseline.
 // It is equivalent to setting Config.SecureByDefault.
 //
-// This bounds protocol input (buffer/connection/body-size limits) and
-// hardens response headers (HSTS, COOP/CORP, Referrer-Policy, ...). It does
+// This supplies protocol input (buffer/connection/body-size limits) defaults
+// and hardens response headers (HSTS, COOP/CORP, Referrer-Policy, ...). Explicit
+// positive limits and timeouts override the supplied defaults. It does
 // NOT add authentication, authorization, CSRF protection, rate limiting, or
 // a Host allow-list — see Config.SecureByDefault and NewProduction for the
 // full scope, and mount mw/basicauth/mw/apikey/mw/session (or another
@@ -623,6 +626,7 @@ func New(opts ...Option) *App {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	applySecureDefaults(&cfg)
 	return buildApp(cfg)
 }
 
@@ -635,6 +639,7 @@ func New(opts ...Option) *App {
 //	    WriteTimeout: 10 * time.Second,
 //	})
 func NewWithConfig(cfg Config) *App {
+	applySecureDefaults(&cfg)
 	applyConfigDefaults(&cfg)
 	return buildApp(cfg)
 }
