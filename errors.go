@@ -554,7 +554,10 @@ func (a *App) writeRawHTTPError(conn net.Conn, err error) {
 	response = append(response, body...)
 	_ = writeAll(conn, response)
 	a.recordError(he.Code)
-	if a.logger != nil {
+	// Request receive timeouts can be triggered routinely by clients that
+	// disconnect or stop sending data. Keep them out of warning logs to avoid
+	// flooding logs while retaining the response and error counter above.
+	if a.logger != nil && status != StatusRequestTimeout {
 		a.logger.Warn("request rejected before dispatch", "status", status, "code", he.Code, "error", opts.Redact(err.Error()))
 	}
 }
