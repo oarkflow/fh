@@ -117,7 +117,7 @@ for the full breakdown of what each constructor does and does not cover.
 | `MaxConnectionsPerIP` | 100 in production/secure profiles | Maximum simultaneous TCP connections from one socket peer |
 | `MaxInFlightRequests` | Disabled; 5,000 with `SecureByDefault` | Caps concurrent handlers; HTTP/2 refuses excess streams before starting handler goroutines |
 | `MaxGoroutines` | Disabled; 20,000 with `SecureByDefault` | Rejects requests after sampled goroutine count crosses the ceiling |
-| `MaxHeapBytes` | Disabled; 1GiB with `SecureByDefault` | Rejects requests after sampled heap allocation crosses the ceiling |
+| `MaxHeapBytes` | Disabled; 1GiB with `SecureByDefault` | Attempts a throttled garbage collection, then sheds requests if live heap still exceeds the ceiling |
 | `ResourceCheckInterval` | 250ms with resource guards | Sampling interval for goroutine and heap ceilings |
 
 Secure defaults are starting values. An explicitly configured positive limit or

@@ -129,8 +129,9 @@ type Config struct {
 	// SecureByDefault supplies a default as defense-in-depth against
 	// slowloris-style goroutine exhaustion beyond connection/timeout limits.
 	MaxGoroutines int
-	// MaxHeapBytes rejects new requests once sampled heap allocation exceeds this
-	// bound. Zero disables the check. SecureByDefault supplies a default.
+	// MaxHeapBytes sheds requests when sampled heap allocation exceeds this
+	// bound. Before shedding, it makes one throttled GC attempt to reclaim garbage.
+	// Zero disables the check. SecureByDefault supplies a default.
 	MaxHeapBytes uint64
 	// ResourceCheckInterval controls how often goroutine/heap stats are resampled
 	// for MaxGoroutines/MaxHeapBytes. Defaults to 250ms.

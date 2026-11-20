@@ -34,6 +34,9 @@ func defaultResourceGuardMiddlewareWithCounter(cfg Config, inFlight *atomic.Int6
 	}
 
 	var sampleMu sync.Mutex
+	// A heap sample can include reclaimable garbage. Allow one request per
+	// sampling window to ask the runtime for a collection before shedding load.
+	var lastPressureGC atomic.Int64
 	type resourceSample struct {
 		at         time.Time
 		goroutines int
@@ -97,7 +100,21 @@ func defaultResourceGuardMiddlewareWithCounter(cfg Config, inFlight *atomic.Int6
 				return c.Status(StatusServiceUnavailable).SendString("Service Unavailable")
 			}
 			if maxHeap > 0 && h > maxHeap {
-				return c.Status(StatusServiceUnavailable).SendString("Service Unavailable")
+				now := time.Now().UnixNano()
+				last := lastPressureGC.Load()
+				if (last == 0 || now-last >= int64(interval)) && lastPressureGC.CompareAndSwap(last, now) {
+					// HeapAlloc includes garbage that has not yet been collected.
+					// Do one throttled collection before rejecting this request;
+					// sustained live-heap pressure still sheds load below.
+					runtime.GC()
+					var ms runtime.MemStats
+					runtime.ReadMemStats(&ms)
+					if ms.HeapAlloc <= maxHeap {
+						return c.Next()
+					}
+				}
+				c.Set("Retry-After", "1")
+				return c.Status(StatusServiceUnavailable).SendString("Temporarily under memory pressure")
 			}
 		}
 		return c.Next()
