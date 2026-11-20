@@ -96,8 +96,7 @@ func normalize(cfg Config) (Config, error) {
 }
 
 func DefaultForbiddenHandler(ctx fh.Ctx) error {
-	ctx.Set("Content-Type", "text/plain; charset=utf-8")
-	return ctx.Status(403).SendString("Forbidden")
+	return fh.NewHTTPError(fh.StatusForbidden, "IP_NOT_ALLOWED", "Request is not allowed")
 }
 
 func SaveList(store kv.Store, allowed ...string) error {

@@ -561,12 +561,13 @@ func (h *h2Conn) applySettings(payload []byte) error {
 			h.peerInitialWindow = int64(value)
 			h.mu.Lock()
 			for _, s := range h.streams {
-				s.sendWindow += delta
-				if s.sendWindow > h2MaxWindow {
+				next, ok := addH2Window(s.sendWindow, delta)
+				if !ok {
 					h.mu.Unlock()
 					h.flowMu.Unlock()
 					return h2ConnError{h2FlowControlError}
 				}
+				s.sendWindow = next
 			}
 			h.mu.Unlock()
 			h.flowCond.Broadcast()
@@ -1077,11 +1078,12 @@ func (h *h2Conn) handleWindowUpdate(f h2Frame) error {
 	}
 	if f.streamID == 0 {
 		h.flowMu.Lock()
-		if h.connSendWindow+inc > h2MaxWindow {
+		next, ok := addH2Window(h.connSendWindow, inc)
+		if !ok {
 			h.flowMu.Unlock()
 			return h2ConnError{h2FlowControlError}
 		}
-		h.connSendWindow += inc
+		h.connSendWindow = next
 		h.flowCond.Broadcast()
 		h.flowMu.Unlock()
 	} else {
@@ -1096,13 +1098,14 @@ func (h *h2Conn) handleWindowUpdate(f h2Frame) error {
 			// sendWindow participates in the DATA writer's wait predicate and is
 			// therefore protected by flowMu, not the stream registry mutex.
 			h.flowMu.Lock()
-			if s.sendWindow+inc > h2MaxWindow {
+			next, ok := addH2Window(s.sendWindow, inc)
+			if !ok {
 				h.flowMu.Unlock()
 				// RFC 7540 §6.9.1: stream-level overflow is a stream error
 				h.sendRST(f.streamID, h2FlowControlError)
 				return nil
 			}
-			s.sendWindow += inc
+			s.sendWindow = next
 			h.flowCond.Broadcast()
 			h.flowMu.Unlock()
 		}
@@ -1176,7 +1179,7 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 			if ctx.responded {
 				h.resetStream(s.id)
 			} else {
-				h.app.cfg.ErrorHandler(ctx, bodyErr)
+				h.app.handleError(ctx, bodyErr)
 			}
 		}
 		if !ctx.responded && !s.reset.Load() {
@@ -1927,6 +1930,20 @@ func (h *h2Conn) sendWindowUpdate(streamID, increment uint32) error {
 	binary.BigEndian.PutUint32(p[:], increment)
 	return h.writeFrame(h2WindowUpdate, 0, streamID, p[:])
 }
+
+// addH2Window performs checked signed HTTP/2 flow-control arithmetic. Stream
+// windows may be negative after SETTINGS_INITIAL_WINDOW_SIZE is reduced, but
+// neither endpoint may exceed the RFC 9113 signed 31-bit range.
+func addH2Window(current, delta int64) (int64, bool) {
+	if current < -h2MaxWindow || current > h2MaxWindow || delta < -h2MaxWindow || delta > h2MaxWindow {
+		return 0, false
+	}
+	if delta > 0 && current > h2MaxWindow-delta || delta < 0 && current < -h2MaxWindow-delta {
+		return 0, false
+	}
+	return current + delta, true
+}
+
 func (h *h2Conn) sendRST(streamID, code uint32) {
 	h.resetStream(streamID)
 	var p [4]byte
@@ -2007,11 +2024,22 @@ func (h *h2Conn) returnConnReceiveCredit(n int) {
 	if n <= 0 {
 		return
 	}
+	if int64(n) > h2MaxWindow {
+		h.connectionError(h2FlowControlError)
+		return
+	}
 	h.mu.Lock()
 	increment := int64(n) + h.connRecvWindowAccum
-	h.connRecvWindowAccum = 0
-	h.connRecvWindowRemaining += increment
+	next, ok := addH2Window(h.connRecvWindowRemaining, increment)
+	if ok && increment > 0 {
+		h.connRecvWindowAccum = 0
+		h.connRecvWindowRemaining = next
+	}
 	h.mu.Unlock()
+	if !ok || increment < 0 || increment > h2MaxWindow {
+		h.connectionError(h2FlowControlError)
+		return
+	}
 	if increment > 0 {
 		_ = h.sendWindowUpdate(0, uint32(increment))
 	}

@@ -2,6 +2,7 @@ package timeout
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -191,8 +192,14 @@ func TestRejectInvalidTimeoutShortCircuitsWithoutCallingHandler(t *testing.T) {
 	if status != 500 {
 		t.Fatalf("status = %d, want 500", status)
 	}
-	if body != ErrInvalidTimeout.Error() {
-		t.Fatalf("body = %q, want %q", body, ErrInvalidTimeout.Error())
+	var problem struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(body), &problem); err != nil {
+		t.Fatalf("body is not a problem response: %q (%v)", body, err)
+	}
+	if problem.Code != "INVALID_TIMEOUT_CONFIG" {
+		t.Fatalf("problem code = %q, want INVALID_TIMEOUT_CONFIG", problem.Code)
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("downstream handler was invoked %d times, want 0", calls.Load())

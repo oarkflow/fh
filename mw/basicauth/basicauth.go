@@ -300,8 +300,7 @@ func normalizeConfig(cfg Config) Config {
 }
 
 func DefaultUnauthorizedHandler(ctx fh.Ctx, realm string) error {
-	ctx.Set("WWW-Authenticate", `Basic realm="`+escapeRealm(realm)+`", charset="UTF-8"`)
-	return ctx.Status(401).SendString("Unauthorized")
+	return fh.NewHTTPError(fh.StatusUnauthorized, "BASIC_AUTH_REQUIRED", "Authentication is required").WithHeader("WWW-Authenticate", `Basic realm="`+escapeRealm(realm)+`", charset="UTF-8"`)
 }
 
 func escapeRealm(realm string) string {

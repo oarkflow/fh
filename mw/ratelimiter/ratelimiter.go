@@ -149,10 +149,7 @@ func DefaultLimitReachedHandler(ctx fh.Ctx, result Result) error {
 		retry = 1
 	}
 
-	ctx.Set(HeaderRetryAfter, strconv.Itoa(retry))
-	ctx.Set("Content-Type", "text/plain; charset=utf-8")
-
-	return ctx.Status(429).SendString("Too Many Requests")
+	return fh.RateLimited("Request rate limit exceeded", strconv.Itoa(retry))
 }
 
 // -----------------------------------------------------------------------------

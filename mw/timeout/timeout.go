@@ -90,7 +90,7 @@ func NewWithConfig(cfg Config) fh.HandlerFunc {
 
 	if cfg.RejectInvalidTimeout && cfg.Timeout <= 0 {
 		return func(c fh.Ctx) error {
-			return c.Status(500).SendString(ErrInvalidTimeout.Error())
+			return fh.NewHTTPError(fh.StatusInternalServerError, "INVALID_TIMEOUT_CONFIG", "Timeout middleware is misconfigured").WithCause(ErrInvalidTimeout)
 		}
 	}
 

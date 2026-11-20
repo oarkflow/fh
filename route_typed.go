@@ -79,11 +79,11 @@ func (a *App) addTyped(method, path string, handler any, middleware ...HandlerFu
 		reqPtr := reflect.New(reqType)
 		if len(c.Body()) != 0 {
 			if err := c.BodyParser(reqPtr.Interface()); err != nil {
-				return c.Status(StatusBadRequest).JSON(StructuredError{Error: "invalid_body", Message: "Invalid request body", RequestID: requestIDFromCtx(c)})
+				return NewHTTPError(StatusBadRequest, "INVALID_BODY", "Invalid request body").WithCause(err).WithMeta("error", "invalid_body")
 			}
 		}
 		if err := bindTaggedFields(c, reqPtr.Elem()); err != nil {
-			return c.Status(StatusBadRequest).JSON(StructuredError{Error: "invalid_request", Message: "Invalid request fields", RequestID: requestIDFromCtx(c)})
+			return NewHTTPError(StatusBadRequest, "INVALID_REQUEST", "Invalid request fields").WithCause(err).WithMeta("error", "invalid_request")
 		}
 		if err := ValidateStruct(reqPtr.Interface()); err != nil {
 			return typedValidationError(c, err)
@@ -228,19 +228,13 @@ func niceTypeName(t reflect.Type) string {
 	return t.Name()
 }
 func typedValidationError(c Ctx, err error) error {
-	se := StructuredError{Error: "validation_failed", Message: "Validation failed", RequestID: requestIDFromCtx(c)}
-	if ve, ok := err.(*ValidationError); ok {
-		se.Fields = ve.Fields
-	} else if ve, ok := err.(ValidationErrors); ok {
-		se.Fields = []FieldError(ve)
+	if _, ok := err.(*ValidationError); ok {
+		return err
 	}
-	return c.Status(StatusUnprocessableEntity).JSON(se)
-}
-func requestIDFromCtx(c Ctx) string {
-	if v := c.Get(HeaderRequestID); v != "" {
-		return v
+	if ve, ok := err.(ValidationErrors); ok {
+		return &ValidationError{Fields: []FieldError(ve)}
 	}
-	return ""
+	return NewHTTPError(StatusUnprocessableEntity, "VALIDATION_FAILED", "Validation failed").WithCause(err)
 }
 
 type JSONSchema map[string]any

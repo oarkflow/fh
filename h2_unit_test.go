@@ -461,6 +461,24 @@ func TestH2SettingsValidation(t *testing.T) {
 	})
 }
 
+func TestH2FlowWindowCheckedArithmetic(t *testing.T) {
+	if got, ok := addH2Window(h2MaxWindow-1, 1); !ok || got != h2MaxWindow {
+		t.Fatalf("valid window increment = (%d, %t), want (%d, true)", got, ok, h2MaxWindow)
+	}
+	if _, ok := addH2Window(h2MaxWindow, 1); ok {
+		t.Fatal("window overflow was accepted")
+	}
+	if got, ok := addH2Window(0, -h2MaxWindow); !ok || got != -h2MaxWindow {
+		t.Fatalf("valid negative stream window = (%d, %t), want (%d, true)", got, ok, -h2MaxWindow)
+	}
+	if _, ok := addH2Window(-h2MaxWindow, -1); ok {
+		t.Fatal("negative window underflow was accepted")
+	}
+	if _, ok := addH2Window(h2MaxWindow+1, 0); ok {
+		t.Fatal("out-of-range current window was accepted")
+	}
+}
+
 func TestH2FrameValidation(t *testing.T) {
 	h := newTestH2Conn(t)
 

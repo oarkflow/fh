@@ -146,16 +146,11 @@ func handleError(ctx fh.Ctx, err error, cfg Config) error {
 		}
 		return cfg.OnError(ctx, &fh.ValidationError{Fields: []fh.FieldError{{Field: "_", Code: "VALIDATION_ERROR", Message: "Validation failed"}}})
 	}
-	if ve, ok := err.(*fh.ValidationError); ok {
-		return ctx.Status(422).JSON(map[string]any{
-			"error":      "validation_failed",
-			"message":    "Validation failed",
-			"request_id": ctx.Locals("request_id"),
-			"errors":     ve.Fields,
-		})
+	if _, ok := err.(*fh.ValidationError); ok {
+		return err
 	}
-	return ctx.Status(400).JSON(map[string]any{
-		"error":   "bad_request",
-		"message": "Validation failed",
-	})
+	if ve, ok := err.(fh.ValidationErrors); ok {
+		return &fh.ValidationError{Fields: []fh.FieldError(ve)}
+	}
+	return fh.NewHTTPError(fh.StatusBadRequest, "VALIDATION_FAILED", "Validation failed").WithDetails([]fh.FieldError{{Field: "_", Code: "VALIDATION_ERROR", Message: err.Error()}}).WithCause(err)
 }

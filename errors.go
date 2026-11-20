@@ -378,8 +378,12 @@ func classifyError(err error, opts ErrorOptions) (*HTTPError, Problem, []byte) {
 	var ve *ValidationError
 	if errors.As(err, &ve) {
 		he := NewHTTPError(StatusUnprocessableEntity, "VALIDATION_FAILED", "Validation failed")
-		he.Details = ve.Fields
-		return he, Problem{Status: he.Status, Code: he.Code, Detail: he.Message, Extensions: map[string]any{"errors": ve.Fields}}, nil
+		fields := make([]map[string]string, 0, len(ve.Fields))
+		for _, field := range ve.Fields {
+			fields = append(fields, map[string]string{"field": field.Field, "code": field.Code, "message": field.Message})
+		}
+		he.Details = fields
+		return he, Problem{Status: he.Status, Code: he.Code, Detail: he.Message, Extensions: map[string]any{"error": "validation_failed", "errors": fields}}, nil
 	}
 	var pe *PanicError
 	if errors.As(err, &pe) {
@@ -515,6 +519,67 @@ func (c *DefaultCtx) SafeErrorResponse(err error) error {
 		return c.fallbackErrorResponse(he.Status, he.Code, StatusReason(he.Status))
 	}
 	return nil
+}
+
+// writeRawHTTPError renders errors discovered before a request context exists
+// (for example, malformed HTTP/1 headers) through the same classifier and
+// Problem Details format used by SafeErrorResponse. The connection is closed
+// because request framing is not reliable enough for keep-alive reuse.
+func (a *App) writeRawHTTPError(conn net.Conn, err error) {
+	if conn == nil || err == nil {
+		return
+	}
+	opts := a.cfg.ErrorOptions.normalize(a.cfg.Debug)
+	he, p, stack := classifyError(err, opts)
+	decorateProblem(nil, &p, he, err, opts, stack)
+	body, marshalErr := json.Marshal(p)
+	if marshalErr != nil {
+		body = []byte(`{"type":"about:blank","title":"Internal Server Error","status":500,"code":"INTERNAL_ERROR","detail":"An internal server error occurred"}`)
+		he = ErrInternalServerError
+	}
+	status := he.Status
+	if status < 400 || status > 599 {
+		status = StatusInternalServerError
+	}
+	response := fmt.Appendf(nil, "HTTP/1.1 %d %s\r\n", status, StatusReason(status))
+	for k, v := range he.Headers {
+		if validToken([]byte(k)) && validHeaderValue(v) {
+			response = append(response, k...)
+			response = append(response, ": "...)
+			response = append(response, v...)
+			response = append(response, '\r', '\n')
+		}
+	}
+	response = fmt.Appendf(response, "Content-Type: application/problem+json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(body))
+	response = append(response, body...)
+	_ = writeAll(conn, response)
+	a.recordError(he.Code)
+	if a.logger != nil {
+		a.logger.Warn("request rejected before dispatch", "status", status, "code", he.Code, "error", opts.Redact(err.Error()))
+	}
+}
+
+func (a *App) writeRawHTTPStatus(conn net.Conn, status int) {
+	var err error
+	switch status {
+	case StatusBadRequest:
+		err = NewHTTPError(status, "MALFORMED_REQUEST", "Malformed HTTP request")
+	case StatusRequestTimeout:
+		err = NewHTTPError(status, "REQUEST_TIMEOUT", "Request timed out while being received").Temporary()
+	case StatusPayloadTooLarge:
+		err = PayloadTooLarge("Request body too large")
+	case StatusExpectationFailed:
+		err = NewHTTPError(status, "EXPECTATION_FAILED", "Request expectation is not supported")
+	case StatusRequestHeaderFieldsTooLarge:
+		err = NewHTTPError(status, "REQUEST_HEADERS_TOO_LARGE", "Request headers are too large")
+	case StatusServiceUnavailable:
+		err = Unavailable("Request buffering capacity is temporarily exhausted").WithHeader("Retry-After", "1")
+	case StatusHTTPVersionNotSupported:
+		err = NewHTTPError(status, "HTTP_VERSION_NOT_SUPPORTED", "HTTP version not supported")
+	default:
+		err = NewHTTPError(StatusInternalServerError, "INTERNAL_ERROR", "An internal server error occurred")
+	}
+	a.writeRawHTTPError(conn, err)
 }
 
 func decorateProblem(c *DefaultCtx, p *Problem, he *HTTPError, raw error, opts ErrorOptions, stack []byte) {

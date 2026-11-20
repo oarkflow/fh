@@ -22,6 +22,7 @@ func New(cfg Config) fh.HandlerFunc {
 	var sampleMu sync.Mutex
 	var sampledAt time.Time
 	var heapAlloc uint64
+	var lastPressureGC atomic.Int64
 	return func(c fh.Ctx) error {
 		if cfg.Skip != nil && cfg.Skip(c) {
 			return c.Next()
@@ -42,6 +43,19 @@ func New(cfg Config) fh.HandlerFunc {
 			currentHeap := heapAlloc
 			sampleMu.Unlock()
 			if currentHeap > cfg.MaxHeapBytes {
+				// HeapAlloc may include garbage that the runtime has not
+				// reclaimed yet. Give one sampling interval a collection attempt
+				// before shedding this request.
+				now := time.Now().UnixNano()
+				last := lastPressureGC.Load()
+				if (last == 0 || now-last >= int64(cfg.SampleInterval)) && lastPressureGC.CompareAndSwap(last, now) {
+					var ms runtime.MemStats
+					runtime.GC()
+					runtime.ReadMemStats(&ms)
+					if ms.HeapAlloc <= cfg.MaxHeapBytes {
+						return c.Next()
+					}
+				}
 				return cfg.Reject(c)
 			}
 		}
@@ -62,7 +76,7 @@ func normalize(cfg Config) Config {
 	}
 	if cfg.Reject == nil {
 		cfg.Reject = func(c fh.Ctx) error {
-			return c.Status(fh.StatusServiceUnavailable).SendString("Service Unavailable")
+			return fh.NewHTTPError(fh.StatusServiceUnavailable, "RESOURCE_LIMIT", "Server capacity is temporarily exhausted").Temporary()
 		}
 	}
 	return cfg

@@ -1869,7 +1869,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			if len(accumulated) == cap(buf) {
 				maxHead := a.cfg.MaxRequestLineSize + a.cfg.MaxHeaderListSize + 4
 				if maxHead <= 4 || len(accumulated) >= maxHead {
-					_ = writeAll(conn, serverError431)
+					a.writeRawHTTPStatus(conn, StatusRequestHeaderFieldsTooLarge)
 					return
 				}
 				newCap := cap(buf) * 2
@@ -1895,7 +1895,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			}
 			if err != nil {
 				if isTimeoutErr(err) && !a.closed.Load() {
-					_ = writeAll(conn, serverError408)
+					a.writeRawHTTPStatus(conn, StatusRequestTimeout)
 				} else if err != io.EOF && !isExpectedConnErr(err) {
 					a.emitError(err)
 				}
@@ -1932,49 +1932,49 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		if err != nil {
 			releaseCtx(ctx)
 			if errors.Is(err, ErrRequestLineTooLarge) {
-				_ = writeAll(conn, serverError431)
+				a.writeRawHTTPStatus(conn, StatusRequestHeaderFieldsTooLarge)
 			} else {
 				var httpErr *HTTPError
 				if errors.As(err, &httpErr) && httpErr.Status == 505 {
-					_ = writeAll(conn, serverError505)
+					a.writeRawHTTPStatus(conn, StatusHTTPVersionNotSupported)
 				} else {
-					_ = writeAll(conn, serverError400)
+					a.writeRawHTTPStatus(conn, StatusBadRequest)
 				}
 			}
 			return
 		}
 		if a.cfg.MaxHeaderListSize > 0 && headEnd+4-consumed > a.cfg.MaxHeaderListSize {
 			releaseCtx(ctx)
-			_ = writeAll(conn, serverError431)
+			a.writeRawHTTPStatus(conn, StatusRequestHeaderFieldsTooLarge)
 			return
 		}
 
 		_, err = parseHeadersLimit(accumulated[consumed:headEnd+4], &ctx.Header, a.cfg.MaxHeaderCount)
 		if err != nil {
 			releaseCtx(ctx)
-			_ = writeAll(conn, serverError400)
+			a.writeRawHTTPStatus(conn, StatusBadRequest)
 			return
 		}
 		if ctx.Header.UnsupportedTransferEncoding {
 			releaseCtx(ctx)
-			_ = writeAll(conn, serverError400)
+			a.writeRawHTTPStatus(conn, StatusBadRequest)
 			return
 		}
 		if ctx.Header.Chunked && ctx.Header.HasContentLength {
 			releaseCtx(ctx)
-			_ = writeAll(conn, serverError400)
+			a.writeRawHTTPStatus(conn, StatusBadRequest)
 			return
 		}
 		if ctx.Header.HasContentLength && ctx.Header.ContentLength < 0 {
 			releaseCtx(ctx)
-			_ = writeAll(conn, serverError400)
+			a.writeRawHTTPStatus(conn, StatusBadRequest)
 			return
 		}
 		// The allow-list check does not retain the host. Reuse the immutable
 		// request bytes as a temporary string view instead of allocating a copy.
 		if !allowedHost(b2s(ctx.Header.Host), a.cfg.AllowedHosts) {
 			releaseCtx(ctx)
-			_ = writeAll(conn, serverError400)
+			a.writeRawHTTPStatus(conn, StatusBadRequest)
 			return
 		}
 		// The request buffer stays alive until the handler completes, so zero-copy request state can
@@ -1991,13 +1991,13 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		}
 		if ctx.Header.ContentLength > a.cfg.MaxRequestBodySize {
 			releaseCtx(ctx)
-			_ = writeAll(conn, serverError413)
+			a.writeRawHTTPStatus(conn, StatusPayloadTooLarge)
 			return
 		}
 		if (!a.cfg.StreamRequestBody || hasUpgradeH2C(ctx)) && !ctx.Header.Chunked && ctx.Header.ContentLength > 0 {
 			if !a.reserveBufferedBody(int64(ctx.Header.ContentLength)) {
 				releaseCtx(ctx)
-				_ = writeAll(conn, serverError503)
+				a.writeRawHTTPStatus(conn, StatusServiceUnavailable)
 				return
 			}
 			reservedBodyBytes += int64(ctx.Header.ContentLength)
@@ -2027,7 +2027,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		if !a.cfg.DisableHTTP2 && hasUpgradeH2C(ctx) {
 			if a.cfg.DisableH2C {
 				releaseCtx(ctx)
-				_ = writeAll(conn, serverError400)
+				a.writeRawHTTPStatus(conn, StatusBadRequest)
 				return
 			}
 			leftover, bodyErr := readH2CUpgradeBody(conn, ctx, accumulated, headEnd+4, a.cfg.MaxRequestBodySize, a.cfg.RequestBodyTimeout, func(n int) bool {
@@ -2040,18 +2040,18 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			if bodyErr != nil {
 				releaseCtx(ctx)
 				if errors.Is(bodyErr, ErrBodyTooLarge) {
-					_ = writeAll(conn, serverError413)
+					a.writeRawHTTPStatus(conn, StatusPayloadTooLarge)
 				} else if errors.Is(bodyErr, ErrBufferedBodyBudget) {
-					_ = writeAll(conn, serverError503)
+					a.writeRawHTTPStatus(conn, StatusServiceUnavailable)
 				} else {
-					_ = writeAll(conn, serverError400)
+					a.writeRawHTTPStatus(conn, StatusBadRequest)
 				}
 				return
 			}
 			h2c := newH2Conn(a, conn, connCtx)
 			if err := h2c.prepareUpgrade(ctx); err != nil {
 				releaseCtx(ctx)
-				_ = writeAll(conn, serverError400)
+				a.writeRawHTTPStatus(conn, StatusBadRequest)
 				return
 			}
 			upgrade := []byte("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n")
@@ -2074,7 +2074,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		if len(expect) > 0 {
 			if !strEqFold(expect, "100-continue") || (!ctx.Header.Chunked && ctx.Header.ContentLength == 0) {
 				releaseCtx(ctx)
-				_ = writeAll(conn, serverError417)
+				a.writeRawHTTPStatus(conn, StatusExpectationFailed)
 				return
 			}
 			if err := writeAll(conn, []byte("HTTP/1.1 100 Continue\r\n\r\n")); err != nil {
@@ -2086,7 +2086,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 		bodyLen := ctx.Header.ContentLength
 		if bodyLen > int(^uint(0)>>1)-bodyStart {
 			releaseCtx(ctx)
-			_ = writeAll(conn, serverError413)
+			a.writeRawHTTPStatus(conn, StatusPayloadTooLarge)
 			return
 		}
 		var nextData []byte
@@ -2124,13 +2124,13 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 			if readErr != nil {
 				releaseCtx(ctx)
 				if isTimeoutErr(readErr) {
-					_ = writeAll(conn, serverError408)
+					a.writeRawHTTPStatus(conn, StatusRequestTimeout)
 				} else if errors.Is(readErr, ErrBodyTooLarge) {
-					_ = writeAll(conn, serverError413)
+					a.writeRawHTTPStatus(conn, StatusPayloadTooLarge)
 				} else if errors.Is(readErr, ErrBufferedBodyBudget) {
-					_ = writeAll(conn, serverError503)
+					a.writeRawHTTPStatus(conn, StatusServiceUnavailable)
 				} else {
-					_ = writeAll(conn, serverError400)
+					a.writeRawHTTPStatus(conn, StatusBadRequest)
 				}
 				return
 			}
@@ -2148,7 +2148,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 							break
 						}
 						if isTimeoutErr(err) && !a.closed.Load() {
-							_ = writeAll(conn, serverError408)
+							a.writeRawHTTPStatus(conn, StatusRequestTimeout)
 						} else if err != io.EOF && !isExpectedConnErr(err) {
 							a.emitError(err)
 						}
@@ -2164,7 +2164,7 @@ func (a *App) serveConn(conn net.Conn, peerIP string) {
 					if _, err := io.ReadFull(conn, grown[len(accumulated):]); err != nil {
 						releaseCtx(ctx)
 						if isTimeoutErr(err) && !a.closed.Load() {
-							_ = writeAll(conn, serverError408)
+							a.writeRawHTTPStatus(conn, StatusRequestTimeout)
 						}
 						return
 					}
@@ -2303,13 +2303,16 @@ func (a *App) runRequestHeadHandler(ctx *DefaultCtx) (accepted bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			if !ctx.responded {
-				a.cfg.ErrorHandler(ctx, NewPanicError(r))
+				a.handleError(ctx, NewPanicError(r))
+			} else {
+				abortFailedResponse(ctx)
+				a.logger.Error("request head handler panicked after response", "panic", RedactSecrets(fmt.Sprint(r)))
 			}
 			accepted = false
 		}
 	}()
 	if !allowedHost(ctx.Hostname(), a.cfg.AllowedHosts) {
-		_ = ctx.Status(StatusBadRequest).SendString("Bad Request")
+		a.handleError(ctx, NewHTTPError(StatusBadRequest, "HOST_NOT_ALLOWED", "Request host is not allowed"))
 		return false
 	}
 	ctx.params = ctx.params[:0]
@@ -2323,10 +2326,7 @@ func (a *App) runRequestHeadHandler(ctx *DefaultCtx) (accepted bool) {
 	}
 	err := a.cfg.RequestHeadHandler(ctx)
 	if err != nil && !ctx.responded {
-		a.cfg.ErrorHandler(ctx, err)
-	}
-	if err != nil && !ctx.responded {
-		_ = ctx.Status(StatusInternalServerError).SendStatus(StatusInternalServerError)
+		a.handleError(ctx, err)
 	}
 	return err == nil && !ctx.responded
 }
@@ -2336,8 +2336,11 @@ func (a *App) defaultRecoveryMiddleware() HandlerFunc {
 		defer func() {
 			if r := recover(); r != nil {
 				if dc, ok := c.(*DefaultCtx); ok && !dc.responded {
-					a.cfg.ErrorHandler(c, NewPanicError(r))
+					a.handleError(c, NewPanicError(r))
 				} else {
+					if dc, ok := c.(*DefaultCtx); ok {
+						abortFailedResponse(dc)
+					}
 					args := []any{"method", c.Method(), "path", c.Path(), "ip", c.IP(), "panic", "handler panic after response"}
 					if a.cfg.Debug || a.cfg.ErrorOptions.LogInternal {
 						args = append(args, "detail", RedactSecrets(fmt.Sprint(r)), "stack", RedactSecrets(string(debug.Stack())))
@@ -2348,6 +2351,40 @@ func (a *App) defaultRecoveryMiddleware() HandlerFunc {
 		}()
 		return c.Next()
 	}
+}
+
+// handleError is the single request-context error boundary. Applications can
+// customize the response through ErrorHandler; if that handler panics or leaves
+// the request unanswered, the safe built-in renderer still produces a response.
+func (a *App) handleError(ctx Ctx, err error) {
+	if ctx == nil || err == nil {
+		return
+	}
+	if dc, ok := ctx.(*DefaultCtx); ok && dc.responded {
+		return
+	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil && a.logger != nil {
+				a.logger.Error("error handler panicked", "panic", RedactSecrets(fmt.Sprint(r)))
+			}
+		}()
+		a.cfg.ErrorHandler(ctx, err)
+	}()
+	if dc, ok := ctx.(*DefaultCtx); !ok || !dc.responded {
+		_ = ctx.SafeErrorResponse(err)
+	}
+}
+
+func abortFailedResponse(ctx *DefaultCtx) {
+	if ctx == nil || !ctx.responded {
+		return
+	}
+	if ctx.h2 != nil {
+		ctx.h2.abort(h2InternalError)
+		return
+	}
+	ctx.forceClose = true
 }
 
 func (a *App) dispatch(ctx *DefaultCtx) {
@@ -2435,7 +2472,7 @@ func (a *App) dispatchCore(ctx *DefaultCtx) {
 		}
 		for rewrites := 1; ; rewrites++ {
 			if rewrites > 8 {
-				a.cfg.ErrorHandler(ctx, NewHTTPError(StatusLoopDetected, "REWRITE_LOOP", "Too many internal rewrites"))
+				a.handleError(ctx, NewHTTPError(StatusLoopDetected, "REWRITE_LOOP", "Too many internal rewrites"))
 				return
 			}
 			ctx.params = ctx.params[:0]
@@ -2487,8 +2524,13 @@ func (a *App) dispatchCore(ctx *DefaultCtx) {
 	}
 
 	if err != nil {
-		if !ctx.responded {
-			a.cfg.ErrorHandler(ctx, err)
+		if ctx.responded {
+			// The response is already committed, so it cannot be replaced by
+			// an error document. Abort the stream, or close the HTTP/1
+			// connection, so clients do not treat a partial response as complete.
+			abortFailedResponse(ctx)
+		} else {
+			a.handleError(ctx, err)
 		}
 	} else if !ctx.responded {
 		_ = ctx.SendStatus(200)
@@ -2773,11 +2815,4 @@ func (a *App) Queue() *DurableQueue {
 }
 
 // Pre-allocated 400 error response
-var serverError400 = []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError408 = []byte("HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError413 = []byte("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError503 = []byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError417 = []byte("HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError431 = []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-var serverError505 = []byte("HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var plainTextCT = []byte("text/plain; charset=utf-8")

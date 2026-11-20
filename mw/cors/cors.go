@@ -132,7 +132,7 @@ func New(config ...Config) fh.HandlerFunc {
 				"Access-Control-Request-Private-Network",
 			} {
 				if _, _, ambiguous := singleRequestHeader(ctx, name); ambiguous {
-					return ctx.Status(403).SendString("CORS preflight contains duplicate metadata")
+					return fh.NewHTTPError(fh.StatusForbidden, "CORS_PREFLIGHT_INVALID", "CORS preflight contains duplicate metadata")
 				}
 			}
 			ctx.Append("Vary", "Access-Control-Request-Method")
@@ -140,13 +140,13 @@ func New(config ...Config) fh.HandlerFunc {
 			ctx.Append("Vary", "Access-Control-Request-Private-Network")
 			requestedMethod := ctx.Get("Access-Control-Request-Method")
 			if !containsFold(cfg.AllowMethods, requestedMethod) {
-				return ctx.Status(403).SendString("CORS preflight method denied")
+				return fh.NewHTTPError(fh.StatusForbidden, "CORS_METHOD_DENIED", "CORS preflight method denied")
 			}
 			ctx.Set("Access-Control-Allow-Methods", methods)
 
 			requestHeaders := ctx.Get("Access-Control-Request-Headers")
 			if requestHeaders != "" && !headersAllowed(cfg.AllowHeaders, requestHeaders) {
-				return ctx.Status(403).SendString("CORS preflight headers denied")
+				return fh.NewHTTPError(fh.StatusForbidden, "CORS_HEADERS_DENIED", "CORS preflight headers denied")
 			}
 			if requestHeaders != "" && len(cfg.AllowHeaders) == 1 && cfg.AllowHeaders[0] == "*" {
 				ctx.Set("Access-Control-Allow-Headers", requestHeaders)

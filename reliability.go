@@ -374,12 +374,12 @@ func (r *Reliability) Middleware() HandlerFunc {
 			key := c.Get(r.cfg.IdempotencyHeader)
 			if key == "" {
 				if r.cfg.RequireIdempotencyKey {
-					return c.Status(StatusBadRequest).JSON(Map{"error": "missing_idempotency_key", "request_id": requestID})
+					return NewHTTPError(StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key is required").WithMeta("error", "missing_idempotency_key")
 				}
 				return c.Next()
 			}
 			if !validExternalID(key) {
-				return c.Status(StatusBadRequest).JSON(Map{"error": "invalid_idempotency_key", "request_id": requestID})
+				return NewHTTPError(StatusBadRequest, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key is invalid").WithMeta("error", "invalid_idempotency_key")
 			}
 			// Scope the store key to the caller's identity so an attacker
 			// who guesses or observes another caller's Idempotency-Key
@@ -2016,11 +2016,11 @@ func (r *Reliability) ApplyPolicy(c Ctx, p ReliabilityPolicy) error {
 			c.Set(r.cfg.IdempotencyHeader, key)
 		}
 		if key == "" && p.RequireIdempotency {
-			return c.Status(StatusBadRequest).JSON(Map{"error": "missing_idempotency_key", "request_id": requestID})
+			return NewHTTPError(StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key is required").WithMeta("error", "missing_idempotency_key")
 		}
 		if key != "" {
 			if !validExternalID(key) {
-				return c.Status(StatusBadRequest).JSON(Map{"error": "invalid_idempotency_key", "request_id": requestID})
+				return NewHTTPError(StatusBadRequest, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key is invalid").WithMeta("error", "invalid_idempotency_key")
 			}
 			reqHash := hashRequest(c.RequestHeader().Method, []byte(c.Path()), c.Body())
 			if p.IdempotencyFingerprint != nil {

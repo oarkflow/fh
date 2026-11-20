@@ -58,6 +58,16 @@ In scope: the `fh` root package, `mw/*` middleware, `pkg/*` supporting
 packages (HPACK, WebSocket, secure transport, HTTP signatures, storage
 adapters), and the kernel-assisted transport paths (`kernel/`, `native_transport.go`).
 
+### HTTP/2 flow control
+
+`fh` implements HTTP/2 in Go and does not embed NGINX. Its flow-control
+windows use checked signed 31-bit arithmetic; receive-credit refunds are
+bounded before a `WINDOW_UPDATE` is sent. HPACK decoding and concurrent
+streams are also capped by configuration. These controls address the
+flow-control and resource-boundary classes raised by recent NGINX HTTP/2
+advisories, but do not patch an NGINX reverse proxy deployed separately.
+Operators using NGINX must apply the upstream fixed release for their branch.
+
 Out of scope: findings that require an already-compromised host, denial of
 service via unbounded resource use that is already documented as an
 unmitigated limitation (see [README — Known Limitations](README.md#known-limitations)

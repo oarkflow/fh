@@ -262,7 +262,7 @@ func (s *staticFS) serve(c Ctx) error {
 			end = len(upath) - start
 		}
 		if upath[start:start+end] == ".." {
-			return c.Status(404).SendString("404 Not Found")
+			return NotFound("Resource not found")
 		}
 		start += end + 1
 	}
@@ -280,12 +280,12 @@ func (s *staticFS) servePath(c Ctx, upath string) error {
 			if s.cfg.NotFoundHandler != nil {
 				return s.cfg.NotFoundHandler(c)
 			}
-			return c.Status(404).SendString("404 Not Found")
+			return NotFound("Resource not found")
 		}
 		if errors.Is(err, fs.ErrPermission) {
-			return c.Status(403).SendString("Forbidden")
+			return NewHTTPError(StatusForbidden, "STATIC_FILE_FORBIDDEN", "Access to this file is forbidden").WithCause(err)
 		}
-		return c.Status(500).SendString("Internal Server Error")
+		return WrapHTTPError(err, StatusInternalServerError, "STATIC_FILE_STAT_FAILED", "Static file could not be served")
 	}
 
 	if info.IsDir() {
@@ -311,7 +311,7 @@ func (s *staticFS) serveDir(c Ctx, upath string) error {
 		return s.listDir(c, upath)
 	}
 
-	return c.Status(403).SendString("Forbidden")
+	return NewHTTPError(StatusForbidden, "STATIC_DIRECTORY_FORBIDDEN", "Directory browsing is disabled")
 }
 
 func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
@@ -410,7 +410,7 @@ func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
 			}
 			data, err := fs.ReadFile(s.fs, upath)
 			if err != nil {
-				return c.Status(500).SendString("Internal Server Error")
+				return WrapHTTPError(err, StatusInternalServerError, "STATIC_FILE_READ_FAILED", "Static file could not be served")
 			}
 			c.Set("Content-Encoding", "gzip")
 			c.Append("Vary", "Accept-Encoding")
@@ -437,7 +437,7 @@ func (s *staticFS) writeFile(c Ctx, upath string, info fs.FileInfo) error {
 func streamStaticFile(c Ctx, filesystem fs.FS, path string, size int64) error {
 	file, err := filesystem.Open(path)
 	if err != nil {
-		return c.Status(500).SendString("Internal Server Error")
+		return WrapHTTPError(err, StatusInternalServerError, "STATIC_FILE_OPEN_FAILED", "Static file could not be served")
 	}
 	defer file.Close()
 	return c.SendStreamLength(file, size)
@@ -450,16 +450,16 @@ func streamStaticFile(c Ctx, filesystem fs.FS, path string, size int64) error {
 func streamStaticFileRange(c Ctx, filesystem fs.FS, path string, start, size int64) error {
 	file, err := filesystem.Open(path)
 	if err != nil {
-		return c.Status(500).SendString("Internal Server Error")
+		return WrapHTTPError(err, StatusInternalServerError, "STATIC_FILE_OPEN_FAILED", "Static file could not be served")
 	}
 	defer file.Close()
 	if seeker, ok := file.(io.Seeker); ok {
 		if _, err := seeker.Seek(start, io.SeekStart); err != nil {
-			return c.Status(500).SendString("Internal Server Error")
+			return WrapHTTPError(err, StatusInternalServerError, "STATIC_FILE_SEEK_FAILED", "Static file could not be served")
 		}
 	} else if start > 0 {
 		if _, err := io.CopyN(io.Discard, file, start); err != nil {
-			return c.Status(500).SendString("Internal Server Error")
+			return WrapHTTPError(err, StatusInternalServerError, "STATIC_FILE_READ_FAILED", "Static file could not be served")
 		}
 	}
 	return c.SendStreamLength(io.LimitReader(file, size), size)
@@ -556,7 +556,7 @@ func isCompressible(mimeType string) bool {
 func (s *staticFS) listDir(c Ctx, upath string) error {
 	entries, truncated, err := readStaticDirEntries(s.fs, upath, s.cfg.MaxBrowseEntries)
 	if err != nil {
-		return c.Status(500).SendString("Internal Server Error")
+		return WrapHTTPError(err, StatusInternalServerError, "STATIC_DIRECTORY_READ_FAILED", "Directory listing could not be served")
 	}
 
 	if !s.cfg.ShowHidden {

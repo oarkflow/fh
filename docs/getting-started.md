@@ -250,7 +250,12 @@ app := fh.NewWithConfig(fh.Config{
 ```
 
 `ErrorHandler` does not return an error. Prefer `SafeErrorResponse` in
-production so private causes are not disclosed.
+production so private causes are not disclosed. Handler errors, panics, and
+request-context failures use this shared boundary. If a custom handler panics
+or returns without writing a response, fh falls back to the safe renderer.
+HTTP/1 framing errors occur before a request context exists; fh classifies and
+logs them through the same error policy and returns an RFC 9457 response before
+closing that connection.
 
 ## Full Example
 

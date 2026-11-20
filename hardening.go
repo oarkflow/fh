@@ -91,13 +91,13 @@ func defaultResourceGuardMiddlewareWithCounter(cfg Config, inFlight *atomic.Int6
 			cur := inFlight.Add(1)
 			defer inFlight.Add(-1)
 			if cur > maxInFlight {
-				return c.Status(StatusServiceUnavailable).SendString("Service Unavailable")
+				return NewHTTPError(StatusServiceUnavailable, "IN_FLIGHT_LIMIT", "Request capacity is temporarily exhausted").Temporary()
 			}
 		}
 		if maxGoroutines > 0 || maxHeap > 0 {
 			g, h := sample()
 			if maxGoroutines > 0 && g > maxGoroutines {
-				return c.Status(StatusServiceUnavailable).SendString("Service Unavailable")
+				return NewHTTPError(StatusServiceUnavailable, "GOROUTINE_LIMIT", "Server capacity is temporarily exhausted").Temporary()
 			}
 			if maxHeap > 0 && h > maxHeap {
 				now := time.Now().UnixNano()
@@ -113,8 +113,7 @@ func defaultResourceGuardMiddlewareWithCounter(cfg Config, inFlight *atomic.Int6
 						return c.Next()
 					}
 				}
-				c.Set("Retry-After", "1")
-				return c.Status(StatusServiceUnavailable).SendString("Temporarily under memory pressure")
+				return NewHTTPError(StatusServiceUnavailable, "HEAP_LIMIT", "Server is temporarily under memory pressure").WithHeader("Retry-After", "1").Temporary()
 			}
 		}
 		return c.Next()

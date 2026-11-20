@@ -84,7 +84,10 @@ func defaultConfig() Config {
 		Generator:         NewAtomicGenerator(),
 		Validator:         DefaultValidator,
 		ErrorHandler: func(ctx fh.Ctx, err error) error {
-			return ctx.Status(400).JSON(fh.Map{"error": "invalid_request_id", "message": err.Error()})
+			if errors.Is(err, ErrInvalidRequestID) {
+				err = fh.WrapHTTPError(err, fh.StatusBadRequest, "INVALID_REQUEST_ID", "Request ID is invalid")
+			}
+			return ctx.ErrorResponse(err)
 		},
 	}
 }

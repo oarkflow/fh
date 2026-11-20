@@ -87,7 +87,7 @@ func normalize(cfg Config) Config {
 		cfg.Reject = func(c fh.Ctx, _ string, _ int) error {
 			seconds := max(1, int((cfg.Window+time.Second-1)/time.Second))
 			c.Set("Retry-After", strconv.Itoa(seconds))
-			return c.Status(fh.StatusTooManyRequests).SendString("Too Many Requests")
+			return fh.RateLimited("Request rate limit exceeded", "1")
 		}
 	}
 	if cfg.Store == nil {

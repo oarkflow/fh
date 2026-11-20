@@ -698,7 +698,7 @@ skip.Not(pred)                    // NOT
 
 ### slowloris
 
-Guards against goroutine and heap exhaustion (e.g. from Slowloris-style connection-holding attacks) by periodically sampling runtime stats and rejecting requests once configured thresholds are exceeded.
+Guards against goroutine and heap exhaustion (e.g. from Slowloris-style connection-holding attacks) by periodically sampling runtime stats and rejecting requests once configured thresholds are exceeded. On heap pressure it makes one throttled garbage collection attempt before rejecting. The default rejection is a typed `503` and uses the app's shared error response path.
 
 ```go
 import "github.com/oarkflow/fh/mw/slowloris"

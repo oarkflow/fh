@@ -141,8 +141,8 @@ func normalize(cfg Config) Config {
 		cfg.KeyFunc = func(c fh.Ctx) string { return c.IP() }
 	}
 	if cfg.OnBlocked == nil {
-		cfg.OnBlocked = func(c fh.Ctx, _ *Score) error {
-			return c.Status(fh.StatusForbidden).SendString("Forbidden")
+		cfg.OnBlocked = func(fh.Ctx, *Score) error {
+			return fh.NewHTTPError(fh.StatusForbidden, "IP_REPUTATION_BLOCKED", "Request is not allowed")
 		}
 	}
 	if cfg.OnSuspicious == nil {
