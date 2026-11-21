@@ -15,6 +15,14 @@ type user struct {
 	Name string `json:"name"`
 }
 
+type messageResponse struct {
+	Message string `json:"message"`
+}
+
+type queryResponse struct {
+	Query string `json:"query"`
+}
+
 var users = benchmarkUsers()
 
 func benchmarkUsers() []user {
@@ -41,18 +49,14 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 	case string(path) == "/plaintext" && ctx.IsGet():
 		ctx.SetBodyString("Hello, World!")
 	case string(path) == "/json" && ctx.IsGet():
-		writeJSON(ctx, map[string]string{"message": "Hello, World!"})
+		writeJSON(ctx, messageResponse{Message: "Hello, World!"})
 	case len(path) > len("/users/") && string(path[:len("/users/")]) == "/users/" && ctx.IsGet():
 		writeJSON(ctx, user{Name: "User " + string(path[len("/users/"):])})
 	case string(path) == "/search" && ctx.IsGet():
-		writeJSON(ctx, map[string]string{"query": string(ctx.QueryArgs().Peek("q"))})
+		writeJSON(ctx, queryResponse{Query: string(ctx.QueryArgs().Peek("q"))})
 	case string(path) == "/echo" && ctx.IsPost():
-		var value map[string]any
-		if err := json.Unmarshal(ctx.PostBody(), &value); err != nil {
-			ctx.SetStatusCode(fasthttp.StatusBadRequest)
-			return
-		}
-		writeJSON(ctx, value)
+		ctx.SetContentType("application/json")
+		ctx.SetBody(ctx.PostBody())
 	case string(path) == "/users" && ctx.IsGet():
 		writeJSON(ctx, users)
 	case string(path) == "/__bench/stats" && ctx.IsGet():

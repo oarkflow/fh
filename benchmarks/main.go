@@ -129,7 +129,7 @@ func main() {
 	warmup := flag.Duration("warmup", time.Second, "warmup duration per server")
 	concurrency := flag.Int("concurrency", 32, "parallel keep-alive clients per server")
 	output := flag.String("output", "results/results.json", "JSON result file")
-	only := flag.String("only", "", "run only one server: fh, fiber, or fasthttp")
+	only := flag.String("only", "", "run only one server: fh, fiber, fasthttp, or sux")
 	seed := flag.Int64("seed", 0, "server order seed; zero selects a random seed")
 	scenarioNames := flag.String("scenarios", "", "comma-separated scenario names; empty runs all")
 	scenarioSeed := flag.Int64("scenario-seed", 0, "shuffle scenario order with this seed; zero keeps the default order")
@@ -139,12 +139,13 @@ func main() {
 	fhPort := flag.Int("fh-port", 3001, "port for fh")
 	fiberPort := flag.Int("fiber-port", 3003, "port for Fiber")
 	fasthttpPort := flag.Int("fasthttp-port", 3004, "port for fasthttp")
+	suxPort := flag.Int("sux-port", 3005, "port for sux")
 	targetHost := flag.String("host", "127.0.0.1", "server host for benchmark clients; use -nostart for remote servers")
 	flag.Parse()
 	if *duration <= 0 || *warmup < 0 || *concurrency <= 0 {
 		fatalf("duration and concurrency must be positive; warmup cannot be negative")
 	}
-	if err := validatePorts(*fhPort, *fiberPort, *fasthttpPort); err != nil {
+	if err := validatePorts(*fhPort, *fiberPort, *fasthttpPort, *suxPort); err != nil {
 		fatalf("invalid benchmark ports: %v", err)
 	}
 	*targetHost = strings.TrimSpace(*targetHost)
@@ -169,6 +170,7 @@ func main() {
 		{name: "fh", port: strconv.Itoa(*fhPort), dir: filepath.Join(root, "servers/go/fh")},
 		{name: "fiber", port: strconv.Itoa(*fiberPort), dir: filepath.Join(root, "servers/go/fiber")},
 		{name: "fasthttp", port: strconv.Itoa(*fasthttpPort), dir: filepath.Join(root, "servers/go/fasthttp")},
+		{name: "sux", port: strconv.Itoa(*suxPort), dir: filepath.Join(root, "servers/go/sux")},
 	}
 	for i := range servers {
 		binaryDir := *binDir

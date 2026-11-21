@@ -1,7 +1,7 @@
 # Apples-to-apples benchmark
 
-This benchmark compares fh, Fiber, and fasthttp using the same six application
-operations:
+This benchmark compares fh, Fiber, fasthttp, and
+[sux](https://code.icod.de/dalu/sux) using the same six application operations:
 
 - plaintext response
 - small JSON response
@@ -11,10 +11,12 @@ operations:
 - 100-element JSON response
 
 Each server binds only to `127.0.0.1`, disables response compression, uses a
-16 KiB read buffer and a 4 MiB request-body limit, and uses the same response
-shapes. The harness validates every route before measuring it, warms every
-route on each server, randomizes server order with a reported seed, then uses
-the same standard-library HTTP/1.1 keep-alive client pool,
+16 KiB header/read buffer and a 4 MiB request-body limit, and uses the same
+response shapes. `sux` is a router running on Go's `net/http` server, so its
+result includes that server's cost while the other rows include their respective
+HTTP server implementations. The harness validates every route before measuring
+it, warms every route on each server, randomizes server order with a reported
+seed, then uses the same standard-library HTTP/1.1 keep-alive client pool,
 duration, and concurrency for every server/scenario pair.
 
 Run:
@@ -33,11 +35,12 @@ Useful options:
 ./run.sh -duration=10s -warmup=2s -concurrency=64 -output=results/10s.json
 ```
 
-Use `-fh-port`, `-fiber-port`, and `-fasthttp-port` to choose alternate server
-ports when the defaults are occupied. Locally launched child servers bind to
-loopback, and the harness passes each selected address through `FH_BENCH_ADDR`.
+Use `-fh-port`, `-fiber-port`, `-fasthttp-port`, and `-sux-port` to choose
+alternate server ports when the defaults are occupied. Locally launched child
+servers bind to loopback, and the harness passes each selected address through
+`FH_BENCH_ADDR`.
 
-To keep client CPU and server CPU on separate machines, start all three server
+To keep client CPU and server CPU on separate machines, start all four server
 binaries on the target host, bound to a server address reachable from the
 benchmark client, then run the harness with `-nostart -host=<server-host>`:
 
@@ -46,13 +49,16 @@ cd benchmarks/servers/go
 go build -o /tmp/fh-server ./fh
 go build -o /tmp/fiber-server ./fiber
 go build -o /tmp/fasthttp-server ./fasthttp
+go build -o /tmp/sux-server ./sux
 FH_BENCH_ADDR=10.0.0.12:3001 /tmp/fh-server &
 fh_pid=$!
 FH_BENCH_ADDR=10.0.0.12:3003 /tmp/fiber-server &
 fiber_pid=$!
 FH_BENCH_ADDR=10.0.0.12:3004 /tmp/fasthttp-server &
 fasthttp_pid=$!
-trap 'kill "$fh_pid" "$fiber_pid" "$fasthttp_pid"; wait' EXIT
+FH_BENCH_ADDR=10.0.0.12:3005 /tmp/sux-server &
+sux_pid=$!
+trap 'kill "$fh_pid" "$fiber_pid" "$fasthttp_pid" "$sux_pid"; wait' EXIT
 wait
 ```
 

@@ -205,9 +205,6 @@ type paramShortcut struct {
 	fn       HandlerFunc
 }
 
-// staticShortcut keeps low-cardinality static routes in a compact slice. For
-// typical apps and hot paths this avoids hashing the path on every request; the
-// authoritative static map remains available for high-cardinality route tables.
 type staticShortcut struct {
 	path string
 	fn   HandlerFunc
@@ -571,7 +568,6 @@ func (r *Router) findNoLockBytesCore(shortcuts []staticShortcut, static map[stri
 			return h
 		}
 	}
-
 	// Exact static routes must always win, including when a large route table
 	// disables its bounded linear shortcut.
 	if len(paramsShortcuts) <= maxLinearRouteShortcuts {

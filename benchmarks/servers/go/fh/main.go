@@ -15,6 +15,14 @@ type user struct {
 	Name string `json:"name"`
 }
 
+type messageResponse struct {
+	Message string `json:"message"`
+}
+
+type queryResponse struct {
+	Query string `json:"query"`
+}
+
 var users = benchmarkUsers()
 
 func benchmarkUsers() []user {
@@ -46,20 +54,16 @@ func main() {
 
 	app.Get("/plaintext", func(c fh.Ctx) error { return c.SendString("Hello, World!") })
 	app.Get("/json", func(c fh.Ctx) error {
-		return c.JSON(fh.Map{"message": "Hello, World!"})
+		return c.JSON(messageResponse{Message: "Hello, World!"})
 	})
 	app.Get("/users/:id", func(c fh.Ctx) error {
 		return c.JSON(user{Name: "User " + c.Params("id")})
 	})
 	app.Get("/search", func(c fh.Ctx) error {
-		return c.JSON(fh.Map{"query": c.Query("q")})
+		return c.JSON(queryResponse{Query: c.Query("q")})
 	})
 	app.Post("/echo", func(c fh.Ctx) error {
-		var value map[string]any
-		if err := c.BodyParser(&value); err != nil {
-			return err
-		}
-		return c.JSON(value)
+		return c.EchoJSON()
 	})
 	app.Get("/users", func(c fh.Ctx) error { return c.JSON(users) })
 	app.Get("/__bench/stats", func(c fh.Ctx) error { return c.JSON(benchstats.Read()) })
